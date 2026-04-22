@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const codexBuiltinImageModelID = "gpt-image-2"
+
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
 	Claude      []*ModelInfo `json:"claude"`
@@ -48,22 +50,22 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexFree)
+	return WithCodexBuiltins(cloneModelInfos(getModels().CodexFree))
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
 func GetCodexTeamModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexTeam)
+	return WithCodexBuiltins(cloneModelInfos(getModels().CodexTeam))
 }
 
 // GetCodexPlusModels returns model definitions for the Codex plus plan tier.
 func GetCodexPlusModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexPlus)
+	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPlus))
 }
 
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexPro)
+	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -76,133 +78,69 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
-// GetCodeBuddyModels returns the available models for CodeBuddy (Tencent).
-// These models are served through the copilot.tencent.com API.
-func GetCodeBuddyModels() []*ModelInfo {
-	now := int64(1748044800) // 2025-05-24
-	return []*ModelInfo{
-		{
-			ID:                  "auto",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "Auto",
-			Description:         "Automatic model selection via CodeBuddy",
-			ContextLength:       128000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "glm-5v-turbo",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "GLM-5v Turbo",
-			Description:         "GLM-5v Turbo via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "glm-5.1",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "GLM-5.1",
-			Description:         "GLM-5.1 via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "glm-5.0-turbo",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "GLM-5.0 Turbo",
-			Description:         "GLM-5.0 Turbo via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "glm-5.0",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "GLM-5.0",
-			Description:         "GLM-5.0 via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "glm-4.7",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "GLM-4.7",
-			Description:         "GLM-4.7 via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "minimax-m2.7",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "MiniMax M2.7",
-			Description:         "MiniMax M2.7 via CodeBuddy",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "kimi-k2.5",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "Kimi K2.5",
-			Description:         "Kimi K2.5 via CodeBuddy",
-			ContextLength:       256000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "kimi-k2-thinking",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "Kimi K2 Thinking",
-			Description:         "Kimi K2 Thinking via CodeBuddy",
-			ContextLength:       256000,
-			MaxCompletionTokens: 32768,
-			Thinking:            &ThinkingSupport{ZeroAllowed: true},
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "deepseek-v3-2-volc",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "tencent",
-			Type:                "codebuddy",
-			DisplayName:         "DeepSeek V3.2 (Volc)",
-			Description:         "DeepSeek V3.2 via CodeBuddy",
-			ContextLength:       128000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
+// WithCodexBuiltins injects hard-coded Codex-only model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+}
+
+func codexBuiltinImageModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImageModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2",
+		Version:     codexBuiltinImageModelID,
 	}
+}
+
+func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
+	if len(extras) == 0 {
+		return models
+	}
+
+	extraIDs := make(map[string]struct{}, len(extras))
+	extraList := make([]*ModelInfo, 0, len(extras))
+	for _, extra := range extras {
+		if extra == nil {
+			continue
+		}
+		id := strings.TrimSpace(extra.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := extraIDs[key]; exists {
+			continue
+		}
+		extraIDs[key] = struct{}{}
+		extraList = append(extraList, cloneModelInfo(extra))
+	}
+
+	if len(extraList) == 0 {
+		return models
+	}
+
+	filtered := make([]*ModelInfo, 0, len(models)+len(extraList))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		if _, exists := extraIDs[strings.ToLower(id)]; exists {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+
+	filtered = append(filtered, extraList...)
+	return filtered
 }
 
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
