@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
 
 concurrency:
@@ -123,6 +124,16 @@ jobs:
           go-version: '>=1.26.0'
           cache: true
 
+      - name: Refresh models catalog
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          git fetch --depth 1 https://github.com/router-for-me/models.git main
+          git show FETCH_HEAD:models.json > internal/registry/models/models.json
+          if ! git diff --quiet -- internal/registry/models/models.json; then
+            git add internal/registry/models/models.json
+            git commit -m "chore(upstream-sync): refresh models catalog"
+          fi
+
       - name: Build gate
         if: steps.check.outputs.has_changes == 'true'
         id: build
@@ -186,18 +197,31 @@ jobs:
           [ "${{ steps.build.outputs.passed }}" = "false" ] && STATUS="${STATUS}- [!] \`go build\` FAILED\n"
           [ "${{ steps.test.outputs.passed }}" = "false" ] && STATUS="${STATUS}- [!] \`go test\` FAILED\n"
           [ -z "${STATUS}" ] && STATUS="- [OK] Clean merge + gates green (force_pr requested)\n"
+          TITLE="chore(upstream-sync): $(date -u +%Y-%m-%d) pull from router-for-me/CLIProxyAPI"
           BODY=$(printf "## Upstream sync: \`router-for-me/CLIProxyAPI\` → \`main\`\n\nCommits being synced: \`${{ steps.check.outputs.merge_base }}..${{ steps.check.outputs.upstream_head }}\`\n\n### Gate status\n%b\n### What to do\n1. Review the diff — especially \`cmd/server/main.go\`, \`go.mod\`, \`go.sum\`.\n2. Plus-only provider dirs are protected by \`.gitattributes merge=ours\`.\n3. Re-run failing gates locally: \`go build ./... && go test ./...\`.\n4. Merge when green.\n" "${STATUS}")
           set +e
           PR_URL=$(gh pr create \
             --base main \
             --head "${{ steps.branch.outputs.name }}" \
-            --title "chore(upstream-sync): $(date -u +%Y-%m-%d) pull from router-for-me/CLIProxyAPI" \
+            --title "${TITLE}" \
             --body "${BODY}" 2>&1)
           PR_EXIT=$?
+          if [ $PR_EXIT -ne 0 ]; then
+            echo "[!] gh pr create exited $PR_EXIT — retrying via REST API."
+            echo "$PR_URL"
+            PR_URL=$(gh api "repos/${{ github.repository }}/pulls" \
+              -X POST \
+              -f base=main \
+              -f head="${{ steps.branch.outputs.name }}" \
+              -f title="${TITLE}" \
+              -f body="${BODY}" \
+              --jq '.html_url' 2>&1)
+            PR_EXIT=$?
+          fi
           set -e
           echo "$PR_URL"
           if [ $PR_EXIT -ne 0 ]; then
-            echo "[!] gh pr create exited $PR_EXIT — check log above."
+            echo "[!] PR creation exited $PR_EXIT — check log above."
             exit $PR_EXIT
           fi
           # Add label after create; tolerate label add failures (don't fail the job)

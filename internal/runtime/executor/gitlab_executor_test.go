@@ -505,8 +505,8 @@ func TestGitLabExecutorExecuteStreamUsesAnthropicGateway(t *testing.T) {
 	if gotPath != "/v1/proxy/anthropic/v1/messages" {
 		t.Fatalf("Path = %q, want %q", gotPath, "/v1/proxy/anthropic/v1/messages")
 	}
-	if !strings.Contains(gotBetaHeader, gitLabContext1MBeta) {
-		t.Fatalf("Anthropic-Beta = %q, want to contain %q", gotBetaHeader, gitLabContext1MBeta)
+	if strings.Contains(gotBetaHeader, gitLabContext1MBeta) {
+		t.Fatalf("Anthropic-Beta = %q, should not contain obsolete %q", gotBetaHeader, gitLabContext1MBeta)
 	}
 	if gotUserAgent != gitLabNativeUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", gotUserAgent, gitLabNativeUserAgent)

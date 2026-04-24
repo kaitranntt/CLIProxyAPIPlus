@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -25,8 +26,8 @@ import (
 const defaultAPICallTimeout = 60 * time.Second
 
 const (
-	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOAuthClientSecret = "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"
+	geminiOAuthClientIDEnv = "CLIPROXY_GEMINI_OAUTH_CLIENT_ID"
+	geminiOAuthSecretEnv   = "CLIPROXY_GEMINI_OAUTH_CLIENT_SECRET"
 )
 
 var geminiOAuthScopes = []string{
@@ -36,8 +37,8 @@ var geminiOAuthScopes = []string{
 }
 
 const (
-	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityOAuthClientSecret = "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"
+	antigravityOAuthClientIDEnv     = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
+	antigravityOAuthClientSecretEnv = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
 )
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
@@ -373,8 +374,8 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	}
 
 	conf := &oauth2.Config{
-		ClientID:     geminiOAuthClientID,
-		ClientSecret: geminiOAuthClientSecret,
+		ClientID:     oauthClientValue(metadata, "client_id", geminiOAuthClientIDEnv),
+		ClientSecret: oauthClientValue(metadata, "client_secret", geminiOAuthSecretEnv),
 		Scopes:       geminiOAuthScopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -428,8 +429,13 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
-	form.Set("client_id", antigravityOAuthClientID)
-	form.Set("client_secret", antigravityOAuthClientSecret)
+	clientID := oauthClientValue(metadata, "client_id", antigravityOAuthClientIDEnv)
+	clientSecret := oauthClientValue(metadata, "client_secret", antigravityOAuthClientSecretEnv)
+	if clientID == "" || clientSecret == "" {
+		return "", fmt.Errorf("antigravity oauth client credentials missing")
+	}
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -581,6 +587,13 @@ func stringValue(metadata map[string]any, key string) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
+}
+
+func oauthClientValue(metadata map[string]any, key string, envName string) string {
+	if value := stringValue(metadata, key); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv(envName))
 }
 
 func cloneMap(in map[string]any) map[string]any {

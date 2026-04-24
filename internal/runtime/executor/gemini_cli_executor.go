@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,10 +34,10 @@ import (
 )
 
 const (
-	codeAssistEndpoint      = "https://cloudcode-pa.googleapis.com"
-	codeAssistVersion       = "v1internal"
-	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOAuthClientSecret = "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"
+	codeAssistEndpoint     = "https://cloudcode-pa.googleapis.com"
+	codeAssistVersion      = "v1internal"
+	geminiOAuthClientIDEnv = "CLIPROXY_GEMINI_OAUTH_CLIENT_ID"
+	geminiOAuthSecretEnv   = "CLIPROXY_GEMINI_OAUTH_CLIENT_SECRET"
 )
 
 var geminiOAuthScopes = []string{
@@ -615,8 +616,8 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	}
 
 	conf := &oauth2.Config{
-		ClientID:     geminiOAuthClientID,
-		ClientSecret: geminiOAuthClientSecret,
+		ClientID:     geminiOAuthClientValue(metadata, "client_id", geminiOAuthClientIDEnv),
+		ClientSecret: geminiOAuthClientValue(metadata, "client_secret", geminiOAuthSecretEnv),
 		Scopes:       geminiOAuthScopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -633,6 +634,13 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	}
 	updateGeminiCLITokenMetadata(auth, base, currentToken)
 	return oauth2.ReuseTokenSource(currentToken, src), base, nil
+}
+
+func geminiOAuthClientValue(metadata map[string]any, key string, envName string) string {
+	if value := stringValue(metadata, key); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv(envName))
 }
 
 func updateGeminiCLITokenMetadata(auth *cliproxyauth.Auth, base map[string]any, tok *oauth2.Token) {
@@ -898,7 +906,14 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
 			seconds, err := strconv.Atoi(matches[1])
 			if err == nil {
-				return new(time.Duration(seconds) * time.Second), nil
+				duration := time.Duration(seconds) * time.Second
+				return &duration, nil
+			}
+		}
+		reHuman := regexp.MustCompile(`after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)\.?`)
+		if matches := reHuman.FindStringSubmatch(strings.ToLower(message)); len(matches) > 1 {
+			if duration, err := time.ParseDuration(matches[1]); err == nil && duration > 0 {
+				return &duration, nil
 			}
 		}
 	}

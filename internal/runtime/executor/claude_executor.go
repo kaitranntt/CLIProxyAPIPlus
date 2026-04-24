@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/textproto"
 	"strings"
 	"time"
 
@@ -911,23 +910,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		baseBetas += ",interleaved-thinking-2025-05-14"
 	}
 
-	hasClaude1MHeader := false
-	if ginHeaders != nil {
-		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
-			hasClaude1MHeader = true
-		}
-	}
-	// Also check auth attributes — GitLab Duo sets gitlab_duo_force_context_1m
-	// when routing through the Anthropic gateway, but the gin headers won't have
-	// X-CPA-CLAUDE-1M because the request is internally constructed.
-	if !hasClaude1MHeader && auth != nil && auth.Attributes != nil {
-		if auth.Attributes["gitlab_duo_force_context_1m"] == "true" {
-			hasClaude1MHeader = true
-		}
-	}
-
 	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 || hasClaude1MHeader {
+	if len(extraBetas) > 0 {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			betaName := strings.TrimSpace(b)
@@ -941,9 +925,6 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				baseBetas += "," + beta
 				existingSet[beta] = true
 			}
-		}
-		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
-			baseBetas += ",context-1m-2025-08-07"
 		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
