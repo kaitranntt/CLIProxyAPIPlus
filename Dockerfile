@@ -16,6 +16,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION
 
 FROM alpine:3.22.0
 
+LABEL org.opencontainers.image.source="https://github.com/rgr4y/CLIProxyAPIPlus"
+LABEL org.opencontainers.image.description="CLIProxyAPI Plus - Multi-provider AI CLI proxy"
+LABEL org.opencontainers.image.licenses="MIT"
+
 RUN apk add --no-cache tzdata
 
 RUN mkdir /CLIProxyAPI
