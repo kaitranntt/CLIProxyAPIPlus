@@ -388,6 +388,10 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
+	s.engine.HEAD("/", func(c *gin.Context) {
+		log.Debugf("HEAD / from %s", c.ClientIP())
+		c.Status(http.StatusOK)
+	})
 
 	// Event logging endpoint - handles Claude Code telemetry requests
 	// Returns 200 OK to prevent 404 errors in logs
