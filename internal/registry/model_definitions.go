@@ -78,6 +78,71 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// WithCodexBuiltins injects hard-coded Codex-only model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+}
+
+func codexBuiltinImageModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImageModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2",
+		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
+	if len(extras) == 0 {
+		return models
+	}
+
+	extraIDs := make(map[string]struct{}, len(extras))
+	extraList := make([]*ModelInfo, 0, len(extras))
+	for _, extra := range extras {
+		if extra == nil {
+			continue
+		}
+		id := strings.TrimSpace(extra.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := extraIDs[key]; exists {
+			continue
+		}
+		extraIDs[key] = struct{}{}
+		extraList = append(extraList, cloneModelInfo(extra))
+	}
+
+	if len(extraList) == 0 {
+		return models
+	}
+
+	filtered := make([]*ModelInfo, 0, len(models)+len(extraList))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		if _, exists := extraIDs[strings.ToLower(id)]; exists {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+
+	filtered = append(filtered, extraList...)
+	return filtered
+}
+
 // GetCodeBuddyModels returns the available models for CodeBuddy (Tencent).
 // These models are served through the copilot.tencent.com API.
 func GetCodeBuddyModels() []*ModelInfo {
@@ -205,71 +270,6 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 	}
-}
-
-// WithCodexBuiltins injects hard-coded Codex-only model definitions that should
-// not depend on remote models.json updates. Built-ins replace any matching IDs
-// already present in the provided slice.
-func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImageModelInfo())
-}
-
-func codexBuiltinImageModelInfo() *ModelInfo {
-	return &ModelInfo{
-		ID:          codexBuiltinImageModelID,
-		Object:      "model",
-		Created:     1704067200, // 2024-01-01
-		OwnedBy:     "openai",
-		Type:        "openai",
-		DisplayName: "GPT Image 2",
-		Version:     codexBuiltinImageModelID,
-	}
-}
-
-func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
-	if len(extras) == 0 {
-		return models
-	}
-
-	extraIDs := make(map[string]struct{}, len(extras))
-	extraList := make([]*ModelInfo, 0, len(extras))
-	for _, extra := range extras {
-		if extra == nil {
-			continue
-		}
-		id := strings.TrimSpace(extra.ID)
-		if id == "" {
-			continue
-		}
-		key := strings.ToLower(id)
-		if _, exists := extraIDs[key]; exists {
-			continue
-		}
-		extraIDs[key] = struct{}{}
-		extraList = append(extraList, cloneModelInfo(extra))
-	}
-
-	if len(extraList) == 0 {
-		return models
-	}
-
-	filtered := make([]*ModelInfo, 0, len(models)+len(extraList))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		id := strings.TrimSpace(model.ID)
-		if id == "" {
-			continue
-		}
-		if _, exists := extraIDs[strings.ToLower(id)]; exists {
-			continue
-		}
-		filtered = append(filtered, model)
-	}
-
-	filtered = append(filtered, extraList...)
-	return filtered
 }
 
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
