@@ -35,10 +35,6 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 <td>感谢 BmoPlus 赞助了本项目！BmoPlus 是一家专为AI订阅重度用户打造的可靠 AI 账号代充服务商，提供稳定的 ChatGPT Plus / ChatGPT Pro(全程质保) / Claude Pro / Super Grok / Gemini Pro 的官方代充&成品账号。 通过<a href="https://shop.bmoplus.com/?utm_source=github" target="_blank">BmoPlus AI成品号专卖/代充</a>注册下单的用户，可享GPT <b>官网订阅一折</b> 的震撼价格！</td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.lingtrue.com/register"><img src="./assets/lingtrue.png" alt="LingtrueAPI" width="150"></a></td>
-<td>感谢 LingtrueAPI 对本项目的赞助！LingtrueAPI 是一家全球大模型API中转服务平台，提供Claude Code、Codex、Gemini 等多种顶级模型API调用服务，致力于让用户以低成本、高稳定性链接全球AI能力。LingtrueAPI为本软件用户提供了特别优惠：使用<a href="https://www.lingtrue.com/register" target="_blank">此链接</a>注册，并在首次充值时输入 "LingtrueAPI" 优惠码即可享受9折优惠。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://poixe.com/i/m8kvep"><img src="./assets/poixeai.png" alt="PoixeAI" width="150"></a></td>
 <td>感谢 Poixe AI 对本项目的赞助！Poixe AI 提供可靠的 AI 模型接口服务，您可以使用平台提供的 LLM API 接口轻松构建 AI 产品，同时也可以成为供应商，为平台提供大模型资源以赚取收益。通过 CLIProxyAPI <a href="https://poixe.com/i/m8kvep" target="_blank">专属链接</a>注册，充值额外赠送 $5 美金</td>
 </tr>
@@ -186,6 +182,10 @@ Shadow AI 是一款专为受限环境设计的 AI 辅助工具。提供无窗口
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
 独立的 CLIProxyAPI 使用量持久化与可视化服务，定期同步 CPA 数据，存储到 SQLite，提供聚合 API，并内置使用量分析与统计仪表盘。
+
+### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
+
+基于 CLIProxyAPI 的 Windows Codex CLI 本地优先桌面管理平台，聚焦简化本机配置、账号与运行状态管理，并为本地用户提供更完整的 Codex CLI 使用体验。
 
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
