@@ -35,10 +35,6 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 <td>本プロジェクトにご支援いただいた BmoPlus に感謝いたします！BmoPlusは、AIサブスクリプションのヘビーユーザー向けに特化した信頼性の高いAIアカウントサービスプロバイダーであり、安定した ChatGPT Plus / ChatGPT Pro (完全保証) / Claude Pro / Super Grok / Gemini Pro の公式代行チャージおよび即納アカウントを提供しています。こちらの<a href="https://shop.bmoplus.com/?utm_source=github">BmoPlus AIアカウント専門店/代行チャージ</a>経由でご登録・ご注文いただいたユーザー様は、GPTを <b>公式サイト価格の約1割（90% OFF）</b> という驚異的な価格でご利用いただけます！</td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.lingtrue.com/register"><img src="./assets/lingtrue.png" alt="LingtrueAPI" width="150"></a></td>
-<td>LingtrueAPIのスポンサーシップに感謝します！LingtrueAPIはグローバルな大規模モデルAPIリレーサービスプラットフォームで、Claude Code、Codex、GeminiなどのトップモデルAPI呼び出しサービスを提供し、ユーザーが低コストかつ高い安定性で世界中のAI能力に接続できるよう支援しています。LingtrueAPIは本ソフトウェアのユーザーに特別割引を提供しています：<a href="https://www.lingtrue.com/register">こちらのリンク</a>から登録し、初回チャージ時にプロモーションコード「LingtrueAPI」を入力すると10%割引になります。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://poixe.com/i/m8kvep"><img src="./assets/poixeai.png" alt="PoixeAI" width="150"></a></td>
 <td>Poixe AIのスポンサーシップに感謝します！Poixe AIは信頼できるAIモデルAPIサービスを提供しており、プラットフォームが提供するLLM APIを使って簡単にAI製品を構築できます。また、サプライヤーとしてプラットフォームに大規模モデルのリソースを提供し、収益を得ることも可能です。CLIProxyAPIの<a href="https://poixe.com/i/m8kvep">専用リンク</a>から登録すると、チャージ時に追加で$5が付与されます。</td>
 </tr>
@@ -185,6 +181,10 @@ CLIProxyAPI向けのすぐに使えるクロスプラットフォームのクォ
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
 CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CPAデータを定期同期してSQLiteに保存し、集計APIと、使用量や各種統計を確認できる組み込みダッシュボードを提供します。
+
+### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
+
+CLIProxyAPIを基盤にしたWindows向けのローカル優先Codex CLIデスクトップ管理プラットフォーム。ローカル設定、アカウント、実行状態の管理を簡素化し、ローカルユーザーにより包括的なCodex CLI体験を提供します。
 
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
