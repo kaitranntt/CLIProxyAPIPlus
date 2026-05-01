@@ -70,6 +70,36 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### 使用 Docker 运行
+
+每个发布标签都会发布多架构镜像（`linux/amd64`、`linux/arm64`）到 Docker Hub 和 GitHub Container Registry。
+
+```sh
+# 拉取指定版本（推荐）
+docker pull kaitranntt/cli-proxy-api-plus:v6.9.45-0
+
+# 或拉取最新发布版本
+docker pull kaitranntt/cli-proxy-api-plus:latest
+```
+
+GHCR 镜像：
+
+```sh
+docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:latest
+```
+
+也可以使用仓库内置的 `docker-compose.yml`（默认使用 Docker Hub 镜像；如需覆盖，可设置 `CLI_PROXY_IMAGE`）：
+
+```sh
+git clone https://github.com/kaitranntt/CLIProxyAPIPlus.git
+cd CLIProxyAPIPlus
+docker compose up -d
+```
+
+可用标签：
+- Docker Hub: [`kaitranntt/cli-proxy-api-plus`](https://hub.docker.com/r/kaitranntt/cli-proxy-api-plus)
+- GHCR: [`ghcr.io/kaitranntt/cli-proxy-api-plus`](https://github.com/kaitranntt/CLIProxyAPIPlus/pkgs/container/cli-proxy-api-plus)
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

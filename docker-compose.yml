@@ -1,6 +1,6 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-ghcr.io/kaitranntt/cli-proxy-api-plus:latest}
+    image: ${CLI_PROXY_IMAGE:-kaitranntt/cli-proxy-api-plus:latest}
     pull_policy: always
     build:
       context: .

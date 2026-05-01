@@ -72,17 +72,23 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 ### Run with Docker
 
-Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHub Container Registry on every release tag.
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to Docker Hub and GitHub Container Registry on every release tag.
 
 ```sh
 # Pull a specific version (recommended)
-docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:v6.9.45-0
+docker pull kaitranntt/cli-proxy-api-plus:v6.9.45-0
 
 # Or pull the latest published release
+docker pull kaitranntt/cli-proxy-api-plus:latest
+```
+
+GHCR mirror:
+
+```sh
 docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:latest
 ```
 
-Or use the included `docker-compose.yml` (defaults to the GHCR image, builds from source if `CLI_PROXY_IMAGE` is overridden):
+Or use the included `docker-compose.yml` (defaults to the Docker Hub image, builds from source if `CLI_PROXY_IMAGE` is overridden):
 
 ```sh
 git clone https://github.com/kaitranntt/CLIProxyAPIPlus.git
@@ -90,7 +96,9 @@ cd CLIProxyAPIPlus
 docker compose up -d
 ```
 
-Available tags: [`ghcr.io/kaitranntt/cli-proxy-api-plus`](https://github.com/kaitranntt/CLIProxyAPIPlus/pkgs/container/cli-proxy-api-plus).
+Available tags:
+- Docker Hub: [`kaitranntt/cli-proxy-api-plus`](https://hub.docker.com/r/kaitranntt/cli-proxy-api-plus)
+- GHCR: [`ghcr.io/kaitranntt/cli-proxy-api-plus`](https://github.com/kaitranntt/CLIProxyAPIPlus/pkgs/container/cli-proxy-api-plus)
 
 ## Management API
 
