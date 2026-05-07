@@ -136,6 +136,40 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceTier string
+		want        string
+	}{
+		{name: "priority passes through", serviceTier: "priority", want: "priority"},
+		{name: "fast normalizes to priority", serviceTier: "fast", want: "priority"},
+		{name: "invalid tier is omitted", serviceTier: "default", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToCodex("test-model", []byte(`{
+				"model": "claude-3-opus",
+				"service_tier": "`+tt.serviceTier+`",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`), false)
+			resultJSON := gjson.ParseBytes(result)
+
+			if tt.want == "" {
+				if resultJSON.Get("service_tier").Exists() {
+					t.Fatalf("service_tier should be omitted. Output: %s", string(result))
+				}
+				return
+			}
+
+			if got := resultJSON.Get("service_tier").String(); got != tt.want {
+				t.Fatalf("service_tier = %q, want %q. Output: %s", got, tt.want, string(result))
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ToolChoiceModeMapping(t *testing.T) {
 	tests := []struct {
 		name                string
