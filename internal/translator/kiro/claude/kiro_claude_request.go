@@ -679,9 +679,9 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 				history = append(history, KiroHistoryMessage{
 					AssistantResponseMessage: &assistantMsg,
 				})
-				// Create a "Continue" user message as currentMessage
+				// Create a continuation user message as currentMessage
 				currentUserMsg = &KiroUserInputMessage{
-					Content: "Continue",
+					Content: kirocommon.DefaultUserContent,
 					ModelID: modelID,
 					Origin:  origin,
 				}
@@ -768,9 +768,9 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 	// CRITICAL: Kiro API requires content to be non-empty
 	if strings.TrimSpace(finalContent) == "" {
 		if len(toolResults) > 0 {
-			finalContent = "Tool results provided."
+			finalContent = kirocommon.DefaultUserContentWithToolResults
 		} else {
-			finalContent = "Continue"
+			finalContent = kirocommon.DefaultUserContent
 		}
 		log.Debugf("kiro: content was empty, using default: %s", finalContent)
 	}

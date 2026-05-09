@@ -554,9 +554,9 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 				// CRITICAL: Kiro API requires content to be non-empty for history messages
 				if strings.TrimSpace(userMsg.Content) == "" {
 					if len(toolResults) > 0 {
-						userMsg.Content = "Tool results provided."
+						userMsg.Content = kirocommon.DefaultUserContentWithToolResults
 					} else {
-						userMsg.Content = "Continue"
+						userMsg.Content = kirocommon.DefaultUserContent
 					}
 				}
 				// For history messages, embed tool results in context
@@ -577,7 +577,7 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 			// before this assistant message to maintain proper conversation structure
 			if len(pendingToolResults) > 0 {
 				syntheticUserMsg := KiroUserInputMessage{
-					Content: "Tool results provided.",
+					Content: kirocommon.DefaultUserContentWithToolResults,
 					ModelID: modelID,
 					Origin:  origin,
 					UserInputMessageContext: &KiroUserInputMessageContext{
@@ -594,9 +594,9 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 				history = append(history, KiroHistoryMessage{
 					AssistantResponseMessage: &assistantMsg,
 				})
-				// Create a "Continue" user message as currentMessage
+				// Create a continuation user message as currentMessage
 				currentUserMsg = &KiroUserInputMessage{
-					Content: "Continue",
+					Content: kirocommon.DefaultUserContent,
 					ModelID: modelID,
 					Origin:  origin,
 				}
@@ -631,7 +631,7 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 		// If there's no current user message, create a synthetic one for the tool results
 		if currentUserMsg == nil {
 			currentUserMsg = &KiroUserInputMessage{
-				Content: "Tool results provided.",
+				Content: kirocommon.DefaultUserContentWithToolResults,
 				ModelID: modelID,
 				Origin:  origin,
 			}
@@ -925,9 +925,9 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 	// CRITICAL: Kiro API requires content to be non-empty
 	if strings.TrimSpace(finalContent) == "" {
 		if len(toolResults) > 0 {
-			finalContent = "Tool results provided."
+			finalContent = kirocommon.DefaultUserContentWithToolResults
 		} else {
-			finalContent = "Continue"
+			finalContent = kirocommon.DefaultUserContent
 		}
 		log.Debugf("kiro-openai: content was empty, using default: %s", finalContent)
 	}
