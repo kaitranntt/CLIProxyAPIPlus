@@ -147,7 +147,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 
 		if startIdx == -1 {
 			// No more thinking tags, add remaining as text (preserve all whitespace)
-			if remaining != "" {
+			if strings.TrimSpace(remaining) != "" {
 				blocks = append(blocks, map[string]interface{}{
 					"type": "text",
 					"text": remaining,
@@ -159,7 +159,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		// Add text before thinking tag (preserve whitespace, including pure-whitespace blocks)
 		if startIdx > 0 {
 			textBefore := remaining[:startIdx]
-			if textBefore != "" {
+			if strings.TrimSpace(textBefore) != "" {
 				blocks = append(blocks, map[string]interface{}{
 					"type": "text",
 					"text": textBefore,
