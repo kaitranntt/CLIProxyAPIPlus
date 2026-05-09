@@ -6,6 +6,8 @@ package registry
 import (
 	"strings"
 	"time"
+
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 )
 
 // KiroAPIModel represents a model from Kiro API response.
@@ -97,16 +99,36 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 }
 
 // GenerateAgenticVariants creates -agentic variants for each model.
-// Agentic variants are optimized for coding agents with chunked writes.
+// Agentic variants are optimized for coding agents with chunked writes and
+// only make sense when Kiro system-prompt injection is enabled — the agentic
+// behavior is layered on top of the wrapped system prompt. If injection is
+// disabled (the default), variants are not generated and the input list is
+// returned unchanged so clients only see models that will actually behave
+// differently from their base counterparts.
 //
 // Parameters:
 //   - models: Base models to generate variants for
 //
 // Returns:
-//   - []*ModelInfo: Combined list of base models and their agentic variants
+//   - []*ModelInfo: Base models, plus agentic variants when injection is enabled.
 func GenerateAgenticVariants(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
 		return nil
+	}
+
+	// Agentic variants are a no-op unless system-prompt injection is on.
+	// Without it, the "-agentic" suffix doesn't change backend behavior, so
+	// exposing both the base and the variant is just noise.
+	if !kirocommon.IsSystemPromptInjectEnabled() {
+		// Return a copy so callers don't mutate our input slice.
+		result := make([]*ModelInfo, 0, len(models))
+		for _, model := range models {
+			if model == nil {
+				continue
+			}
+			result = append(result, model)
+		}
+		return result
 	}
 
 	// Pre-allocate result with capacity for both base models and variants

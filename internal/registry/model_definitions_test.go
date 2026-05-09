@@ -33,36 +33,15 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 	assertGPT55ModelInfo(t, "lookup", model)
 }
 
-func TestKiroStaticModelsIncludeClaudeOpus47Variants(t *testing.T) {
-	tests := []struct {
-		id          string
-		displayName string
-	}{
-		{
-			id:          "kiro-claude-opus-4-7",
-			displayName: "Kiro Claude Opus 4.7",
-		},
-		{
-			id:          "kiro-claude-opus-4-7-agentic",
-			displayName: "Kiro Claude Opus 4.7 (Agentic)",
-		},
-	}
-
-	kiroModels := GetKiroModels()
-	for _, tt := range tests {
-		t.Run(tt.id, func(t *testing.T) {
-			model := findModelInfo(kiroModels, tt.id)
-			if model == nil {
-				t.Fatalf("expected GetKiroModels to include %q", tt.id)
-			}
-			if model.DisplayName != tt.displayName {
-				t.Fatalf("display name mismatch for %q: got %q, want %q", tt.id, model.DisplayName, tt.displayName)
-			}
-			lookup := LookupStaticModelInfo(tt.id)
-			if lookup == nil {
-				t.Fatalf("expected LookupStaticModelInfo to find %q", tt.id)
-			}
-		})
+func TestKiroStaticModelsAreDynamic(t *testing.T) {
+	// Kiro model discovery is entirely dynamic (see fetchKiroModels in
+	// sdk/cliproxy/service.go). The static registry intentionally returns
+	// nothing so new Kiro models (GLM, DeepSeek, MiniMax, future additions)
+	// flow through without code changes. This test pins that contract: if
+	// anyone reintroduces a hardcoded static list, they should also decide
+	// what happens to the dynamic path.
+	if models := GetKiroModels(); len(models) != 0 {
+		t.Fatalf("GetKiroModels should return nil (dynamic discovery only), got %d entries", len(models))
 	}
 }
 

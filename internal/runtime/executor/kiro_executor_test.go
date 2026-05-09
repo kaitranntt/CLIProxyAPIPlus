@@ -455,9 +455,34 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "claude-opus-4.7",
 		},
 		{
-			name:     "unknown opus 4.7 fallback",
-			model:    "partner-opus-4.7-preview",
-			expected: "claude-opus-4.7",
+			name:     "dated alias collapses to canonical version",
+			model:    "claude-sonnet-4-5-20250929",
+			expected: "claude-sonnet-4.5",
+		},
+		{
+			name:     "amazonq prefix",
+			model:    "amazonq-claude-sonnet-4-5",
+			expected: "claude-sonnet-4.5",
+		},
+		{
+			name:     "non-Claude model passes through",
+			model:    "kiro-glm-5",
+			expected: "glm-5",
+		},
+		{
+			name:     "non-Claude minimax versioned",
+			model:    "kiro-minimax-m2-5",
+			expected: "minimax-m2.5",
+		},
+		{
+			name:     "identifier without trailing version unchanged",
+			model:    "kiro-qwen3-coder-next",
+			expected: "qwen3-coder-next",
+		},
+		{
+			name:     "unknown model passes through unchanged",
+			model:    "kiro-future-model-9",
+			expected: "future-model-9",
 		},
 	}
 

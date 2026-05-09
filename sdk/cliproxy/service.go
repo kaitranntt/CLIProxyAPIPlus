@@ -1805,9 +1805,17 @@ func filterAgenticVariants(models []*ModelInfo) []*ModelInfo {
 }
 
 // generateKiroAgenticVariants generates agentic variants for Kiro models.
-// Agentic variants have optimized system prompts for coding agents.
+// Agentic variants share the backend model ID but apply a wrapped system
+// prompt for coding agents — that wrapping only happens when
+// kiro-system-prompt-inject-enable is on. When it's off, exposing "-agentic"
+// IDs in /v1/models is misleading (the flag gates the actual behavior), so
+// we return the input list unchanged.
 func generateKiroAgenticVariants(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
+		return models
+	}
+
+	if !kirocommon.IsSystemPromptInjectEnabled() {
 		return models
 	}
 

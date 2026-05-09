@@ -1661,116 +1661,105 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 	return profileArn
 }
 
-// mapModelToKiro maps external model names to Kiro model IDs.
-// Supports both Kiro and Amazon Q prefixes since they use the same API.
-// Agentic variants (-agentic suffix) map to the same backend model IDs.
+// mapModelToKiro maps external model names to Kiro backend model IDs.
+//
+// It accepts any of the surface forms clients use and returns the ID that
+// Kiro's API expects. The transformation is algorithmic so new models added
+// by Kiro (e.g. glm-5, deepseek-3.2, future releases) route correctly
+// without code changes:
+//
+//  1. Trim surrounding whitespace and lowercase.
+//  2. Strip the leading "kiro-" or "amazonq-" prefix if present.
+//  3. Strip the trailing "-agentic" suffix (agentic variants share the
+//     underlying backend ID; the agentic behavior is applied separately
+//     via determineAgenticMode).
+//  4. Normalize the version segment from dashes to dots — e.g.
+//     "claude-sonnet-4-5" → "claude-sonnet-4.5", "minimax-m2-1" →
+//     "minimax-m2.1". Only the last "-<digit>" pair is rewritten so
+//     identifiers like "qwen3-coder-next" pass through unchanged.
+//  5. Map a few historical dated aliases (e.g. "claude-sonnet-4-5-20250929")
+//     back to their canonical version.
+//
+// Unknown model names are returned as-is rather than silently remapped
+// to claude-sonnet-4.5 — passing the client's chosen model through lets
+// Kiro itself decide whether the ID is valid.
 func (e *KiroExecutor) mapModelToKiro(model string) string {
-	modelMap := map[string]string{
-		// Amazon Q format (amazonq- prefix) - same API as Kiro
-		"amazonq-auto":                       "auto",
-		"amazonq-claude-opus-4-7":            "claude-opus-4.7",
-		"amazonq-claude-opus-4-6":            "claude-opus-4.6",
-		"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"amazonq-claude-opus-4-5":            "claude-opus-4.5",
-		"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"amazonq-claude-sonnet-4":            "claude-sonnet-4",
-		"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
-		// Kiro format (kiro- prefix) - valid model names that should be preserved
-		"kiro-claude-opus-4-7":            "claude-opus-4.7",
-		"kiro-claude-opus-4-6":            "claude-opus-4.6",
-		"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"kiro-claude-opus-4-5":            "claude-opus-4.5",
-		"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4":            "claude-sonnet-4",
-		"kiro-claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
-		"kiro-auto":                       "auto",
-		// Native format (no prefix) - used by Kiro IDE directly
-		"claude-opus-4-7":            "claude-opus-4.7",
-		"claude-opus-4.7":            "claude-opus-4.7",
-		"claude-opus-4-6":            "claude-opus-4.6",
-		"claude-opus-4.6":            "claude-opus-4.6",
-		"claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"claude-sonnet-4.6":          "claude-sonnet-4.6",
-		"claude-opus-4-5":            "claude-opus-4.5",
-		"claude-opus-4.5":            "claude-opus-4.5",
-		"claude-haiku-4-5":           "claude-haiku-4.5",
-		"claude-haiku-4.5":           "claude-haiku-4.5",
-		"claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"claude-sonnet-4.5":          "claude-sonnet-4.5",
-		"claude-sonnet-4":            "claude-sonnet-4",
-		"claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"auto":                       "auto",
-		// Agentic variants (same backend model IDs, but with special system prompt)
-		"claude-opus-4.7-agentic":        "claude-opus-4.7",
-		"claude-opus-4.6-agentic":        "claude-opus-4.6",
-		"claude-sonnet-4.6-agentic":      "claude-sonnet-4.6",
-		"claude-opus-4.5-agentic":        "claude-opus-4.5",
-		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
-		"claude-sonnet-4-agentic":        "claude-sonnet-4",
-		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
-		"kiro-claude-opus-4-7-agentic":   "claude-opus-4.7",
-		"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
-		"kiro-claude-sonnet-4-6-agentic": "claude-sonnet-4.6",
-		"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
-		"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-agentic":   "claude-sonnet-4",
-		"kiro-claude-haiku-4-5-agentic":  "claude-haiku-4.5",
+	original := model
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return ""
 	}
-	if kiroID, ok := modelMap[model]; ok {
-		return kiroID
+	m = strings.ToLower(m)
+
+	// 1. Strip known vendor prefixes.
+	for _, prefix := range []string{"kiro-", "amazonq-"} {
+		if strings.HasPrefix(m, prefix) {
+			m = strings.TrimPrefix(m, prefix)
+			break
+		}
 	}
 
-	// Smart fallback: try to infer model type from name patterns
-	modelLower := strings.ToLower(model)
+	// 2. Strip agentic suffix — agentic variants share the backend ID.
+	m = strings.TrimSuffix(m, "-agentic")
 
-	// Check for Haiku variants
-	if strings.Contains(modelLower, "haiku") {
-		log.Debugf("kiro: unknown Haiku model '%s', mapping to claude-haiku-4.5", model)
-		return "claude-haiku-4.5"
+	// 3. Collapse dated aliases (e.g. claude-sonnet-4-5-20250929) to the
+	//    canonical version. Only handles the common 8-digit date suffix.
+	m = trimKiroDateSuffix(m)
+
+	// 4. Normalize final version segment: last "-<digit>" pair becomes "."
+	//    e.g. "claude-sonnet-4-5" → "claude-sonnet-4.5", but "qwen3-coder-next"
+	//    is left alone because the final segment isn't a digit.
+	m = normalizeKiroVersion(m)
+
+	if m != original {
+		log.Debugf("kiro: mapped model '%s' to backend ID '%s'", original, m)
 	}
+	return m
+}
 
-	// Check for Sonnet variants
-	if strings.Contains(modelLower, "sonnet") {
-		// Check for specific version patterns
-		if strings.Contains(modelLower, "3-7") || strings.Contains(modelLower, "3.7") {
-			log.Debugf("kiro: unknown Sonnet 3.7 model '%s', mapping to claude-3-7-sonnet-20250219", model)
-			return "claude-3-7-sonnet-20250219"
-		}
-		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Sonnet 4.6 model '%s', mapping to claude-sonnet-4.6", model)
-			return "claude-sonnet-4.6"
-		}
-		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
-			log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
-			return "claude-sonnet-4.5"
-		}
-		// Default to Sonnet 4
-		log.Debugf("kiro: unknown Sonnet model '%s', mapping to claude-sonnet-4", model)
-		return "claude-sonnet-4"
+// trimKiroDateSuffix removes a trailing "-YYYYMMDD" (8 digits) if present.
+// Used to collapse dated model IDs like "claude-sonnet-4-5-20250929" to
+// "claude-sonnet-4-5" before further normalization.
+func trimKiroDateSuffix(s string) string {
+	if len(s) < 9 || s[len(s)-9] != '-' {
+		return s
 	}
-
-	// Check for Opus variants
-	if strings.Contains(modelLower, "opus") {
-		if strings.Contains(modelLower, "4-7") || strings.Contains(modelLower, "4.7") {
-			log.Debugf("kiro: unknown Opus 4.7 model '%s', mapping to claude-opus-4.7", model)
-			return "claude-opus-4.7"
+	for i := len(s) - 8; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return s
 		}
-		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Opus 4.6 model '%s', mapping to claude-opus-4.6", model)
-			return "claude-opus-4.6"
-		}
-		log.Debugf("kiro: unknown Opus model '%s', mapping to claude-opus-4.5", model)
-		return "claude-opus-4.5"
 	}
+	return s[:len(s)-9]
+}
 
-	// Final fallback to Sonnet 4.5 (most commonly used model)
-	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
-	return "claude-sonnet-4.5"
+// normalizeKiroVersion converts a trailing "-<digit>" pair to a dot-separated
+// version. For example:
+//   - "claude-sonnet-4-5"   → "claude-sonnet-4.5"
+//   - "claude-opus-4-7"     → "claude-opus-4.7"
+//   - "minimax-m2-1"        → "minimax-m2.1" (the "m2" retains its digit)
+//   - "qwen3-coder-next"    → "qwen3-coder-next" (no trailing digit pair)
+//   - "glm-5"               → "glm-5" (only one digit segment; left alone)
+//
+// The rule: if the last dash-separated segment is all digits AND the
+// second-to-last segment ends with a digit, replace that last dash with a dot.
+func normalizeKiroVersion(s string) string {
+	lastDash := strings.LastIndex(s, "-")
+	if lastDash <= 0 || lastDash == len(s)-1 {
+		return s
+	}
+	tail := s[lastDash+1:]
+	for _, r := range tail {
+		if r < '0' || r > '9' {
+			return s
+		}
+	}
+	// Require the preceding character to be a digit — otherwise we'd rewrite
+	// "glm-5" into "glm.5" which isn't a backend ID Kiro recognizes.
+	prev := s[lastDash-1]
+	if prev < '0' || prev > '9' {
+		return s
+	}
+	return s[:lastDash] + "." + tail
 }
 
 // EventStreamError represents an Event Stream processing error
