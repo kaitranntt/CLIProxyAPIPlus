@@ -14,10 +14,11 @@ import (
 
 // ToolUseState tracks the state of an in-progress tool use during streaming.
 type ToolUseState struct {
-	ToolUseID   string
-	Name        string
-	InputBuffer strings.Builder
-	IsComplete  bool
+	ToolUseID      string
+	Name           string
+	InputBuffer    strings.Builder
+	IsComplete     bool
+	TruncationInfo *TruncationInfo // Set when truncation detector is enabled and detects truncation
 }
 
 // Pre-compiled regex patterns for performance
@@ -479,6 +480,18 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 			Name:      currentToolUse.Name,
 			Input:     finalInput,
 		}
+
+		// Run truncation detection only when explicitly enabled.
+		if kirocommon.IsTruncationDetectorEnabled() {
+			truncInfo := DetectTruncation(currentToolUse.Name, currentToolUse.ToolUseID, fullInput, finalInput)
+			if truncInfo.IsTruncated {
+				log.Warnf("kiro: truncation detected for tool %s (ID: %s): type=%s, raw_size=%d bytes",
+					currentToolUse.Name, currentToolUse.ToolUseID, truncInfo.TruncationType, len(fullInput))
+				toolUse.IsTruncated = true
+				toolUse.TruncationInfo = &truncInfo
+			}
+		}
+
 		toolUses = append(toolUses, toolUse)
 
 		if processedIDs != nil {

@@ -2941,6 +2941,12 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 			// Emit completed tool uses
 			for _, tu := range completedToolUses {
+				// Skip truncated tools when detector is enabled
+				if tu.IsTruncated {
+					log.Warnf("kiro: skipping truncated tool: %s (ID: %s)", tu.Name, tu.ToolUseID)
+					continue
+				}
+
 				hasToolUses = true
 
 				// Close text block if open

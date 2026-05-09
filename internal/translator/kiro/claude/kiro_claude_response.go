@@ -26,8 +26,12 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 		})
 	}
 
-	// Add tool_use blocks
+	// Add tool_use blocks — skip truncated tools when detector is enabled
 	for _, toolUse := range toolUses {
+		if toolUse.IsTruncated && toolUse.TruncationInfo != nil {
+			log.Warnf("kiro: skipping truncated tool: %s (ID: %s)", toolUse.Name, toolUse.ToolUseID)
+			continue
+		}
 		contentBlocks = append(contentBlocks, map[string]interface{}{
 			"type":  "tool_use",
 			"id":    toolUse.ToolUseID,

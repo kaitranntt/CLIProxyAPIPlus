@@ -112,9 +112,11 @@ type KiroAssistantResponseMessage struct {
 
 // KiroToolUse represents a tool invocation by the assistant
 type KiroToolUse struct {
-	ToolUseID string                 `json:"toolUseId"`
-	Name      string                 `json:"name"`
-	Input     map[string]interface{} `json:"input"`
+	ToolUseID      string                 `json:"toolUseId"`
+	Name           string                 `json:"name"`
+	Input          map[string]interface{} `json:"input"`
+	IsTruncated    bool                   `json:"-"` // Set by truncation detector when enabled
+	TruncationInfo *TruncationInfo        `json:"-"` // Truncation details (nil when detector disabled)
 }
 
 // ConvertClaudeRequestToKiro converts a Claude API request to Kiro format.

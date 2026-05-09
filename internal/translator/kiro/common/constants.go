@@ -126,3 +126,28 @@ func SetSystemPromptInjectEnabled(enabled bool) {
 func IsSystemPromptInjectEnabled() bool {
 	return systemPromptInjectEnabled.Load() == 1
 }
+
+// truncationDetectorEnabled controls whether the heuristic truncation detector
+// is applied to Kiro tool use responses. When enabled, tool calls that appear
+// truncated (invalid JSON, missing required fields, etc.) are silently skipped.
+// Default: 0 (disabled). The detector uses heuristic matching that can produce
+// false positives (e.g. code fence counting), so it is off by default.
+var truncationDetectorEnabled atomic.Int32
+
+func init() {
+	truncationDetectorEnabled.Store(0)
+}
+
+// SetTruncationDetectorEnabled toggles the heuristic truncation detector.
+func SetTruncationDetectorEnabled(enabled bool) {
+	if enabled {
+		truncationDetectorEnabled.Store(1)
+	} else {
+		truncationDetectorEnabled.Store(0)
+	}
+}
+
+// IsTruncationDetectorEnabled reports whether the truncation detector is active.
+func IsTruncationDetectorEnabled() bool {
+	return truncationDetectorEnabled.Load() == 1
+}
