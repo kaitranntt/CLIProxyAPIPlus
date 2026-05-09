@@ -26,14 +26,6 @@ const remoteWebSearchDescription = "WebSearch looks up information outside the m
 type KiroPayload struct {
 	ConversationState KiroConversationState `json:"conversationState"`
 	ProfileArn        string                `json:"profileArn,omitempty"`
-	InferenceConfig   *KiroInferenceConfig  `json:"inferenceConfig,omitempty"`
-}
-
-// KiroInferenceConfig contains inference parameters for the Kiro API.
-type KiroInferenceConfig struct {
-	MaxTokens   int     `json:"maxTokens,omitempty"`
-	Temperature float64 `json:"temperature,omitempty"`
-	TopP        float64 `json:"topP,omitempty"`
 }
 
 // KiroConversationState holds the conversation context
@@ -120,11 +112,9 @@ type KiroAssistantResponseMessage struct {
 
 // KiroToolUse represents a tool invocation by the assistant
 type KiroToolUse struct {
-	ToolUseID      string                 `json:"toolUseId"`
-	Name           string                 `json:"name"`
-	Input          map[string]interface{} `json:"input"`
-	IsTruncated    bool                   `json:"-"` // Internal flag, not serialized
-	TruncationInfo *TruncationInfo        `json:"-"` // Truncation details, not serialized
+	ToolUseID string                 `json:"toolUseId"`
+	Name      string                 `json:"name"`
+	Input     map[string]interface{} `json:"input"`
 }
 
 // ConvertClaudeRequestToKiro converts a Claude API request to Kiro format.
@@ -147,35 +137,6 @@ func ConvertClaudeRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // Returns the payload and a boolean indicating whether thinking mode was injected.
 func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, headers http.Header, metadata map[string]any) ([]byte, bool) {
 	log.Debugf("kiro: BuildKiroPayload called, modelID=%s, origin=%s, isAgentic=%v, isChatOnly=%v", modelID, origin, isAgentic, isChatOnly)
-
-	// Extract max_tokens for potential use in inferenceConfig
-	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
-	const kiroMaxOutputTokens = 32000
-	var maxTokens int64
-	if mt := gjson.GetBytes(claudeBody, "max_tokens"); mt.Exists() {
-		maxTokens = mt.Int()
-		if maxTokens == -1 {
-			maxTokens = kiroMaxOutputTokens
-			log.Debugf("kiro: max_tokens=-1 converted to %d", kiroMaxOutputTokens)
-		}
-	}
-
-	// Extract temperature if specified
-	var temperature float64
-	var hasTemperature bool
-	if temp := gjson.GetBytes(claudeBody, "temperature"); temp.Exists() {
-		temperature = temp.Float()
-		hasTemperature = true
-	}
-
-	// Extract top_p if specified
-	var topP float64
-	var hasTopP bool
-	if tp := gjson.GetBytes(claudeBody, "top_p"); tp.Exists() {
-		topP = tp.Float()
-		hasTopP = true
-		log.Debugf("kiro: extracted top_p: %.2f", topP)
-	}
 
 	// Normalize origin value for Kiro API compatibility
 	origin = normalizeOrigin(origin)
@@ -299,16 +260,6 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		}}
 	}
 
-	// Build inferenceConfig if we have any inference parameters
-	// DISABLED: Kiro API returns 400 "Improperly formed request" when inferenceConfig is present.
-	// Keeping the parsing logic for future use when Kiro API supports it.
-	var inferenceConfig *KiroInferenceConfig
-	_ = maxTokens
-	_ = hasTemperature
-	_ = temperature
-	_ = hasTopP
-	_ = topP
-
 	// Session IDs: extract from messages[].additional_kwargs (LangChain format) or random
 	conversationID := extractMetadataFromMessages(messages, "conversationId")
 	continuationID := extractMetadataFromMessages(messages, "continuationId")
@@ -324,8 +275,7 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 			CurrentMessage:  currentMessage,
 			History:         history,
 		},
-		ProfileArn:      profileArn,
-		InferenceConfig: inferenceConfig,
+		ProfileArn: profileArn,
 	}
 
 	// Only set AgentContinuationID if client provided
