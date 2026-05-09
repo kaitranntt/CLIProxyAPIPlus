@@ -127,6 +127,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 func applyKiroRuntimeConfig(cfg *config.Config) {
 	kiroauth.InitRateLimiterConfig(cfg)
 	kiroauth.InitSystemPromptInjectConfig(cfg)
+	kiroauth.InitTruncationDetectorConfig(cfg)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {

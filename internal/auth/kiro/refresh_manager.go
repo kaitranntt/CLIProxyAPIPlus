@@ -212,6 +212,23 @@ func InitSystemPromptInjectConfig(cfg *config.Config) {
 	}
 }
 
+// InitTruncationDetectorConfig applies the kiro-truncation-detector-enable setting.
+// When the config value is true, Kiro tool use responses are checked for truncation
+// heuristics and incomplete tool calls are silently skipped.
+// When nil or false (default), all tool use responses pass through unmodified.
+func InitTruncationDetectorConfig(cfg *config.Config) {
+	enabled := false
+	if cfg != nil && cfg.KiroTruncationDetectorEnable != nil {
+		enabled = *cfg.KiroTruncationDetectorEnable
+	}
+	kirocommon.SetTruncationDetectorEnabled(enabled)
+	if enabled {
+		log.Info("kiro: truncation detector enabled")
+	} else {
+		log.Info("kiro: truncation detector disabled (default)")
+	}
+}
+
 // InitRateLimiterConfig initializes the global rate limiter config from application config.
 // Must be called before any Kiro requests are made for the config to take effect.
 func InitRateLimiterConfig(cfg *config.Config) {
