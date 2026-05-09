@@ -633,15 +633,18 @@ func GetGitHubCopilotModels() []*ModelInfo {
 // MiniMax, Qwen, …) and the set changes without SDK releases. Rather than
 // hardcoding every model, we rely entirely on the dynamic discovery path
 // (sdk/cliproxy/service.go fetchKiroModels → ConvertKiroAPIModels), which
-// asks Kiros own API what is currently available and generates ModelInfo
+// asks Kiro's own API what is currently available and generates ModelInfo
 // entries on the fly. That keeps the proxy in sync with Kiro automatically.
 //
-// As a result this function intentionally returns nil: when API discovery
-// is unreachable, /v1/models simply shows no Kiro models until the next
-// successful fetch. GenerateAgenticVariants is still the place where agentic
-// variants are layered on top of whatever the API returns.
+// An empty (non-nil) slice is returned so callers can distinguish "kiro is a
+// known channel with no static entries" from "unknown channel" — the latter
+// is signaled by nil and produces an HTTP 400 in the management endpoint.
+// When API discovery is unreachable, /v1/models simply shows no Kiro models
+// until the next successful fetch. GenerateAgenticVariants is still the
+// place where agentic variants are layered on top of whatever the API
+// returns.
 func GetKiroModels() []*ModelInfo {
-	return nil
+	return []*ModelInfo{}
 }
 
 // GetAmazonQModels returns the Amazon Q (AWS CodeWhisperer) model definitions.

@@ -36,12 +36,19 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 func TestKiroStaticModelsAreDynamic(t *testing.T) {
 	// Kiro model discovery is entirely dynamic (see fetchKiroModels in
 	// sdk/cliproxy/service.go). The static registry intentionally returns
-	// nothing so new Kiro models (GLM, DeepSeek, MiniMax, future additions)
-	// flow through without code changes. This test pins that contract: if
-	// anyone reintroduces a hardcoded static list, they should also decide
-	// what happens to the dynamic path.
-	if models := GetKiroModels(); len(models) != 0 {
-		t.Fatalf("GetKiroModels should return nil (dynamic discovery only), got %d entries", len(models))
+	// an empty list so new Kiro models (GLM, DeepSeek, MiniMax, future
+	// additions) flow through without code changes. This test pins two
+	// contracts:
+	//   1. The slice is empty — no hardcoded models sneak back in.
+	//   2. The slice is non-nil — GetStaticModelDefinitionsByChannel("kiro")
+	//      must not look like an unknown channel to the management API,
+	//      which 400s on a nil result.
+	models := GetKiroModels()
+	if models == nil {
+		t.Fatal("GetKiroModels must return a non-nil slice so kiro stays a recognized channel")
+	}
+	if len(models) != 0 {
+		t.Fatalf("GetKiroModels should be empty (dynamic discovery only), got %d entries", len(models))
 	}
 }
 
