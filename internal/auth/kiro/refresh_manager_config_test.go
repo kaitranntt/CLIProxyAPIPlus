@@ -15,6 +15,7 @@ func resetKiroRuntimeConfigTestState() {
 	globalRateLimiterOnce = sync.Once{}
 	kirocommon.SetSystemPromptInjectEnabled(false)
 	kirocommon.SetTruncationDetectorEnabled(false)
+	kirocommon.SetExtractThinkingTagEnabled(false)
 }
 
 func TestInitSystemPromptInjectConfig_AppliesAndResets(t *testing.T) {
@@ -50,6 +51,24 @@ func TestInitTruncationDetectorConfig_AppliesAndResets(t *testing.T) {
 	InitTruncationDetectorConfig(&config.Config{})
 	if kirocommon.IsTruncationDetectorEnabled() {
 		t.Fatal("expected truncation detector to reset to disabled")
+	}
+}
+
+func TestInitExtractThinkingTagConfig_AppliesAndResets(t *testing.T) {
+	resetKiroRuntimeConfigTestState()
+	t.Cleanup(resetKiroRuntimeConfigTestState)
+
+	enabled := true
+	InitExtractThinkingTagConfig(&config.Config{
+		KiroExtractThinkingTagEnable: &enabled,
+	})
+	if !kirocommon.IsExtractThinkingTagEnabled() {
+		t.Fatal("expected extract thinking tag to be enabled")
+	}
+
+	InitExtractThinkingTagConfig(&config.Config{})
+	if kirocommon.IsExtractThinkingTagEnabled() {
+		t.Fatal("expected extract thinking tag to reset to disabled")
 	}
 }
 

@@ -151,3 +151,29 @@ func SetTruncationDetectorEnabled(enabled bool) {
 func IsTruncationDetectorEnabled() bool {
 	return truncationDetectorEnabled.Load() == 1
 }
+
+// extractThinkingTagEnabled controls whether inline <thinking>...</thinking>
+// tags inside assistantResponseEvent content are parsed into Claude thinking
+// blocks. This is an unofficial path — Kiro's official reasoning signal is
+// reasoningContentEvent. The tag parser can false-positive when content
+// literally mentions the tag string (code samples, discussion, XML fixtures),
+// which silently truncates responses. Default: 0 (disabled).
+var extractThinkingTagEnabled atomic.Int32
+
+func init() {
+	extractThinkingTagEnabled.Store(0)
+}
+
+// SetExtractThinkingTagEnabled toggles inline <thinking> tag extraction.
+func SetExtractThinkingTagEnabled(enabled bool) {
+	if enabled {
+		extractThinkingTagEnabled.Store(1)
+	} else {
+		extractThinkingTagEnabled.Store(0)
+	}
+}
+
+// IsExtractThinkingTagEnabled reports whether inline <thinking> tag extraction is active.
+func IsExtractThinkingTagEnabled() bool {
+	return extractThinkingTagEnabled.Load() == 1
+}

@@ -132,6 +132,14 @@ type Config struct {
 	// false positives, so it is off by default.
 	KiroTruncationDetectorEnable *bool `yaml:"kiro-truncation-detector-enable,omitempty" json:"kiro-truncation-detector-enable,omitempty"`
 
+	// KiroExtractThinkingTagEnable controls whether inline <thinking>...</thinking>
+	// tags in Kiro assistantResponseEvent content are parsed into Claude thinking
+	// content blocks. Kiro's official reasoning channel is reasoningContentEvent;
+	// the tag-based path is unofficial and can false-positive when content literally
+	// contains the tag string (code samples, discussion, XML fixtures), silently
+	// truncating responses. Default: false (disabled).
+	KiroExtractThinkingTagEnable *bool `yaml:"kiro-extract-thinking-tag-enable,omitempty" json:"kiro-extract-thinking-tag-enable,omitempty"`
+
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 

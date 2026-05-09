@@ -128,6 +128,7 @@ func applyKiroRuntimeConfig(cfg *config.Config) {
 	kiroauth.InitRateLimiterConfig(cfg)
 	kiroauth.InitSystemPromptInjectConfig(cfg)
 	kiroauth.InitTruncationDetectorConfig(cfg)
+	kiroauth.InitExtractThinkingTagConfig(cfg)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {

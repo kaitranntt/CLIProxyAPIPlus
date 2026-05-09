@@ -2366,6 +2366,14 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	thinkingBlockIndex := -1                       // Index of the thinking content block
 	var accumulatedThinkingContent strings.Builder // Accumulate thinking content for token counting
 
+	// Tag-based <thinking> parsing state (opt-in via kiro-extract-thinking-tag-enable).
+	// Only used when kirocommon.IsExtractThinkingTagEnabled() returns true.
+	// hasOfficialReasoningEvent disables tag parsing once a reasoningContentEvent
+	// arrives, since the official channel is authoritative.
+	inThinkBlock := false
+	hasOfficialReasoningEvent := false
+	var pendingContent strings.Builder // Buffers content that may be a partial tag at chunk boundary
+
 	// Pre-calculate input tokens from request if possible
 	// Kiro uses Claude format, so try Claude format first, then OpenAI format, then fallback
 	if enc, err := getTokenizer(model); err == nil {
@@ -2783,8 +2791,155 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					lastUsageUpdateTime = time.Now()
 				}
 
-				// Close thinking block before opening a text block to
-				// maintain valid Claude SSE structure (start→delta→stop).
+				// Tag-based <thinking> parsing (opt-in). Once the official
+				// reasoningContentEvent channel has been seen, fall through to
+				// the plain-text path and strip any stray tag strings.
+				if kirocommon.IsExtractThinkingTagEnabled() && !hasOfficialReasoningEvent {
+					// Combine buffered partial-tag bytes with the new delta.
+					pendingContent.WriteString(contentDelta)
+					processContent := pendingContent.String()
+					pendingContent.Reset()
+
+					for len(processContent) > 0 {
+						if inThinkBlock {
+							endIdx := strings.Index(processContent, kirocommon.ThinkingEndTag)
+							if endIdx >= 0 {
+								thinkingText := processContent[:endIdx]
+								if thinkingText != "" {
+									if !isThinkingBlockOpen {
+										contentBlockIndex++
+										thinkingBlockIndex = contentBlockIndex
+										isThinkingBlockOpen = true
+										blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+									}
+									thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(thinkingText, thinkingBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+									for _, chunk := range sseData {
+										enqueueTranslatedSSE(out, chunk)
+									}
+									accumulatedThinkingContent.WriteString(thinkingText)
+								}
+								if isThinkingBlockOpen {
+									blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+									for _, chunk := range sseData {
+										enqueueTranslatedSSE(out, chunk)
+									}
+									isThinkingBlockOpen = false
+								}
+								inThinkBlock = false
+								processContent = processContent[endIdx+len(kirocommon.ThinkingEndTag):]
+							} else {
+								partialMatch := false
+								for i := 1; i < len(kirocommon.ThinkingEndTag) && i <= len(processContent); i++ {
+									if strings.HasSuffix(processContent, kirocommon.ThinkingEndTag[:i]) {
+										pendingContent.WriteString(processContent[len(processContent)-i:])
+										processContent = processContent[:len(processContent)-i]
+										partialMatch = true
+										break
+									}
+								}
+								if !partialMatch || len(processContent) > 0 {
+									if processContent != "" {
+										if !isThinkingBlockOpen {
+											contentBlockIndex++
+											thinkingBlockIndex = contentBlockIndex
+											isThinkingBlockOpen = true
+											blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
+											sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+											for _, chunk := range sseData {
+												enqueueTranslatedSSE(out, chunk)
+											}
+										}
+										thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(processContent, thinkingBlockIndex)
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+										accumulatedThinkingContent.WriteString(processContent)
+									}
+								}
+								processContent = ""
+							}
+						} else {
+							startIdx := strings.Index(processContent, kirocommon.ThinkingStartTag)
+							if startIdx >= 0 {
+								textBefore := processContent[:startIdx]
+								if textBefore != "" {
+									if isThinkingBlockOpen {
+										blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+										isThinkingBlockOpen = false
+									}
+									if !isTextBlockOpen {
+										contentBlockIndex++
+										isTextBlockOpen = true
+										blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+									}
+									claudeEvent := kiroclaude.BuildClaudeStreamEvent(textBefore, contentBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+									for _, chunk := range sseData {
+										enqueueTranslatedSSE(out, chunk)
+									}
+								}
+								if isTextBlockOpen {
+									blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+									for _, chunk := range sseData {
+										enqueueTranslatedSSE(out, chunk)
+									}
+									isTextBlockOpen = false
+								}
+								inThinkBlock = true
+								processContent = processContent[startIdx+len(kirocommon.ThinkingStartTag):]
+							} else {
+								partialMatch := false
+								for i := 1; i < len(kirocommon.ThinkingStartTag) && i <= len(processContent); i++ {
+									if strings.HasSuffix(processContent, kirocommon.ThinkingStartTag[:i]) {
+										pendingContent.WriteString(processContent[len(processContent)-i:])
+										processContent = processContent[:len(processContent)-i]
+										partialMatch = true
+										break
+									}
+								}
+								if !partialMatch || len(processContent) > 0 {
+									if processContent != "" {
+										if !isTextBlockOpen {
+											contentBlockIndex++
+											isTextBlockOpen = true
+											blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+											sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+											for _, chunk := range sseData {
+												enqueueTranslatedSSE(out, chunk)
+											}
+										}
+										claudeEvent := kiroclaude.BuildClaudeStreamEvent(processContent, contentBlockIndex)
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+									}
+								}
+								processContent = ""
+							}
+						}
+					}
+					continue
+				}
+
+				// Default path: treat content as plain text. Close thinking block
+				// before opening a text block to maintain valid Claude SSE structure.
 				if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
 					blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
@@ -2794,6 +2949,16 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					isThinkingBlockOpen = false
 				}
 				if contentDelta != "" {
+					// When official reasoning events have been seen, strip any
+					// stray thinking tag strings so they don't leak into output.
+					emitText := contentDelta
+					if hasOfficialReasoningEvent {
+						emitText = strings.ReplaceAll(emitText, kirocommon.ThinkingStartTag, "")
+						emitText = strings.ReplaceAll(emitText, kirocommon.ThinkingEndTag, "")
+					}
+					if emitText == "" {
+						continue
+					}
 					if !isTextBlockOpen {
 						contentBlockIndex++
 						isTextBlockOpen = true
@@ -2803,7 +2968,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							enqueueTranslatedSSE(out, chunk)
 						}
 					}
-					claudeEvent := kiroclaude.BuildClaudeStreamEvent(contentDelta, contentBlockIndex)
+					claudeEvent := kiroclaude.BuildClaudeStreamEvent(emitText, contentBlockIndex)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
 					for _, chunk := range sseData {
 						enqueueTranslatedSSE(out, chunk)
@@ -2896,6 +3061,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			}
 
 			if thinkingText != "" {
+				// An official reasoning event arrived — disable tag-based parsing
+				// for the rest of this stream. The two channels must not interleave.
+				hasOfficialReasoningEvent = true
 				// Close text block if open before starting thinking block
 				if isTextBlockOpen && contentBlockIndex >= 0 {
 					blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
@@ -3161,6 +3329,36 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 				log.Debugf("kiro: streamToChannel found usage object (fallback): input=%d, output=%d, total=%d",
 					totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
+			}
+		}
+	}
+
+	// Flush any buffered partial-tag bytes as plain text. Only possible when
+	// tag parsing was enabled; otherwise pendingContent is always empty.
+	if pendingContent.Len() > 0 {
+		leftover := pendingContent.String()
+		pendingContent.Reset()
+		if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
+			thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(leftover, thinkingBlockIndex)
+			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+			for _, chunk := range sseData {
+				enqueueTranslatedSSE(out, chunk)
+			}
+			accumulatedThinkingContent.WriteString(leftover)
+		} else {
+			if !isTextBlockOpen {
+				contentBlockIndex++
+				isTextBlockOpen = true
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+				for _, chunk := range sseData {
+					enqueueTranslatedSSE(out, chunk)
+				}
+			}
+			claudeEvent := kiroclaude.BuildClaudeStreamEvent(leftover, contentBlockIndex)
+			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+			for _, chunk := range sseData {
+				enqueueTranslatedSSE(out, chunk)
 			}
 		}
 	}
