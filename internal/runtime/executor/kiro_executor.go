@@ -1483,7 +1483,6 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 	return accessToken, profileArn
 }
 
-
 // determineAgenticMode determines if the model is an agentic or chat-only variant.
 // Returns (isAgentic, isChatOnly) based on model name suffixes.
 func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
