@@ -25,23 +25,29 @@ const (
 
 	// DefaultAssistantContentWithTools is the fallback content for assistant messages
 	// that have tool_use but no text content. Kiro API requires non-empty content.
-	// IMPORTANT: Use a minimal neutral string that the model won't mimic in responses.
-	// Previously "I'll help you with that." which caused the model to parrot it back.
-	DefaultAssistantContentWithTools = "."
+	// IMPORTANT: Use a bracketed marker so the model recognizes it as a structural
+	// placeholder rather than conversational content to parrot back.
+	// History: "." caused the model to echo "." in subsequent turns; "I'll help
+	// you with that." caused parroting of that exact phrase.
+	DefaultAssistantContentWithTools = "[tool_call]"
 
 	// DefaultAssistantContent is the fallback content for assistant messages
 	// that have no content at all. Kiro API requires non-empty content.
-	// IMPORTANT: Use a minimal neutral string that the model won't mimic in responses.
-	// Previously "I understand." which could leak into model behavior.
-	DefaultAssistantContent = "."
+	// IMPORTANT: Use a bracketed marker so the model recognizes it as a structural
+	// placeholder rather than conversational content to parrot back.
+	DefaultAssistantContent = "[empty]"
 
 	// DefaultUserContentWithToolResults is the fallback content for user messages
 	// that have only tool_result (no text). Kiro API requires non-empty content.
-	DefaultUserContentWithToolResults = "Tool results provided."
+	// IMPORTANT: Use a bracketed marker so the model recognizes it as a structural
+	// placeholder rather than conversational content to parrot back.
+	DefaultUserContentWithToolResults = "[tool_result]"
 
 	// DefaultUserContent is the fallback content for user messages
 	// that have no content at all. Kiro API requires non-empty content.
-	DefaultUserContent = "Continue"
+	// IMPORTANT: Use a bracketed marker so the model recognizes it as a structural
+	// placeholder rather than conversational content to parrot back.
+	DefaultUserContent = "[continue]"
 
 	// KiroAgenticSystemPrompt is injected only for -agentic models to prevent timeouts on large writes.
 	// AWS Kiro API has a 2-3 minute timeout for large file write operations.
@@ -119,4 +125,55 @@ func SetSystemPromptInjectEnabled(enabled bool) {
 // IsSystemPromptInjectEnabled reports whether system prompt injection is active.
 func IsSystemPromptInjectEnabled() bool {
 	return systemPromptInjectEnabled.Load() == 1
+}
+
+// truncationDetectorEnabled controls whether the heuristic truncation detector
+// is applied to Kiro tool use responses. When enabled, tool calls that appear
+// truncated (invalid JSON, missing required fields, etc.) are silently skipped.
+// Default: 0 (disabled). The detector uses heuristic matching that can produce
+// false positives (e.g. code fence counting), so it is off by default.
+var truncationDetectorEnabled atomic.Int32
+
+func init() {
+	truncationDetectorEnabled.Store(0)
+}
+
+// SetTruncationDetectorEnabled toggles the heuristic truncation detector.
+func SetTruncationDetectorEnabled(enabled bool) {
+	if enabled {
+		truncationDetectorEnabled.Store(1)
+	} else {
+		truncationDetectorEnabled.Store(0)
+	}
+}
+
+// IsTruncationDetectorEnabled reports whether the truncation detector is active.
+func IsTruncationDetectorEnabled() bool {
+	return truncationDetectorEnabled.Load() == 1
+}
+
+// extractThinkingTagEnabled controls whether inline <thinking>...</thinking>
+// tags inside assistantResponseEvent content are parsed into Claude thinking
+// blocks. This is an unofficial path — Kiro's official reasoning signal is
+// reasoningContentEvent. The tag parser can false-positive when content
+// literally mentions the tag string (code samples, discussion, XML fixtures),
+// which silently truncates responses. Default: 0 (disabled).
+var extractThinkingTagEnabled atomic.Int32
+
+func init() {
+	extractThinkingTagEnabled.Store(0)
+}
+
+// SetExtractThinkingTagEnabled toggles inline <thinking> tag extraction.
+func SetExtractThinkingTagEnabled(enabled bool) {
+	if enabled {
+		extractThinkingTagEnabled.Store(1)
+	} else {
+		extractThinkingTagEnabled.Store(0)
+	}
+}
+
+// IsExtractThinkingTagEnabled reports whether inline <thinking> tag extraction is active.
+func IsExtractThinkingTagEnabled() bool {
+	return extractThinkingTagEnabled.Load() == 1
 }

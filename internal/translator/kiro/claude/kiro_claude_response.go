@@ -36,29 +36,36 @@ var (
 
 // BuildClaudeResponse constructs a Claude-compatible response.
 // Supports tool_use blocks when tools are present in the response.
-// Supports thinking blocks - parses <thinking> tags and converts to Claude thinking content blocks.
+// Content is treated as plain text by default; when
+// kiro-extract-thinking-tag-enable is set, inline <thinking> tags are parsed
+// into Claude thinking blocks. The streaming path handles reasoning via
+// reasoningContentEvent independently.
 // stopReason is passed from upstream; fallback logic applied if empty.
 func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
 	var contentBlocks []map[string]interface{}
 
-	// Extract thinking blocks and text from content
 	if content != "" {
-		blocks := ExtractThinkingFromContent(content)
-		contentBlocks = append(contentBlocks, blocks...)
-
-		// Log if thinking blocks were extracted
-		for _, block := range blocks {
-			if block["type"] == "thinking" {
-				thinkingContent := block["thinking"].(string)
-				log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
+		if kirocommon.IsExtractThinkingTagEnabled() {
+			blocks := ExtractThinkingFromContent(content)
+			contentBlocks = append(contentBlocks, blocks...)
+			for _, block := range blocks {
+				if block["type"] == "thinking" {
+					thinkingContent := block["thinking"].(string)
+					log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
+				}
 			}
+		} else {
+			contentBlocks = append(contentBlocks, map[string]interface{}{
+				"type": "text",
+				"text": content,
+			})
 		}
 	}
 
-	// Add tool_use blocks - skip truncated tools and log warning
+	// Add tool_use blocks — skip truncated tools when detector is enabled
 	for _, toolUse := range toolUses {
 		if toolUse.IsTruncated && toolUse.TruncationInfo != nil {
-			log.Warnf("kiro: buildClaudeResponse skipping truncated tool: %s (ID: %s)", toolUse.Name, toolUse.ToolUseID)
+			log.Warnf("kiro: skipping truncated tool: %s (ID: %s)", toolUse.Name, toolUse.ToolUseID)
 			continue
 		}
 		contentBlocks = append(contentBlocks, map[string]interface{}{
@@ -111,6 +118,7 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 // ExtractThinkingFromContent parses content to extract thinking blocks and text.
 // Returns a list of content blocks in the order they appear in the content.
 // Handles interleaved thinking and text blocks correctly.
+// Only invoked when kiro-extract-thinking-tag-enable is true.
 func ExtractThinkingFromContent(content string) []map[string]interface{} {
 	var blocks []map[string]interface{}
 
@@ -138,7 +146,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		startIdx := strings.Index(remaining, thinkingStartTag)
 
 		if startIdx == -1 {
-			// No more thinking tags, add remaining as text
+			// No more thinking tags, add remaining as text (preserve all whitespace)
 			if strings.TrimSpace(remaining) != "" {
 				blocks = append(blocks, map[string]interface{}{
 					"type": "text",
@@ -148,7 +156,7 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 			break
 		}
 
-		// Add text before thinking tag (if any meaningful content)
+		// Add text before thinking tag (preserve whitespace, including pure-whitespace blocks)
 		if startIdx > 0 {
 			textBefore := remaining[:startIdx]
 			if strings.TrimSpace(textBefore) != "" {
@@ -168,7 +176,6 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		if endIdx == -1 {
 			// No closing tag found, treat rest as thinking content (incomplete response)
 			if strings.TrimSpace(remaining) != "" {
-				// Generate signature for thinking content (required by Claude API)
 				signature := generateThinkingSignature(remaining)
 				blocks = append(blocks, map[string]interface{}{
 					"type":      "thinking",
@@ -183,7 +190,6 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		// Extract thinking content between tags
 		thinkContent := remaining[:endIdx]
 		if strings.TrimSpace(thinkContent) != "" {
-			// Generate signature for thinking content (required by Claude API)
 			signature := generateThinkingSignature(thinkContent)
 			blocks = append(blocks, map[string]interface{}{
 				"type":      "thinking",

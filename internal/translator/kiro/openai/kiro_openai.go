@@ -254,49 +254,6 @@ func ParseClaudeEvent(rawEvent []byte) (eventType string, eventData []byte) {
 	return eventType, eventData
 }
 
-// ExtractThinkingFromContent parses content to extract thinking blocks.
-// Returns cleaned content (without thinking tags) and whether thinking was found.
-func ExtractThinkingFromContent(content string) (string, string, bool) {
-	if !strings.Contains(content, kirocommon.ThinkingStartTag) {
-		return content, "", false
-	}
-
-	var cleanedContent strings.Builder
-	var thinkingContent strings.Builder
-	hasThinking := false
-	remaining := content
-
-	for len(remaining) > 0 {
-		startIdx := strings.Index(remaining, kirocommon.ThinkingStartTag)
-		if startIdx == -1 {
-			cleanedContent.WriteString(remaining)
-			break
-		}
-
-		// Add content before thinking tag
-		cleanedContent.WriteString(remaining[:startIdx])
-
-		// Move past opening tag
-		remaining = remaining[startIdx+len(kirocommon.ThinkingStartTag):]
-
-		// Find closing tag
-		endIdx := strings.Index(remaining, kirocommon.ThinkingEndTag)
-		if endIdx == -1 {
-			// No closing tag - treat rest as thinking
-			thinkingContent.WriteString(remaining)
-			hasThinking = true
-			break
-		}
-
-		// Extract thinking content
-		thinkingContent.WriteString(remaining[:endIdx])
-		hasThinking = true
-		remaining = remaining[endIdx+len(kirocommon.ThinkingEndTag):]
-	}
-
-	return strings.TrimSpace(cleanedContent.String()), strings.TrimSpace(thinkingContent.String()), hasThinking
-}
-
 // ConvertOpenAIToolsToKiroFormat is a helper that converts OpenAI tools format to Kiro format
 func ConvertOpenAIToolsToKiroFormat(tools []map[string]interface{}) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper

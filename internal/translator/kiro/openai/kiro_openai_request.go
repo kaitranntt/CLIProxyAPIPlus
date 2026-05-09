@@ -24,14 +24,6 @@ import (
 type KiroPayload struct {
 	ConversationState KiroConversationState `json:"conversationState"`
 	ProfileArn        string                `json:"profileArn,omitempty"`
-	InferenceConfig   *KiroInferenceConfig  `json:"inferenceConfig,omitempty"`
-}
-
-// KiroInferenceConfig contains inference parameters for the Kiro API.
-type KiroInferenceConfig struct {
-	MaxTokens   int     `json:"maxTokens,omitempty"`
-	Temperature float64 `json:"temperature,omitempty"`
-	TopP        float64 `json:"topP,omitempty"`
 }
 
 // KiroConversationState holds the conversation context
@@ -142,35 +134,6 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // Returns the payload and a boolean indicating whether thinking mode was injected.
 func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, headers http.Header, metadata map[string]any) ([]byte, bool) {
 	log.Debugf("kiro-openai: BuildKiroPayloadFromOpenAI called, modelID=%s, origin=%s, isAgentic=%v, isChatOnly=%v", modelID, origin, isAgentic, isChatOnly)
-
-	// Extract max_tokens for potential use in inferenceConfig
-	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
-	const kiroMaxOutputTokens = 32000
-	var maxTokens int64
-	if mt := gjson.GetBytes(openaiBody, "max_tokens"); mt.Exists() {
-		maxTokens = mt.Int()
-		if maxTokens == -1 {
-			maxTokens = kiroMaxOutputTokens
-			log.Debugf("kiro-openai: max_tokens=-1 converted to %d", kiroMaxOutputTokens)
-		}
-	}
-
-	// Extract temperature if specified
-	var temperature float64
-	var hasTemperature bool
-	if temp := gjson.GetBytes(openaiBody, "temperature"); temp.Exists() {
-		temperature = temp.Float()
-		hasTemperature = true
-	}
-
-	// Extract top_p if specified
-	var topP float64
-	var hasTopP bool
-	if tp := gjson.GetBytes(openaiBody, "top_p"); tp.Exists() {
-		topP = tp.Float()
-		hasTopP = true
-		log.Debugf("kiro-openai: extracted top_p: %.2f", topP)
-	}
 
 	// Normalize origin value for Kiro API compatibility
 	origin = normalizeOrigin(origin)
@@ -303,16 +266,6 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		}}
 	}
 
-	// Build inferenceConfig if we have any inference parameters
-	// DISABLED: Kiro API returns 400 "Improperly formed request" when inferenceConfig is present.
-	// Keeping the parsing logic for future use when Kiro API supports it.
-	var inferenceConfig *KiroInferenceConfig
-	_ = maxTokens
-	_ = hasTemperature
-	_ = temperature
-	_ = hasTopP
-	_ = topP
-
 	// Session IDs: extract from messages[].additional_kwargs (LangChain format) or random
 	conversationID := extractMetadataFromMessages(messages, "conversationId")
 	continuationID := extractMetadataFromMessages(messages, "continuationId")
@@ -328,8 +281,7 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 			CurrentMessage:  currentMessage,
 			History:         history,
 		},
-		ProfileArn:      profileArn,
-		InferenceConfig: inferenceConfig,
+		ProfileArn: profileArn,
 	}
 
 	// Only set AgentContinuationID if client provided
@@ -554,9 +506,9 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 				// CRITICAL: Kiro API requires content to be non-empty for history messages
 				if strings.TrimSpace(userMsg.Content) == "" {
 					if len(toolResults) > 0 {
-						userMsg.Content = "Tool results provided."
+						userMsg.Content = kirocommon.DefaultUserContentWithToolResults
 					} else {
-						userMsg.Content = "Continue"
+						userMsg.Content = kirocommon.DefaultUserContent
 					}
 				}
 				// For history messages, embed tool results in context
@@ -577,7 +529,7 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 			// before this assistant message to maintain proper conversation structure
 			if len(pendingToolResults) > 0 {
 				syntheticUserMsg := KiroUserInputMessage{
-					Content: "Tool results provided.",
+					Content: kirocommon.DefaultUserContentWithToolResults,
 					ModelID: modelID,
 					Origin:  origin,
 					UserInputMessageContext: &KiroUserInputMessageContext{
@@ -594,9 +546,9 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 				history = append(history, KiroHistoryMessage{
 					AssistantResponseMessage: &assistantMsg,
 				})
-				// Create a "Continue" user message as currentMessage
+				// Create a continuation user message as currentMessage
 				currentUserMsg = &KiroUserInputMessage{
-					Content: "Continue",
+					Content: kirocommon.DefaultUserContent,
 					ModelID: modelID,
 					Origin:  origin,
 				}
@@ -631,7 +583,7 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 		// If there's no current user message, create a synthetic one for the tool results
 		if currentUserMsg == nil {
 			currentUserMsg = &KiroUserInputMessage{
-				Content: "Tool results provided.",
+				Content: kirocommon.DefaultUserContentWithToolResults,
 				ModelID: modelID,
 				Origin:  origin,
 			}
@@ -925,9 +877,9 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 	// CRITICAL: Kiro API requires content to be non-empty
 	if strings.TrimSpace(finalContent) == "" {
 		if len(toolResults) > 0 {
-			finalContent = "Tool results provided."
+			finalContent = kirocommon.DefaultUserContentWithToolResults
 		} else {
-			finalContent = "Continue"
+			finalContent = kirocommon.DefaultUserContent
 		}
 		log.Debugf("kiro-openai: content was empty, using default: %s", finalContent)
 	}

@@ -212,6 +212,41 @@ func InitSystemPromptInjectConfig(cfg *config.Config) {
 	}
 }
 
+// InitTruncationDetectorConfig applies the kiro-truncation-detector-enable setting.
+// When the config value is true, Kiro tool use responses are checked for truncation
+// heuristics and incomplete tool calls are silently skipped.
+// When nil or false (default), all tool use responses pass through unmodified.
+func InitTruncationDetectorConfig(cfg *config.Config) {
+	enabled := false
+	if cfg != nil && cfg.KiroTruncationDetectorEnable != nil {
+		enabled = *cfg.KiroTruncationDetectorEnable
+	}
+	kirocommon.SetTruncationDetectorEnabled(enabled)
+	if enabled {
+		log.Info("kiro: truncation detector enabled")
+	} else {
+		log.Info("kiro: truncation detector disabled (default)")
+	}
+}
+
+// InitExtractThinkingTagConfig applies the kiro-extract-thinking-tag-enable setting.
+// When true, inline <thinking>...</thinking> tags in Kiro assistantResponseEvent
+// content are parsed into Claude thinking blocks (streaming and non-streaming).
+// When nil or false (default), content is passed through as plain text and
+// reasoning is expected to arrive via reasoningContentEvent only.
+func InitExtractThinkingTagConfig(cfg *config.Config) {
+	enabled := false
+	if cfg != nil && cfg.KiroExtractThinkingTagEnable != nil {
+		enabled = *cfg.KiroExtractThinkingTagEnable
+	}
+	kirocommon.SetExtractThinkingTagEnabled(enabled)
+	if enabled {
+		log.Info("kiro: inline <thinking> tag extraction enabled")
+	} else {
+		log.Info("kiro: inline <thinking> tag extraction disabled (default)")
+	}
+}
+
 // InitRateLimiterConfig initializes the global rate limiter config from application config.
 // Must be called before any Kiro requests are made for the config to take effect.
 func InitRateLimiterConfig(cfg *config.Config) {

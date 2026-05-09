@@ -125,6 +125,21 @@ type Config struct {
 	// not see any system instructions. Set to true to enable injection.
 	KiroSystemPromptInjectEnable *bool `yaml:"kiro-system-prompt-inject-enable,omitempty" json:"kiro-system-prompt-inject-enable,omitempty"`
 
+	// KiroTruncationDetectorEnable controls whether the heuristic truncation detector
+	// is applied to Kiro tool use responses. When enabled, tool calls that appear
+	// truncated (invalid JSON, missing required fields, etc.) are silently skipped.
+	// Default: false (disabled). The detector uses heuristic matching that can produce
+	// false positives, so it is off by default.
+	KiroTruncationDetectorEnable *bool `yaml:"kiro-truncation-detector-enable,omitempty" json:"kiro-truncation-detector-enable,omitempty"`
+
+	// KiroExtractThinkingTagEnable controls whether inline <thinking>...</thinking>
+	// tags in Kiro assistantResponseEvent content are parsed into Claude thinking
+	// content blocks. Kiro's official reasoning channel is reasoningContentEvent;
+	// the tag-based path is unofficial and can false-positive when content literally
+	// contains the tag string (code samples, discussion, XML fixtures), silently
+	// truncating responses. Default: false (disabled).
+	KiroExtractThinkingTagEnable *bool `yaml:"kiro-extract-thinking-tag-enable,omitempty" json:"kiro-extract-thinking-tag-enable,omitempty"`
+
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 

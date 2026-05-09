@@ -274,6 +274,22 @@ nonstream-keepalive-interval: 0
 # Default: false.
 #kiro-system-prompt-inject-enable: true
 
+# Controls whether the heuristic truncation detector is applied to Kiro tool
+# use responses. When enabled, tool calls that appear truncated (invalid JSON,
+# missing required fields, suspiciously short content for write tools) are
+# silently skipped. The detector uses heuristic matching that can produce false
+# positives (e.g. code fence counting), so it is off by default.
+# Default: false.
+#kiro-truncation-detector-enable: true
+
+# Controls whether inline <thinking>...</thinking> tags in Kiro
+# assistantResponseEvent content are parsed into Claude thinking content
+# blocks. Kiro's official reasoning channel is reasoningContentEvent; the
+# tag-based path is unofficial and can false-positive when content literally
+# contains the tag string (code samples, discussion, XML fixtures), silently
+# truncating responses. Default: false.
+#kiro-extract-thinking-tag-enable: true
+
 # Kilocode (OAuth-based code assistant)
 # Note: Kilocode uses OAuth device flow authentication.
 # Use the CLI command: ./server --kilo-login
