@@ -636,7 +636,7 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 	// which is valid for the Claude API but causes "Improperly formed request" on Kiro.
 	// Prepend a placeholder user message so the history alternation is correct.
 	if len(messagesArray) > 0 && messagesArray[0].Get("role").String() == "assistant" {
-		placeholder := `{"role":"user","content":"."}`
+		placeholder := `{"role":"user","content":"[start]"}`
 		messagesArray = append([]gjson.Result{gjson.Parse(placeholder)}, messagesArray...)
 		log.Infof("kiro: messages started with assistant role, prepended placeholder user message for Kiro API compatibility")
 	}

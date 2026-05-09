@@ -294,7 +294,10 @@ func ExtractThinkingFromContent(content string) (string, string, bool) {
 		remaining = remaining[endIdx+len(kirocommon.ThinkingEndTag):]
 	}
 
-	return strings.TrimSpace(cleanedContent.String()), strings.TrimSpace(thinkingContent.String()), hasThinking
+	// Only trim the thinking content (which is a standalone block); preserve
+	// whitespace in the cleaned content so streaming chunks don't lose
+	// leading/trailing spaces when concatenated by the client.
+	return cleanedContent.String(), strings.TrimSpace(thinkingContent.String()), hasThinking
 }
 
 // ConvertOpenAIToolsToKiroFormat is a helper that converts OpenAI tools format to Kiro format
