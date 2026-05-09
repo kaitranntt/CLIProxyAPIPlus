@@ -1672,10 +1672,16 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 	// Convert API models to ModelInfo
 	models := convertKiroAPIModels(apiModels)
 
-	// Generate agentic variants
+	baseCount := len(models)
+
+	// Generate agentic variants (only when kiro-system-prompt-inject-enable is on).
 	models = generateKiroAgenticVariants(models)
 
-	log.Infof("kiro: successfully fetched %d models from API (including agentic variants)", len(models))
+	if len(models) > baseCount {
+		log.Infof("kiro: fetched %d models from API (+%d agentic variants)", baseCount, len(models)-baseCount)
+	} else {
+		log.Infof("kiro: fetched %d models from API", baseCount)
+	}
 	return models
 }
 
