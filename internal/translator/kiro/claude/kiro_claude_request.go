@@ -660,9 +660,9 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 	}
 
 	// Filter orphaned tool results from history user messages
-	for i, h := range history {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil {
-			ctx := h.UserInputMessage.UserInputMessageContext
+	for i := range history {
+		if history[i].UserInputMessage != nil && history[i].UserInputMessage.UserInputMessageContext != nil {
+			ctx := history[i].UserInputMessage.UserInputMessageContext
 			if len(ctx.ToolResults) > 0 {
 				filtered := make([]KiroToolResult, 0, len(ctx.ToolResults))
 				for _, tr := range ctx.ToolResults {
@@ -674,7 +674,8 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 				}
 				ctx.ToolResults = filtered
 				if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
-					h.UserInputMessage.UserInputMessageContext = nil
+					// Use index to modify the actual slice element, not a range copy
+					history[i].UserInputMessage.UserInputMessageContext = nil
 				}
 			}
 		}
