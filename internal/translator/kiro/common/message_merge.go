@@ -98,6 +98,12 @@ func mergeMessageContent(msg1, msg2 gjson.Result) string {
 	// Combine all blocks
 	allBlocks := append(blocks1, blocks2...)
 
+	// Guard: if both messages had null/missing content, produce a minimal text block
+	// rather than marshalling an empty array ("content":[] is rejected by Kiro API).
+	if len(allBlocks) == 0 {
+		return `[{"type":"text","text":""}]`
+	}
+
 	// Convert to JSON
 	result, _ := json.Marshal(allBlocks)
 	return string(result)

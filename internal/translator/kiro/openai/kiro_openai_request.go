@@ -622,11 +622,11 @@ func filterOrphanedToolResults(history []KiroHistoryMessage, currentToolResults 
 		}
 	}
 
-	for i, h := range history {
-		if h.UserInputMessage == nil || h.UserInputMessage.UserInputMessageContext == nil {
+	for i := range history {
+		if history[i].UserInputMessage == nil || history[i].UserInputMessage.UserInputMessageContext == nil {
 			continue
 		}
-		ctx := h.UserInputMessage.UserInputMessageContext
+		ctx := history[i].UserInputMessage.UserInputMessageContext
 		if len(ctx.ToolResults) == 0 {
 			continue
 		}
@@ -641,7 +641,8 @@ func filterOrphanedToolResults(history []KiroHistoryMessage, currentToolResults 
 		}
 		ctx.ToolResults = filtered
 		if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
-			h.UserInputMessage.UserInputMessageContext = nil
+			// Use index to modify the actual slice element, not a range copy
+			history[i].UserInputMessage.UserInputMessageContext = nil
 		}
 	}
 
