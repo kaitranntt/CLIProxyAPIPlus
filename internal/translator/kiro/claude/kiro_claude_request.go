@@ -255,6 +255,13 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		} else {
 			log.Debugf("kiro: no system prompt present in fallback user message")
 		}
+		// CRITICAL: Kiro API requires non-empty content for currentMessage.
+		// When system prompt injection is disabled, fallbackContent is empty.
+		// Use DefaultUserContent to avoid "Improperly formed request" 400 error.
+		if strings.TrimSpace(fallbackContent) == "" {
+			fallbackContent = kirocommon.DefaultUserContent
+			log.Debugf("kiro: fallback user message content was empty, using default: %s", fallbackContent)
+		}
 		currentMessage = KiroCurrentMessage{UserInputMessage: KiroUserInputMessage{
 			Content: fallbackContent,
 			ModelID: modelID,
