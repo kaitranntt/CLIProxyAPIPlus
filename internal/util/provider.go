@@ -9,7 +9,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -64,24 +63,6 @@ func GetProviderName(modelName string) []string {
 	}
 
 	return providers
-}
-
-// NormalizeRoutableThinkingAlias rewrites a known hyphen thinking alias such as
-// "gpt-5.5-high" to the canonical suffix form "gpt-5.5(high)".
-func NormalizeRoutableThinkingAlias(modelName string) string {
-	parsed := thinking.ParseHyphenSuffixAlias(modelName)
-	if !parsed.HasSuffix {
-		return modelName
-	}
-
-	baseModel := strings.TrimSpace(parsed.ModelName)
-	if baseModel == "" {
-		return modelName
-	}
-	if !strings.EqualFold(baseModel, "auto") && len(registry.GetGlobalRegistry().GetModelProviders(baseModel)) == 0 {
-		return modelName
-	}
-	return baseModel + "(" + parsed.RawSuffix + ")"
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.

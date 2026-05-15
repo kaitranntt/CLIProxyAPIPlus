@@ -43,42 +43,6 @@ func ParseSuffix(model string) SuffixResult {
 	}
 }
 
-// ParseHyphenSuffixAlias extracts legacy shorthand thinking suffixes from model names.
-//
-// The shorthand format is: model-name-value, where value is a valid thinking
-// level or special suffix. It is intentionally separate from ParseSuffix so
-// callers can first prove the base model is routable before treating the tail as
-// configuration instead of part of a custom model ID.
-func ParseHyphenSuffixAlias(model string) SuffixResult {
-	trimmed := strings.TrimSpace(model)
-	if trimmed == "" || ParseSuffix(trimmed).HasSuffix {
-		return SuffixResult{ModelName: model, HasSuffix: false}
-	}
-
-	lastDash := strings.LastIndex(trimmed, "-")
-	if lastDash <= 0 || lastDash >= len(trimmed)-1 {
-		return SuffixResult{ModelName: model, HasSuffix: false}
-	}
-
-	baseModel := strings.TrimSpace(trimmed[:lastDash])
-	rawSuffix := strings.ToLower(strings.TrimSpace(trimmed[lastDash+1:]))
-	if baseModel == "" || rawSuffix == "" {
-		return SuffixResult{ModelName: model, HasSuffix: false}
-	}
-
-	if _, ok := ParseSpecialSuffix(rawSuffix); !ok {
-		if _, ok := ParseLevelSuffix(rawSuffix); !ok {
-			return SuffixResult{ModelName: model, HasSuffix: false}
-		}
-	}
-
-	return SuffixResult{
-		ModelName: baseModel,
-		HasSuffix: true,
-		RawSuffix: rawSuffix,
-	}
-}
-
 // ParseNumericSuffix attempts to parse a raw suffix as a numeric budget value.
 //
 // This function parses the raw suffix content (from ParseSuffix.RawSuffix) as an integer.

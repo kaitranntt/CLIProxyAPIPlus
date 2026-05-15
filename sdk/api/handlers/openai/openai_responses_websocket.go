@@ -608,7 +608,6 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 }
 
 func responsesWebsocketResolvedModelName(modelName string) string {
-	modelName = util.NormalizeRoutableThinkingAlias(modelName)
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)

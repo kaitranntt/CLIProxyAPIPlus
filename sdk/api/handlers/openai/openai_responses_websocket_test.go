@@ -81,21 +81,6 @@ type websocketPinnedFailoverStatusError struct {
 	msg    string
 }
 
-func TestResponsesWebsocketResolvedModelName_CanonicalizesHyphenThinkingAlias(t *testing.T) {
-	modelRegistry := registry.GetGlobalRegistry()
-	modelRegistry.RegisterClient("test-websocket-codex-alias", "codex", []*registry.ModelInfo{
-		{ID: "gpt-5.5", Created: time.Now().Unix()},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient("test-websocket-codex-alias")
-	})
-
-	got := responsesWebsocketResolvedModelName("gpt-5.5-high")
-	if got != "gpt-5.5(high)" {
-		t.Fatalf("responsesWebsocketResolvedModelName() = %q, want %q", got, "gpt-5.5(high)")
-	}
-}
-
 func (e websocketPinnedFailoverStatusError) Error() string { return e.msg }
 
 func (e websocketPinnedFailoverStatusError) StatusCode() int { return e.status }
