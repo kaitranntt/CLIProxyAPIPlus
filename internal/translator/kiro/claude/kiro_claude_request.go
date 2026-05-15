@@ -713,16 +713,7 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 		}
 	}
 
-	// POST-PROCESSING step 1: Truncate history if too long.
-	// Must happen BEFORE orphaned tool result filtering so that after truncation,
-	// any tool_results referencing dropped tool_use turns are also cleaned up.
-	const kiroMaxHistoryMessages = 50
-	if len(history) > kiroMaxHistoryMessages {
-		log.Debugf("kiro: truncating history from %d to %d messages", len(history), kiroMaxHistoryMessages)
-		history = history[len(history)-kiroMaxHistoryMessages:]
-	}
-
-	// POST-PROCESSING step 2: Remove orphaned tool_results that have no matching tool_use
+	// POST-PROCESSING step 1: Remove orphaned tool_results that have no matching tool_use
 	// in any assistant message. This happens when Claude Code compaction truncates
 	// the conversation and removes the assistant message containing the tool_use,
 	// but keeps the user message with the corresponding tool_result.
