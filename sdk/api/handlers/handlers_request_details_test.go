@@ -22,9 +22,13 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	})
 	modelRegistry.RegisterClient("test-request-details-openai", "openai", []*registry.ModelInfo{
 		{ID: "gpt-5.2", Created: now + 20},
+		{ID: "literal-high", Created: now + 15},
 	})
 	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-5", Created: now + 5},
+	})
+	modelRegistry.RegisterClient("test-request-details-codex", "codex", []*registry.ModelInfo{
+		{ID: "gpt-5.5", Created: now + 10},
 	})
 
 	// Ensure cleanup of all test registrations.
@@ -32,6 +36,7 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 		"test-request-details-gemini",
 		"test-request-details-openai",
 		"test-request-details-claude",
+		"test-request-details-codex",
 	}
 	for _, clientID := range clientIDs {
 		id := clientID
@@ -64,10 +69,31 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			wantErr:       false,
 		},
 		{
+			name:          "hyphen level alias canonicalized",
+			inputModel:    "gpt-5.5-high",
+			wantProviders: []string{"codex"},
+			wantModel:     "gpt-5.5(high)",
+			wantErr:       false,
+		},
+		{
+			name:          "hyphen xhigh alias lowercased",
+			inputModel:    "gpt-5.5-XHIGH",
+			wantProviders: []string{"codex"},
+			wantModel:     "gpt-5.5(xhigh)",
+			wantErr:       false,
+		},
+		{
 			name:          "no suffix unchanged",
 			inputModel:    "claude-sonnet-4-5",
 			wantProviders: []string{"claude"},
 			wantModel:     "claude-sonnet-4-5",
+			wantErr:       false,
+		},
+		{
+			name:          "registered model ending in high unchanged",
+			inputModel:    "literal-high",
+			wantProviders: []string{"openai"},
+			wantModel:     "literal-high",
 			wantErr:       false,
 		},
 		{
