@@ -236,7 +236,16 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
 
-		// Build userInputMessageContext with tools and tool results
+		// Build userInputMessageContext with tools and tool results.
+		// See claude translator for the rationale — Kiro rejects requests when
+		// history contains tool turns but currentMessage.tools is empty. Fall
+		// back to stub specs derived from history if the client omitted tools.
+		if len(kiroTools) == 0 {
+			kiroTools = synthesizeToolSpecsFromHistory(history)
+			if len(kiroTools) > 0 {
+				log.Infof("kiro-openai: synthesized %d stub tool spec(s) from history (client did not send tools)", len(kiroTools))
+			}
+		}
 		if len(kiroTools) > 0 || len(currentToolResults) > 0 {
 			currentUserMsg.UserInputMessageContext = &KiroUserInputMessageContext{
 				Tools:       kiroTools,
@@ -389,6 +398,43 @@ func ensureKiroInputSchema(parameters interface{}) interface{} {
 		"type":       "object",
 		"properties": map[string]interface{}{},
 	}
+}
+
+// synthesizeToolSpecsFromHistory builds stub KiroToolWrapper entries from any
+// toolUse names referenced in history. See the matching helper in the claude
+// translator for context — Kiro requires currentMessage.userInputMessageContext.tools
+// to be non-empty whenever history contains tool turns; otherwise the API
+// rejects the request with "Improperly formed request".
+func synthesizeToolSpecsFromHistory(history []KiroHistoryMessage) []KiroToolWrapper {
+	if len(history) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var stubs []KiroToolWrapper
+	for _, h := range history {
+		if h.AssistantResponseMessage == nil {
+			continue
+		}
+		for _, tu := range h.AssistantResponseMessage.ToolUses {
+			name := strings.TrimSpace(tu.Name)
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			stubs = append(stubs, KiroToolWrapper{
+				ToolSpecification: KiroToolSpecification{
+					Name:        shortenToolNameIfNeeded(name),
+					Description: fmt.Sprintf("Tool: %s", name),
+					InputSchema: KiroInputSchema{JSON: map[string]interface{}{
+						"type":                 "object",
+						"properties":           map[string]interface{}{},
+						"additionalProperties": true,
+					}},
+				},
+			})
+		}
+	}
+	return stubs
 }
 
 // convertOpenAIToolsToKiro converts OpenAI tools to Kiro format
