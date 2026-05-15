@@ -240,7 +240,7 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		// See claude translator for the rationale — Kiro rejects requests when
 		// history contains tool turns but currentMessage.tools is empty. Fall
 		// back to stub specs derived from history if the client omitted tools.
-		if len(kiroTools) == 0 {
+		if len(kiroTools) == 0 && !isChatOnly {
 			kiroTools = synthesizeToolSpecsFromHistory(history)
 			if len(kiroTools) > 0 {
 				log.Infof("kiro-openai: synthesized %d stub tool spec(s) from history (client did not send tools)", len(kiroTools))

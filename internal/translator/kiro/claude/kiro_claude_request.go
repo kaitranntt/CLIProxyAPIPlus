@@ -245,7 +245,7 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		// To stay robust to those clients, synthesize minimal stub tool specs
 		// from the names referenced in history whenever the client didn't
 		// provide tools but history references them.
-		if len(kiroTools) == 0 {
+		if len(kiroTools) == 0 && !isChatOnly {
 			kiroTools = synthesizeToolSpecsFromHistory(history)
 			if len(kiroTools) > 0 {
 				log.Infof("kiro: synthesized %d stub tool spec(s) from history (client did not send tools)", len(kiroTools))
