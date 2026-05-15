@@ -316,24 +316,6 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		return nil, false
 	}
 
-	// Debug: log key fields of the final payload to diagnose 400 errors
-	currentMsg := payload.ConversationState.CurrentMessage.UserInputMessage
-	hasCtx := currentMsg.UserInputMessageContext != nil
-	var toolCount, toolResultCount int
-	if hasCtx {
-		toolCount = len(currentMsg.UserInputMessageContext.Tools)
-		toolResultCount = len(currentMsg.UserInputMessageContext.ToolResults)
-	}
-	log.Debugf("kiro: payload summary: historyLen=%d currentContent=%q contentLen=%d hasCtx=%v toolCount=%d toolResultCount=%d thinkingEnabled=%v",
-		len(payload.ConversationState.History),
-		truncateForLog(currentMsg.Content, 80),
-		len(currentMsg.Content),
-		hasCtx,
-		toolCount,
-		toolResultCount,
-		thinkingEnabled,
-	)
-
 	return result, thinkingEnabled
 }
 
@@ -1027,10 +1009,3 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 	}
 }
 
-// truncateForLog truncates a string to maxLen for log output.
-func truncateForLog(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
