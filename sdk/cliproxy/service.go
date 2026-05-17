@@ -129,7 +129,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
-		sdkAuth.NewGitLabAuthenticator(),
+		sdkAuth.NewXAIAuthenticator(),
 	)
 }
 
@@ -464,18 +464,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
-	case "kiro":
-		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
-	case "kilo":
-		s.coreManager.RegisterExecutor(executor.NewKiloExecutor(s.cfg))
-	case "cursor":
-		s.coreManager.RegisterExecutor(executor.NewCursorExecutor(s.cfg))
-	case "github-copilot":
-		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
-	case "codebuddy":
-		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(s.cfg))
-	case "gitlab":
-		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
+	case "xai":
+		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -597,6 +587,9 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(newCfg)
 		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+	}
+	if newCfg.Home.Enabled {
+		s.registerHomeExecutors()
 	}
 	s.rebindExecutors()
 }
@@ -1198,34 +1191,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
-	case "cursor":
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		models = executor.FetchCursorModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
-	case "github-copilot":
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
-	case "kiro":
-		models = s.fetchKiroModels(a)
-		// Filter out agentic variants when system prompt injection is disabled,
-		// since the agentic prompt is delivered via system prompt injection.
-		// Use the runtime global flag (not config field) to stay consistent
-		// with the translator's actual behavior.
-		if !kirocommon.IsSystemPromptInjectEnabled() {
-			models = filterAgenticVariants(models)
-		}
-		models = applyExcludedModels(models, excluded)
-	case "kilo":
-		models = executor.FetchKiloModels(context.Background(), a, s.cfg)
-		models = applyExcludedModels(models, excluded)
-	case "gitlab":
-		models = executor.GitLabModelsFromAuth(a)
-		models = applyExcludedModels(models, excluded)
-	case "codebuddy":
-		models = registry.GetCodeBuddyModels()
+	case "xai":
+		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
