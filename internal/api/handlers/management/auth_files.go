@@ -35,6 +35,7 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"

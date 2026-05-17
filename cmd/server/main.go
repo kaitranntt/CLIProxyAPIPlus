@@ -66,6 +66,8 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	} else {
 		cfg.IncognitoBrowser = true // Kiro default
 	}
+}
+
 func parseHomeFlagConfig(rawAddr string, password string) (config.HomeConfig, error) {
 	rawAddr = strings.TrimSpace(rawAddr)
 	if rawAddr == "" {
