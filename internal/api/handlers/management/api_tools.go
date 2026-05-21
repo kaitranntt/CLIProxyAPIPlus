@@ -14,6 +14,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -429,8 +430,8 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
-	clientID := oauthClientValue(metadata, "client_id", antigravityOAuthClientIDEnv)
-	clientSecret := oauthClientValue(metadata, "client_secret", antigravityOAuthClientSecretEnv)
+	clientID := antigravityOAuthClientValue(metadata, "client_id", antigravityOAuthClientIDEnv)
+	clientSecret := antigravityOAuthClientValue(metadata, "client_secret", antigravityOAuthClientSecretEnv)
 	if clientID == "" || clientSecret == "" {
 		return "", fmt.Errorf("antigravity oauth client credentials missing")
 	}
@@ -594,6 +595,20 @@ func oauthClientValue(metadata map[string]any, key string, envName string) strin
 		return value
 	}
 	return strings.TrimSpace(os.Getenv(envName))
+}
+
+func antigravityOAuthClientValue(metadata map[string]any, key string, envName string) string {
+	if value := oauthClientValue(metadata, key, envName); value != "" {
+		return value
+	}
+	switch envName {
+	case antigravityOAuthClientIDEnv:
+		return antigravityauth.DefaultClientID
+	case antigravityOAuthClientSecretEnv:
+		return antigravityauth.DefaultClientSecret
+	default:
+		return ""
+	}
 }
 
 func cloneMap(in map[string]any) map[string]any {

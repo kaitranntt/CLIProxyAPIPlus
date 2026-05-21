@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -1759,7 +1760,17 @@ func antigravityOAuthClientValue(auth *cliproxyauth.Auth, key string, envName st
 			return value
 		}
 	}
-	return strings.TrimSpace(os.Getenv(envName))
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	switch envName {
+	case antigravityClientIDEnv:
+		return antigravityauth.DefaultClientID
+	case antigravityClientSecretEnv:
+		return antigravityauth.DefaultClientSecret
+	default:
+		return ""
+	}
 }
 
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {

@@ -8,15 +8,31 @@ import (
 
 // OAuth client credentials and configuration
 const (
-	ClientIDEnv     = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
-	ClientSecretEnv = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
-	CallbackPort    = 51121
+	ClientIDEnv         = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
+	ClientSecretEnv     = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
+	DefaultClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	DefaultClientSecret = "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"
+	CallbackPort        = 51121
 )
 
 var (
-	ClientID     = strings.TrimSpace(os.Getenv(ClientIDEnv))
-	ClientSecret = strings.TrimSpace(os.Getenv(ClientSecretEnv))
+	ClientID     = OAuthClientID()
+	ClientSecret = OAuthClientSecret()
 )
+
+func OAuthClientID() string {
+	if value := strings.TrimSpace(os.Getenv(ClientIDEnv)); value != "" {
+		return value
+	}
+	return DefaultClientID
+}
+
+func OAuthClientSecret() string {
+	if value := strings.TrimSpace(os.Getenv(ClientSecretEnv)); value != "" {
+		return value
+	}
+	return DefaultClientSecret
+}
 
 // Scopes defines the OAuth scopes required for Antigravity authentication
 var Scopes = []string{
