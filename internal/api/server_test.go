@@ -161,6 +161,38 @@ func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *t
 	}
 }
 
+func TestCorsMiddlewareSkipsManagementRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(corsMiddleware())
+	router.OPTIONS("/v0/management/config", func(c *gin.Context) {
+		c.Status(http.StatusUnauthorized)
+	})
+	router.OPTIONS("/v1/models", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	managementReq := httptest.NewRequest(http.MethodOptions, "/v0/management/config", nil)
+	managementRR := httptest.NewRecorder()
+	router.ServeHTTP(managementRR, managementReq)
+	if managementRR.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("management CORS origin = %q, want empty", managementRR.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if managementRR.Code != http.StatusUnauthorized {
+		t.Fatalf("management status = %d, want %d", managementRR.Code, http.StatusUnauthorized)
+	}
+
+	apiReq := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	apiRR := httptest.NewRecorder()
+	router.ServeHTTP(apiRR, apiReq)
+	if apiRR.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("api CORS origin = %q, want *", apiRR.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if apiRR.Code != http.StatusNoContent {
+		t.Fatalf("api status = %d, want %d", apiRR.Code, http.StatusNoContent)
+	}
+}
+
 func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 

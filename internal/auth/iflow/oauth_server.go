@@ -55,7 +55,7 @@ func (s *OAuthServer) Start() error {
 	mux.HandleFunc("/oauth2callback", s.handleCallback)
 
 	s.server = &http.Server{
-		Addr:         fmt.Sprintf(":%d", s.port),
+		Addr:         fmt.Sprintf("localhost:%d", s.port),
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -133,7 +133,7 @@ func (s *OAuthServer) sendResult(res *OAuthResult) {
 }
 
 func (s *OAuthServer) isPortAvailable() bool {
-	addr := fmt.Sprintf(":%d", s.port)
+	addr := fmt.Sprintf("localhost:%d", s.port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return false

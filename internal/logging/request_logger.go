@@ -192,6 +192,45 @@ func cloneHeaders(headers map[string][]string) map[string][]string {
 	return out
 }
 
+func sanitizeHomeHeaders(headers map[string][]string) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if isHomeSensitiveHeader(key) {
+			out[key] = []string{"[REDACTED]"}
+			continue
+		}
+		if values == nil {
+			out[key] = nil
+			continue
+		}
+		copied := make([]string, len(values))
+		copy(copied, values)
+		out[key] = copied
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func isHomeSensitiveHeader(key string) bool {
+	lowerKey := strings.ToLower(strings.TrimSpace(key))
+	switch lowerKey {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-goog-api-key":
+		return true
+	}
+	return strings.Contains(lowerKey, "api-key") ||
+		strings.Contains(lowerKey, "apikey") ||
+		strings.Contains(lowerKey, "token") ||
+		strings.Contains(lowerKey, "secret")
+}
+
 func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers map[string][]string, logText string) error {
 	if l == nil || !l.homeEnabled {
 		return nil
@@ -201,7 +240,7 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 		return nil
 	}
 	payload := homeRequestLogPayload{
-		Headers:    cloneHeaders(headers),
+		Headers:    sanitizeHomeHeaders(headers),
 		RequestLog: logText,
 	}
 	raw, errMarshal := json.Marshal(&payload)
@@ -1765,7 +1804,7 @@ func (w *homeStreamingLogWriter) Close() error {
 	}
 
 	payload := homeRequestLogPayload{
-		Headers:    cloneHeaders(w.requestHeaders),
+		Headers:    sanitizeHomeHeaders(w.requestHeaders),
 		RequestLog: buf.String(),
 	}
 	raw, errMarshal := json.Marshal(&payload)
