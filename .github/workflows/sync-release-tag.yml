@@ -58,7 +58,6 @@ jobs:
             exit 0
           fi
 
-          FORK_TAG="${UPSTREAM_TAG}-0"
           # GITHUB_TOKEN tag pushes do NOT trigger downstream workflows, so we
           # explicitly dispatch release.yaml AND docker-image.yml after tagging.
           dispatch_downstream() {
@@ -67,16 +66,59 @@ jobs:
             gh workflow run docker-image.yml --repo "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}" -f tag="${tag}" || true
           }
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${FORK_TAG}" >/dev/null 2>&1; then
-            if gh release view "${FORK_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-              echo "[i] ${FORK_TAG} release already exists; nothing to tag."
+          latest_fork_tag() {
+            git tag --merged HEAD --list "${UPSTREAM_TAG}-[0-9]*" --sort=-v:refname | head -1 || true
+          }
+
+          next_fork_tag() {
+            local latest="$1"
+            local suffix="0"
+
+            if [ -n "$latest" ]; then
+              suffix="${latest##*-}"
+              suffix="$((suffix + 1))"
+            fi
+
+            echo "${UPSTREAM_TAG}-${suffix}"
+          }
+
+          has_release_relevant_changes() {
+            local base_commit="$1"
+
+            git diff --name-only "${base_commit}..HEAD" \
+              | grep -Ev '^(\.github/|docs/|plans/|.*\.md$)' \
+              | grep -q .
+          }
+
+          LATEST_FORK_TAG="$(latest_fork_tag)"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+
+          if [ -n "$LATEST_FORK_TAG" ]; then
+            LATEST_FORK_COMMIT="$(git rev-list -n 1 "$LATEST_FORK_TAG")"
+
+            if [ "$LATEST_FORK_COMMIT" = "$HEAD_COMMIT" ]; then
+              if gh release view "${LATEST_FORK_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+                echo "[i] ${LATEST_FORK_TAG} release already exists; nothing to tag."
+                exit 0
+              fi
+
+              echo "[i] ${LATEST_FORK_TAG} tag already exists but release is missing; dispatching downstream workflows."
+              dispatch_downstream "${LATEST_FORK_TAG}"
               exit 0
             fi
 
-            echo "[i] ${FORK_TAG} tag already exists but release is missing; dispatching downstream workflows."
-            dispatch_downstream "${FORK_TAG}"
-            exit 0
+            if ! git merge-base --is-ancestor "$LATEST_FORK_COMMIT" "$HEAD_COMMIT"; then
+              echo "[!] Latest fork tag ${LATEST_FORK_TAG} is not an ancestor of HEAD; refusing to guess release tag."
+              exit 1
+            fi
+
+            if ! has_release_relevant_changes "$LATEST_FORK_COMMIT"; then
+              echo "[i] No release-relevant changes since ${LATEST_FORK_TAG}; nothing to tag."
+              exit 0
+            fi
           fi
+
+          FORK_TAG="$(next_fork_tag "$LATEST_FORK_TAG")"
 
           echo "[i] Creating ${FORK_TAG} for upstream ${UPSTREAM_TAG}."
           git tag -a "$FORK_TAG" -m "CLIProxyAPIPlus ${FORK_TAG} (upstream ${UPSTREAM_TAG})"
