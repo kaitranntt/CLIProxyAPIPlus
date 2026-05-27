@@ -1852,7 +1852,6 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
 					usageInfo.CacheReadTokens = int64(cacheReadTokens)
-					usageInfo.CachedTokens = int64(cacheReadTokens)
 					log.Debugf("kiro: parseEventStream found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
 				}
 				// cacheWriteInputTokens - tokens written to cache
@@ -2122,9 +2121,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		}
 	}
 
-	if usageInfo.CachedTokens == 0 {
-		usageInfo.CachedTokens = usageInfo.CacheCreationTokens
-	}
+	usageInfo.CachedTokens = usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens + usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 	return cleanedContent, toolUses, usageInfo, stopReason, nil
 }
@@ -3198,7 +3195,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
 					totalUsage.CacheReadTokens = int64(cacheReadTokens)
-					totalUsage.CachedTokens = int64(cacheReadTokens)
 					hasUpstreamUsage = true
 					log.Debugf("kiro: streamToChannel found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
 				}
@@ -3440,9 +3436,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		totalUsage.InputTokens = estimatedInputTokens
 	}
 
-	if totalUsage.CachedTokens == 0 {
-		totalUsage.CachedTokens = totalUsage.CacheCreationTokens
-	}
+	totalUsage.CachedTokens = totalUsage.CacheReadTokens + totalUsage.CacheCreationTokens
 	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens + totalUsage.CacheReadTokens + totalUsage.CacheCreationTokens
 
 	// Log upstream usage information if received

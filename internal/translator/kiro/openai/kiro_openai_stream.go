@@ -116,7 +116,7 @@ func BuildOpenAISSEFinish(state *OpenAIStreamState, finishReason string) string 
 
 // BuildOpenAISSEUsage creates an SSE event with usage information
 func BuildOpenAISSEUsage(state *OpenAIStreamState, usageInfo usage.Detail) string {
-	promptTokens := usageInfo.InputTokens + usageInfo.CachedTokens + usageInfo.CacheCreationTokens
+	promptTokens := usageInfo.InputTokens + usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 
 	chunk := map[string]interface{}{
 		"id":      state.ResponseID,

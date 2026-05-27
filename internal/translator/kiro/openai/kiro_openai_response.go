@@ -29,7 +29,7 @@ func BuildOpenAIResponse(content string, toolUses []KiroToolUse, model string, u
 // reasoningContent is included as reasoning_content field in the message when present.
 // stopReason is passed from upstream; fallback logic applied if empty.
 func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
-	promptTokens := usageInfo.InputTokens + usageInfo.CachedTokens + usageInfo.CacheCreationTokens
+	promptTokens := usageInfo.InputTokens + usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 
 	// Build the message object
 	message := map[string]interface{}{
@@ -253,7 +253,7 @@ func BuildOpenAIStreamFinishChunk(model string, finishReason string) []byte {
 
 // BuildOpenAIStreamUsageChunk creates a chunk with usage information (optional, for stream_options.include_usage)
 func BuildOpenAIStreamUsageChunk(model string, usageInfo usage.Detail) []byte {
-	promptTokens := usageInfo.InputTokens + usageInfo.CachedTokens + usageInfo.CacheCreationTokens
+	promptTokens := usageInfo.InputTokens + usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 
 	chunk := map[string]interface{}{
 		"id":      "chatcmpl-" + uuid.New().String()[:12],
