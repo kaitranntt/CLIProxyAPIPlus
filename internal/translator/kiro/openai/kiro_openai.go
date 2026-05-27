@@ -144,12 +144,11 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 
 		// Extract usage if present
 		if eventJSON.Get("usage").Exists() {
-			inputTokens := eventJSON.Get("usage.input_tokens").Int()
-			outputTokens := eventJSON.Get("usage.output_tokens").Int()
 			usageInfo := usage.Detail{
-				InputTokens:  inputTokens,
-				OutputTokens: outputTokens,
-				TotalTokens:  inputTokens + outputTokens,
+				InputTokens:         eventJSON.Get("usage.input_tokens").Int(),
+				OutputTokens:        eventJSON.Get("usage.output_tokens").Int(),
+				CachedTokens:        eventJSON.Get("usage.cache_read_input_tokens").Int(),
+				CacheCreationTokens: eventJSON.Get("usage.cache_creation_input_tokens").Int(),
 			}
 			chunk := BuildOpenAISSEUsage(state, usageInfo)
 			results = append(results, []byte(chunk))
@@ -163,12 +162,11 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 	case "ping":
 		// Ping event with usage - optionally emit usage chunk
 		if eventJSON.Get("usage").Exists() {
-			inputTokens := eventJSON.Get("usage.input_tokens").Int()
-			outputTokens := eventJSON.Get("usage.output_tokens").Int()
 			usageInfo := usage.Detail{
-				InputTokens:  inputTokens,
-				OutputTokens: outputTokens,
-				TotalTokens:  inputTokens + outputTokens,
+				InputTokens:         eventJSON.Get("usage.input_tokens").Int(),
+				OutputTokens:        eventJSON.Get("usage.output_tokens").Int(),
+				CachedTokens:        eventJSON.Get("usage.cache_read_input_tokens").Int(),
+				CacheCreationTokens: eventJSON.Get("usage.cache_creation_input_tokens").Int(),
 			}
 			chunk := BuildOpenAISSEUsage(state, usageInfo)
 			results = append(results, []byte(chunk))
@@ -230,10 +228,12 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 
 	// Extract usage
 	usageInfo := usage.Detail{
-		InputTokens:  response.Get("usage.input_tokens").Int(),
-		OutputTokens: response.Get("usage.output_tokens").Int(),
+		InputTokens:         response.Get("usage.input_tokens").Int(),
+		OutputTokens:        response.Get("usage.output_tokens").Int(),
+		CachedTokens:        response.Get("usage.cache_read_input_tokens").Int(),
+		CacheCreationTokens: response.Get("usage.cache_creation_input_tokens").Int(),
 	}
-	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
+	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens + usageInfo.CachedTokens + usageInfo.CacheCreationTokens
 
 	// Build OpenAI response with reasoning_content support
 	openaiResponse := BuildOpenAIResponseWithReasoning(content, reasoningContent, toolUses, model, usageInfo, stopReason)

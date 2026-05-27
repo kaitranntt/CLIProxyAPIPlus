@@ -116,6 +116,8 @@ func BuildOpenAISSEFinish(state *OpenAIStreamState, finishReason string) string 
 
 // BuildOpenAISSEUsage creates an SSE event with usage information
 func BuildOpenAISSEUsage(state *OpenAIStreamState, usageInfo usage.Detail) string {
+	promptTokens := usageInfo.InputTokens + usageInfo.CachedTokens + usageInfo.CacheCreationTokens
+
 	chunk := map[string]interface{}{
 		"id":      state.ResponseID,
 		"object":  "chat.completion.chunk",
@@ -123,9 +125,12 @@ func BuildOpenAISSEUsage(state *OpenAIStreamState, usageInfo usage.Detail) strin
 		"model":   state.Model,
 		"choices": []map[string]interface{}{},
 		"usage": map[string]interface{}{
-			"prompt_tokens":     usageInfo.InputTokens,
+			"prompt_tokens":     promptTokens,
 			"completion_tokens": usageInfo.OutputTokens,
-			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
+			"total_tokens":      promptTokens + usageInfo.OutputTokens,
+			"prompt_tokens_details": map[string]interface{}{
+				"cached_tokens": usageInfo.CachedTokens,
+			},
 		},
 	}
 	result, _ := json.Marshal(chunk)

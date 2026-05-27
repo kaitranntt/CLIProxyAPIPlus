@@ -29,6 +29,8 @@ func BuildOpenAIResponse(content string, toolUses []KiroToolUse, model string, u
 // reasoningContent is included as reasoning_content field in the message when present.
 // stopReason is passed from upstream; fallback logic applied if empty.
 func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
+	promptTokens := usageInfo.InputTokens + usageInfo.CachedTokens + usageInfo.CacheCreationTokens
+
 	// Build the message object
 	message := map[string]interface{}{
 		"role":    "assistant",
@@ -85,9 +87,12 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 			},
 		},
 		"usage": map[string]interface{}{
-			"prompt_tokens":     usageInfo.InputTokens,
+			"prompt_tokens":     promptTokens,
 			"completion_tokens": usageInfo.OutputTokens,
-			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
+			"total_tokens":      promptTokens + usageInfo.OutputTokens,
+			"prompt_tokens_details": map[string]interface{}{
+				"cached_tokens": usageInfo.CachedTokens,
+			},
 		},
 	}
 
@@ -246,6 +251,8 @@ func BuildOpenAIStreamFinishChunk(model string, finishReason string) []byte {
 
 // BuildOpenAIStreamUsageChunk creates a chunk with usage information (optional, for stream_options.include_usage)
 func BuildOpenAIStreamUsageChunk(model string, usageInfo usage.Detail) []byte {
+	promptTokens := usageInfo.InputTokens + usageInfo.CachedTokens + usageInfo.CacheCreationTokens
+
 	chunk := map[string]interface{}{
 		"id":      "chatcmpl-" + uuid.New().String()[:12],
 		"object":  "chat.completion.chunk",
@@ -253,9 +260,12 @@ func BuildOpenAIStreamUsageChunk(model string, usageInfo usage.Detail) []byte {
 		"model":   model,
 		"choices": []map[string]interface{}{},
 		"usage": map[string]interface{}{
-			"prompt_tokens":     usageInfo.InputTokens,
+			"prompt_tokens":     promptTokens,
 			"completion_tokens": usageInfo.OutputTokens,
-			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
+			"total_tokens":      promptTokens + usageInfo.OutputTokens,
+			"prompt_tokens_details": map[string]interface{}{
+				"cached_tokens": usageInfo.CachedTokens,
+			},
 		},
 	}
 

@@ -1,12 +1,65 @@
 package executor
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"testing"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestKiroParseEventStreamMapsCacheUsageToClaudeSemantics(t *testing.T) {
+	executor := &KiroExecutor{}
+	body := bytes.NewReader(buildKiroEventStreamMessage(t, "messageMetadataEvent", []byte(`{"messageMetadataEvent":{"tokenUsage":{"outputTokens":4,"totalTokens":22048,"uncachedInputTokens":13,"cacheReadInputTokens":22000,"cacheWriteInputTokens":31,"contextUsagePercentage":99}}}`)))
+
+	_, _, gotUsage, _, err := executor.parseEventStream(body)
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+
+	if gotUsage.InputTokens != 13 {
+		t.Fatalf("InputTokens = %d, want %d", gotUsage.InputTokens, 13)
+	}
+	if gotUsage.OutputTokens != 4 {
+		t.Fatalf("OutputTokens = %d, want %d", gotUsage.OutputTokens, 4)
+	}
+	if gotUsage.CacheReadTokens != 22000 {
+		t.Fatalf("CacheReadTokens = %d, want %d", gotUsage.CacheReadTokens, 22000)
+	}
+	if gotUsage.CacheCreationTokens != 31 {
+		t.Fatalf("CacheCreationTokens = %d, want %d", gotUsage.CacheCreationTokens, 31)
+	}
+	if gotUsage.TotalTokens != 22048 {
+		t.Fatalf("TotalTokens = %d, want %d", gotUsage.TotalTokens, 22048)
+	}
+}
+
+func buildKiroEventStreamMessage(t *testing.T, eventType string, payload []byte) []byte {
+	t.Helper()
+
+	var headers bytes.Buffer
+	headers.WriteByte(byte(len(":event-type")))
+	headers.WriteString(":event-type")
+	headers.WriteByte(7)
+	if err := binary.Write(&headers, binary.BigEndian, uint16(len(eventType))); err != nil {
+		t.Fatalf("write event type length: %v", err)
+	}
+	headers.WriteString(eventType)
+
+	headersBytes := headers.Bytes()
+	totalLength := uint32(12 + len(headersBytes) + len(payload) + 4)
+	message := make([]byte, 0, totalLength)
+	prelude := make([]byte, 12)
+	binary.BigEndian.PutUint32(prelude[0:4], totalLength)
+	binary.BigEndian.PutUint32(prelude[4:8], uint32(len(headersBytes)))
+	message = append(message, prelude...)
+	message = append(message, headersBytes...)
+	message = append(message, payload...)
+	message = append(message, 0, 0, 0, 0)
+	return message
+}
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
 	tests := []struct {

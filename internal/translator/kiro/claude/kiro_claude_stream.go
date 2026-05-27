@@ -118,8 +118,10 @@ func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []b
 			"stop_sequence": nil,
 		},
 		"usage": map[string]interface{}{
-			"input_tokens":  usageInfo.InputTokens,
-			"output_tokens": usageInfo.OutputTokens,
+			"input_tokens":                usageInfo.InputTokens,
+			"output_tokens":               usageInfo.OutputTokens,
+			"cache_read_input_tokens":     usageInfo.CacheReadTokens,
+			"cache_creation_input_tokens": usageInfo.CacheCreationTokens,
 		},
 	}
 	deltaResult, _ := json.Marshal(deltaEvent)
