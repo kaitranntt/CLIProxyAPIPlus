@@ -144,12 +144,14 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 
 		// Extract usage if present
 		if eventJSON.Get("usage").Exists() {
-			inputTokens := eventJSON.Get("usage.input_tokens").Int()
-			outputTokens := eventJSON.Get("usage.output_tokens").Int()
+			cacheReadTokens := eventJSON.Get("usage.cache_read_input_tokens").Int()
+			cacheCreationTokens := eventJSON.Get("usage.cache_creation_input_tokens").Int()
 			usageInfo := usage.Detail{
-				InputTokens:  inputTokens,
-				OutputTokens: outputTokens,
-				TotalTokens:  inputTokens + outputTokens,
+				InputTokens:         eventJSON.Get("usage.input_tokens").Int(),
+				OutputTokens:        eventJSON.Get("usage.output_tokens").Int(),
+				CachedTokens:        cacheReadTokens + cacheCreationTokens,
+				CacheReadTokens:     cacheReadTokens,
+				CacheCreationTokens: cacheCreationTokens,
 			}
 			chunk := BuildOpenAISSEUsage(state, usageInfo)
 			results = append(results, []byte(chunk))
@@ -163,12 +165,14 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 	case "ping":
 		// Ping event with usage - optionally emit usage chunk
 		if eventJSON.Get("usage").Exists() {
-			inputTokens := eventJSON.Get("usage.input_tokens").Int()
-			outputTokens := eventJSON.Get("usage.output_tokens").Int()
+			cacheReadTokens := eventJSON.Get("usage.cache_read_input_tokens").Int()
+			cacheCreationTokens := eventJSON.Get("usage.cache_creation_input_tokens").Int()
 			usageInfo := usage.Detail{
-				InputTokens:  inputTokens,
-				OutputTokens: outputTokens,
-				TotalTokens:  inputTokens + outputTokens,
+				InputTokens:         eventJSON.Get("usage.input_tokens").Int(),
+				OutputTokens:        eventJSON.Get("usage.output_tokens").Int(),
+				CachedTokens:        cacheReadTokens + cacheCreationTokens,
+				CacheReadTokens:     cacheReadTokens,
+				CacheCreationTokens: cacheCreationTokens,
 			}
 			chunk := BuildOpenAISSEUsage(state, usageInfo)
 			results = append(results, []byte(chunk))
@@ -229,11 +233,16 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 	}
 
 	// Extract usage
+	cacheReadTokens := response.Get("usage.cache_read_input_tokens").Int()
+	cacheCreationTokens := response.Get("usage.cache_creation_input_tokens").Int()
 	usageInfo := usage.Detail{
-		InputTokens:  response.Get("usage.input_tokens").Int(),
-		OutputTokens: response.Get("usage.output_tokens").Int(),
+		InputTokens:         response.Get("usage.input_tokens").Int(),
+		OutputTokens:        response.Get("usage.output_tokens").Int(),
+		CachedTokens:        cacheReadTokens + cacheCreationTokens,
+		CacheReadTokens:     cacheReadTokens,
+		CacheCreationTokens: cacheCreationTokens,
 	}
-	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
+	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens + usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 
 	// Build OpenAI response with reasoning_content support
 	openaiResponse := BuildOpenAIResponseWithReasoning(content, reasoningContent, toolUses, model, usageInfo, stopReason)

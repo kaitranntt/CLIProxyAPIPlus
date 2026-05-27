@@ -96,6 +96,13 @@ func enqueueTranslatedSSE(out chan<- cliproxyexecutor.StreamChunk, chunk []byte)
 	out <- cliproxyexecutor.StreamChunk{Payload: append(bytes.Clone(chunk), '\n', '\n')}
 }
 
+// hasUpstreamInputUsage reports whether the upstream supplied any input-side
+// token counts (uncached, cache-read, or cache-write). Used to decide whether
+// to fall back to local estimation.
+func hasUpstreamInputUsage(u usage.Detail) bool {
+	return u.InputTokens > 0 || u.CacheReadTokens > 0 || u.CacheCreationTokens > 0
+}
+
 // retryConfig holds configuration for socket retry logic.
 // Based on kiro2Api Python implementation patterns.
 type retryConfig struct {
@@ -980,7 +987,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// Fallback for usage if missing from upstream
 
 			// 1. Estimate InputTokens if missing
-			if usageInfo.InputTokens == 0 {
+			if !hasUpstreamInputUsage(usageInfo) {
 				if enc, encErr := getTokenizer(req.Model); encErr == nil {
 					if inp, countErr := countOpenAIChatTokens(enc, opts.OriginalRequest); countErr == nil {
 						usageInfo.InputTokens = inp
@@ -1006,7 +1013,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			}
 
 			// 3. Update TotalTokens
-			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
+			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens + usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 
 			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
 			reporter.publish(ctx, usageInfo)
@@ -1844,13 +1851,13 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				}
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
-					// Add to input tokens if we have uncached tokens, otherwise use as input
-					if usageInfo.InputTokens > 0 {
-						usageInfo.InputTokens += int64(cacheReadTokens)
-					} else {
-						usageInfo.InputTokens = int64(cacheReadTokens)
-					}
+					usageInfo.CacheReadTokens = int64(cacheReadTokens)
 					log.Debugf("kiro: parseEventStream found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
+				}
+				// cacheWriteInputTokens - tokens written to cache
+				if cacheWriteTokens, ok := tokenUsage["cacheWriteInputTokens"].(float64); ok {
+					usageInfo.CacheCreationTokens = int64(cacheWriteTokens)
+					log.Debugf("kiro: parseEventStream found cacheWriteInputTokens in tokenUsage: %d", int64(cacheWriteTokens))
 				}
 				// contextUsagePercentage - can be used as fallback for input token estimation
 				if ctxPct, ok := tokenUsage["contextUsagePercentage"].(float64); ok {
@@ -2103,7 +2110,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 	// Use contextUsagePercentage to calculate more accurate input tokens
 	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
 	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
-	if upstreamContextPercentage > 0 {
+	if upstreamContextPercentage > 0 && !hasUpstreamInputUsage(usageInfo) {
 		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
 		if calculatedInputTokens > 0 {
 			localEstimate := usageInfo.InputTokens
@@ -2114,6 +2121,8 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		}
 	}
 
+	usageInfo.CachedTokens = usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
+	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens + usageInfo.CacheReadTokens + usageInfo.CacheCreationTokens
 	return cleanedContent, toolUses, usageInfo, stopReason, nil
 }
 
@@ -2364,6 +2373,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Pre-calculate input tokens from request if possible
 	// Kiro uses Claude format, so try Claude format first, then OpenAI format, then fallback
+	var estimatedInputTokens int64
 	if enc, err := getTokenizer(model); err == nil {
 		var inputTokens int64
 		var countMethod string
@@ -2385,9 +2395,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			countMethod = "estimate"
 		}
 
-		totalUsage.InputTokens = inputTokens
+		estimatedInputTokens = inputTokens
 		log.Debugf("kiro: streamToChannel pre-calculated input tokens: %d (method: %s, claude body: %d bytes, original req: %d bytes)",
-			totalUsage.InputTokens, countMethod, len(claudeBody), len(originalReq))
+			estimatedInputTokens, countMethod, len(claudeBody), len(originalReq))
 	}
 
 	contentBlockIndex := -1
@@ -2514,7 +2524,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		// Send message_start on first event
 		if !messageStartSent {
-			msgStart := kiroclaude.BuildClaudeMessageStartEvent(model, totalUsage.InputTokens)
+			msgStart := kiroclaude.BuildClaudeMessageStartEvent(model, estimatedInputTokens)
 			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgStart, &translatorParam)
 			for _, chunk := range sseData {
 				enqueueTranslatedSSE(out, chunk)
@@ -3184,14 +3194,15 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
-					// Add to input tokens if we have uncached tokens, otherwise use as input
-					if totalUsage.InputTokens > 0 {
-						totalUsage.InputTokens += int64(cacheReadTokens)
-					} else {
-						totalUsage.InputTokens = int64(cacheReadTokens)
-					}
+					totalUsage.CacheReadTokens = int64(cacheReadTokens)
 					hasUpstreamUsage = true
 					log.Debugf("kiro: streamToChannel found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
+				}
+				// cacheWriteInputTokens - tokens written to cache
+				if cacheWriteTokens, ok := tokenUsage["cacheWriteInputTokens"].(float64); ok {
+					totalUsage.CacheCreationTokens = int64(cacheWriteTokens)
+					hasUpstreamUsage = true
+					log.Debugf("kiro: streamToChannel found cacheWriteInputTokens in tokenUsage: %d", int64(cacheWriteTokens))
 				}
 				// contextUsagePercentage - can be used as fallback for input token estimation
 				if ctxPct, ok := tokenUsage["contextUsagePercentage"].(float64); ok {
@@ -3407,7 +3418,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
 	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
 	// Note: The effective input context is ~170k (200k - 30k reserved for output)
-	if upstreamContextPercentage > 0 {
+	if upstreamContextPercentage > 0 && !hasUpstreamInputUsage(totalUsage) {
 		// Calculate input tokens from context percentage
 		// Using 200k as the base since that's what Kiro reports against
 		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
@@ -3421,8 +3432,12 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				upstreamContextPercentage, calculatedInputTokens, localEstimate)
 		}
 	}
+	if !hasUpstreamInputUsage(totalUsage) && estimatedInputTokens > 0 {
+		totalUsage.InputTokens = estimatedInputTokens
+	}
 
-	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
+	totalUsage.CachedTokens = totalUsage.CacheReadTokens + totalUsage.CacheCreationTokens
+	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens + totalUsage.CacheReadTokens + totalUsage.CacheCreationTokens
 
 	// Log upstream usage information if received
 	if hasUpstreamUsage {
