@@ -24,6 +24,12 @@ func TestConvertKiroNonStreamToOpenAIIncludesCacheUsage(t *testing.T) {
 	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); got != 22000 {
 		t.Fatalf("cached_tokens = %d, want %d", got, 22000)
 	}
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_read_input_tokens").Int(); got != 22000 {
+		t.Fatalf("cache_read_input_tokens = %d, want %d", got, 22000)
+	}
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_creation_input_tokens").Int(); got != 31 {
+		t.Fatalf("cache_creation_input_tokens = %d, want %d", got, 31)
+	}
 }
 
 func TestConvertKiroStreamToOpenAIIncludesCacheUsage(t *testing.T) {
@@ -53,5 +59,11 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":
 	}
 	if got := gjson.GetBytes(usageChunk, "usage.prompt_tokens_details.cached_tokens").Int(); got != 22000 {
 		t.Fatalf("cached_tokens = %d, want %d", got, 22000)
+	}
+	if got := gjson.GetBytes(usageChunk, "usage.prompt_tokens_details.cache_read_input_tokens").Int(); got != 22000 {
+		t.Fatalf("cache_read_input_tokens = %d, want %d", got, 22000)
+	}
+	if got := gjson.GetBytes(usageChunk, "usage.prompt_tokens_details.cache_creation_input_tokens").Int(); got != 31 {
+		t.Fatalf("cache_creation_input_tokens = %d, want %d", got, 31)
 	}
 }

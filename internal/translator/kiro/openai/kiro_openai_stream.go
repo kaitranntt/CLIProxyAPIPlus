@@ -129,7 +129,9 @@ func BuildOpenAISSEUsage(state *OpenAIStreamState, usageInfo usage.Detail) strin
 			"completion_tokens": usageInfo.OutputTokens,
 			"total_tokens":      promptTokens + usageInfo.OutputTokens,
 			"prompt_tokens_details": map[string]interface{}{
-				"cached_tokens": usageInfo.CachedTokens,
+				"cached_tokens":               usageInfo.CachedTokens,
+				"cache_read_input_tokens":     usageInfo.CacheReadTokens,
+				"cache_creation_input_tokens": usageInfo.CacheCreationTokens,
 			},
 		},
 	}

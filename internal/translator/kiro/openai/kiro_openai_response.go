@@ -91,7 +91,9 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 			"completion_tokens": usageInfo.OutputTokens,
 			"total_tokens":      promptTokens + usageInfo.OutputTokens,
 			"prompt_tokens_details": map[string]interface{}{
-				"cached_tokens": usageInfo.CachedTokens,
+				"cached_tokens":               usageInfo.CachedTokens,
+				"cache_read_input_tokens":     usageInfo.CacheReadTokens,
+				"cache_creation_input_tokens": usageInfo.CacheCreationTokens,
 			},
 		},
 	}
@@ -264,7 +266,9 @@ func BuildOpenAIStreamUsageChunk(model string, usageInfo usage.Detail) []byte {
 			"completion_tokens": usageInfo.OutputTokens,
 			"total_tokens":      promptTokens + usageInfo.OutputTokens,
 			"prompt_tokens_details": map[string]interface{}{
-				"cached_tokens": usageInfo.CachedTokens,
+				"cached_tokens":               usageInfo.CachedTokens,
+				"cache_read_input_tokens":     usageInfo.CacheReadTokens,
+				"cache_creation_input_tokens": usageInfo.CacheCreationTokens,
 			},
 		},
 	}
