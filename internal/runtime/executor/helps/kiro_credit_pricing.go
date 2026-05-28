@@ -7,7 +7,7 @@
 //
 // Conversion rule:
 //
-//	target_usd = credits * $0.02 / discount      (discount = 0.1 → 1折)
+//	target_usd = credits * $0.02
 //
 // The reconstructed usage cost, evaluated at Anthropic's published per-MTok
 // prices, is forced to equal target_usd modulo rounding.
