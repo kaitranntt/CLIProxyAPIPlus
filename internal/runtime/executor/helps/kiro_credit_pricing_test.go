@@ -32,7 +32,7 @@ func TestKiroCreditPricing_TypicalOpus47(t *testing.T) {
 	got := ComputeUsageFromCredits(model, credits, ctxPct, output, params)
 
 	prices := lookupKiroPrice(model)
-	target := credits * kiroUSDPerCredit / params.Discount // = 0.03694 USD
+	target := credits * kiroUSDPerCredit
 	actual := usdAt(prices, got.InputTokens, got.CacheCreationTokens, got.CacheReadTokens, got.OutputTokens)
 	if !approxEqualPct(actual, target, 0.01) {
 		t.Fatalf("cost mismatch: target=%.6f USD, actual=%.6f USD, detail=%+v",
@@ -87,7 +87,7 @@ func TestKiroCreditPricing_NoContext(t *testing.T) {
 		t.Errorf("expected non-zero input tokens, got %+v", got)
 	}
 	prices := lookupKiroPrice("claude-sonnet-4.5")
-	target := 0.1 * kiroUSDPerCredit / 0.1
+	target := 0.1 * kiroUSDPerCredit
 	actual := usdAt(prices, got.InputTokens, 0, 0, got.OutputTokens)
 	if !approxEqualPct(actual, target, 0.01) {
 		t.Errorf("cost mismatch in no-context case: target=%.6f actual=%.6f", target, actual)
@@ -128,7 +128,7 @@ func TestKiroCreditPricing_ToolOnlyOutput(t *testing.T) {
 	}
 	// Cost should still match target.
 	prices := lookupKiroPrice("claude-sonnet-4.5")
-	target := 0.05 * kiroUSDPerCredit / 0.1
+	target := 0.05 * kiroUSDPerCredit
 	actual := usdAt(prices, got.InputTokens, got.CacheCreationTokens, got.CacheReadTokens, got.OutputTokens)
 	if !approxEqualPct(actual, target, 0.02) {
 		t.Errorf("cost mismatch tool-only: target=%.6f actual=%.6f detail=%+v",

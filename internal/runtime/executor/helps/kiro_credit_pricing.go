@@ -89,10 +89,6 @@ func lookupKiroPrice(model string) kiroModelPrice {
 // buckets. v1 keeps these as constants; the struct is exposed so future
 // configuration plumbing can override without touching the algorithm.
 type CreditPricingParams struct {
-	// Discount applied to Anthropic's published prices.
-	// 0.1 means "1折" — the user paid 10% of Anthropic's price.
-	Discount float64
-
 	// CacheReadRatio is the share of context tokens that should be reported as
 	// cache_read_input_tokens.
 	CacheReadRatio float64
@@ -103,11 +99,10 @@ type CreditPricingParams struct {
 	// The implicit raw-input ratio is 1 - CacheReadRatio - CacheCreationRatio.
 }
 
-// DefaultCreditPricingParams returns the v1 hardcoded defaults: 1折 discount
-// with an 80/5/15 cache-read / cache-creation / raw-input split.
+// DefaultCreditPricingParams returns the v1 hardcoded defaults:
+// an 80/5/15 cache-read / cache-creation / raw-input split.
 func DefaultCreditPricingParams() CreditPricingParams {
 	return CreditPricingParams{
-		Discount:           0.1,
 		CacheReadRatio:     0.80,
 		CacheCreationRatio: 0.05,
 	}
@@ -126,12 +121,9 @@ func DefaultCreditPricingParams() CreditPricingParams {
 //   - params: split parameters.
 //
 // Returns a usage.Detail where the dollar cost evaluated at Anthropic prices
-// equals credits * 0.02 / discount within rounding error.
+// equals credits * 0.02 within rounding error.
 func ComputeUsageFromCredits(model string, credits, contextPct float64, outputTokens int64, params CreditPricingParams) usage.Detail {
 	// Defensive defaults: an unconfigured params struct collapses to all-input.
-	if params.Discount <= 0 {
-		params.Discount = 0.1
-	}
 	if params.CacheReadRatio < 0 {
 		params.CacheReadRatio = 0
 	}
@@ -145,9 +137,8 @@ func ComputeUsageFromCredits(model string, credits, contextPct float64, outputTo
 
 	prices := lookupKiroPrice(model)
 
-	// Total dollar amount we need to "spend" at Anthropic prices so that
-	// applying the discount lands back at the credits the user paid.
-	targetUSD := credits * kiroUSDPerCredit / params.Discount
+	// Target dollar amount at Anthropic's published prices.
+	targetUSD := credits * kiroUSDPerCredit
 
 	out := usage.Detail{OutputTokens: outputTokens}
 
