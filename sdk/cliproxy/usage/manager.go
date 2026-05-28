@@ -44,7 +44,6 @@ type Detail struct {
 	CacheReadTokens     int64
 	CacheCreationTokens int64
 	TotalTokens         int64
-	Credits             float64
 }
 
 type requestedModelAliasContextKey struct{}

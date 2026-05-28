@@ -110,7 +110,7 @@ func BuildClaudeThinkingBlockStopEvent(index int) []byte {
 }
 
 // BuildClaudeMessageDeltaEvent creates the message_delta event with stop_reason and usage
-func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []byte {
+func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail, credits float64) []byte {
 	usageMap := map[string]interface{}{
 		"input_tokens":  usageInfo.InputTokens,
 		"output_tokens": usageInfo.OutputTokens,
@@ -121,8 +121,8 @@ func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []b
 	if usageInfo.CacheReadTokens > 0 {
 		usageMap["cache_read_input_tokens"] = usageInfo.CacheReadTokens
 	}
-	if usageInfo.Credits > 0 {
-		usageMap["credits"] = usageInfo.Credits
+	if credits > 0 {
+		usageMap["credits"] = credits
 	}
 	deltaEvent := map[string]interface{}{
 		"type": "message_delta",
@@ -307,7 +307,7 @@ func BuildFallbackTextEvents(contentBlockIndex int, query string, results *WebSe
 	// message_delta with end_turn
 	events = append(events, BuildClaudeMessageDeltaEvent("end_turn", usage.Detail{
 		OutputTokens: int64(outputTokens),
-	}))
+	}, 0))
 
 	// message_stop
 	events = append(events, BuildClaudeMessageStopOnlyEvent())

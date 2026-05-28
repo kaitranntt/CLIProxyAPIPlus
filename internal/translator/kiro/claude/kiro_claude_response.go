@@ -41,7 +41,7 @@ var (
 // into Claude thinking blocks. The streaming path handles reasoning via
 // reasoningContentEvent independently.
 // stopReason is passed from upstream; fallback logic applied if empty.
-func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
+func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string, credits float64) []byte {
 	var contentBlocks []map[string]interface{}
 
 	if content != "" {
@@ -109,8 +109,8 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 	if usageInfo.CacheReadTokens > 0 {
 		usageMap["cache_read_input_tokens"] = usageInfo.CacheReadTokens
 	}
-	if usageInfo.Credits > 0 {
-		usageMap["credits"] = usageInfo.Credits
+	if credits > 0 {
+		usageMap["credits"] = credits
 	}
 	response := map[string]interface{}{
 		"id":          "msg_" + uuid.New().String()[:24],

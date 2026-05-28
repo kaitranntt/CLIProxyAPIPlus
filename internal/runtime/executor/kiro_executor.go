@@ -1020,7 +1020,6 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				usageInfo.InputTokens = reconstructed.InputTokens
 				usageInfo.CacheCreationTokens = reconstructed.CacheCreationTokens
 				usageInfo.CacheReadTokens = reconstructed.CacheReadTokens
-				usageInfo.Credits = creditUsage
 				log.Debugf("kiro: reconstructed non-stream usage from credits=%.4f ctx=%.2f%% → input=%d cache_creation=%d cache_read=%d output=%d (model=%s)",
 					creditUsage, contextPct,
 					usageInfo.InputTokens, usageInfo.CacheCreationTokens,
@@ -1040,7 +1039,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// Build response in Claude format for Kiro translator
 			// stopReason is extracted from upstream response by parseEventStream
 			requestedModel := payloadRequestedModel(opts, req.Model)
-			kiroResponse := kiroclaude.BuildClaudeResponse(content, toolUses, requestedModel, usageInfo, stopReason)
+			kiroResponse := kiroclaude.BuildClaudeResponse(content, toolUses, requestedModel, usageInfo, stopReason, creditUsage)
 			out := sdktranslator.TranslateNonStream(ctx, to, from, requestedModel, bytes.Clone(opts.OriginalRequest), body, kiroResponse, nil)
 			resp = cliproxyexecutor.Response{Payload: []byte(out)}
 			return resp, nil
@@ -3446,7 +3445,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		totalUsage.InputTokens = reconstructed.InputTokens
 		totalUsage.CacheCreationTokens = reconstructed.CacheCreationTokens
 		totalUsage.CacheReadTokens = reconstructed.CacheReadTokens
-		totalUsage.Credits = upstreamCreditUsage
 		log.Debugf("kiro: reconstructed usage from credits=%.4f ctx=%.2f%% → input=%d cache_creation=%d cache_read=%d output=%d (model=%s)",
 			upstreamCreditUsage, upstreamContextPercentage,
 			totalUsage.InputTokens, totalUsage.CacheCreationTokens,
@@ -3489,7 +3487,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	// Send message_delta event
-	msgDelta := kiroclaude.BuildClaudeMessageDeltaEvent(stopReason, totalUsage)
+	msgDelta := kiroclaude.BuildClaudeMessageDeltaEvent(stopReason, totalUsage, upstreamCreditUsage)
 	sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgDelta, &translatorParam)
 	for _, chunk := range sseData {
 		enqueueTranslatedSSE(out, chunk)
