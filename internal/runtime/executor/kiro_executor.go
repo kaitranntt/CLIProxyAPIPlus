@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
@@ -971,7 +972,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				}
 			}()
 
-			content, toolUses, usageInfo, stopReason, err := e.parseEventStream(httpResp.Body)
+			content, toolUses, usageInfo, stopReason, creditUsage, contextPct, err := e.parseEventStream(httpResp.Body)
 			if err != nil {
 				recordAPIResponseError(ctx, e.cfg, err)
 				return resp, err
@@ -1005,8 +1006,29 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				}
 			}
 
-			// 3. Update TotalTokens
-			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
+			// 3. Reverse-engineer a Claude-shaped usage breakdown when Kiro
+			//    reported credits, so the response includes plausible cache
+			//    hit/write counts. Mirrors streamToChannel.
+			if creditUsage > 0 {
+				reconstructed := helps.ComputeUsageFromCredits(
+					kiroModelID,
+					creditUsage,
+					contextPct,
+					usageInfo.OutputTokens,
+					helps.DefaultCreditPricingParams(),
+				)
+				usageInfo.InputTokens = reconstructed.InputTokens
+				usageInfo.CacheCreationTokens = reconstructed.CacheCreationTokens
+				usageInfo.CacheReadTokens = reconstructed.CacheReadTokens
+				usageInfo.Credits = creditUsage
+				log.Debugf("kiro: reconstructed non-stream usage from credits=%.4f ctx=%.2f%% → input=%d cache_creation=%d cache_read=%d output=%d (model=%s)",
+					creditUsage, contextPct,
+					usageInfo.InputTokens, usageInfo.CacheCreationTokens,
+					usageInfo.CacheReadTokens, usageInfo.OutputTokens, kiroModelID)
+			}
+
+			// 4. Update TotalTokens
+			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.CacheCreationTokens + usageInfo.CacheReadTokens + usageInfo.OutputTokens
 
 			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
 			reporter.publish(ctx, usageInfo)
@@ -1431,7 +1453,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				// So we always enable thinking parsing for Kiro responses
 				log.Debugf("kiro: stream thinkingEnabled = %v (always true for Kiro)", thinkingEnabled)
 
-				e.streamToChannel(ctx, resp.Body, out, from, payloadRequestedModel(opts, req.Model), opts.OriginalRequest, body, reporter, thinkingEnabled)
+				e.streamToChannel(ctx, resp.Body, out, from, payloadRequestedModel(opts, req.Model), kiroModelID, opts.OriginalRequest, body, reporter, thinkingEnabled)
 			}(httpResp, thinkingEnabled)
 
 			return out, nil
@@ -1641,8 +1663,10 @@ type eventStreamMessage struct {
 // parseEventStream parses AWS Event Stream binary format.
 // Extracts text content, tool uses, and stop_reason from the response.
 // Supports embedded [Called ...] tool calls and input buffering for toolUseEvent.
-// Returns: content, toolUses, usageInfo, stopReason, error
-func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.KiroToolUse, usage.Detail, string, error) {
+// Returns: content, toolUses, usageInfo, stopReason, credits, contextPct, error
+//   - credits: meteringEvent.usage value (Kiro billing credits, 0 if absent)
+//   - contextPct: contextUsageEvent.contextUsagePercentage (0 if absent)
+func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.KiroToolUse, usage.Detail, string, float64, float64, error) {
 	var content strings.Builder
 	var toolUses []kiroclaude.KiroToolUse
 	var usageInfo usage.Detail
@@ -1655,12 +1679,13 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 	// Upstream usage tracking - Kiro API returns credit usage and context percentage
 	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
+	var upstreamCreditUsage float64       // Billing credits from meteringEvent (1 credit = $0.02)
 
 	for {
 		msg, eventErr := e.readEventStreamMessage(reader)
 		if eventErr != nil {
 			log.Errorf("kiro: parseEventStream error: %v", eventErr)
-			return content.String(), toolUses, usageInfo, stopReason, eventErr
+			return content.String(), toolUses, usageInfo, stopReason, upstreamCreditUsage, upstreamContextPercentage, eventErr
 		}
 		if msg == nil {
 			// Normal end of stream (EOF)
@@ -1688,7 +1713,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				errMsg = msg
 			}
 			log.Errorf("kiro: received AWS error in event stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
+			return "", nil, usageInfo, stopReason, upstreamCreditUsage, upstreamContextPercentage, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
 		}
 		if errType, hasErrType := event["type"].(string); hasErrType && (errType == "error" || errType == "exception") {
 			// Generic error event
@@ -1701,7 +1726,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				}
 			}
 			log.Errorf("kiro: received error event in stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s", errMsg)
+			return "", nil, usageInfo, stopReason, upstreamCreditUsage, upstreamContextPercentage, fmt.Errorf("kiro API error: %s", errMsg)
 		}
 
 		// Extract stop_reason from various event formats
@@ -1937,9 +1962,8 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				if u, ok := metering["usage"].(float64); ok {
 					usageVal = u
 				}
-				log.Infof("kiro: parseEventStream received meteringEvent: usage=%.2f %s", usageVal, unit)
-				// Store metering info for potential billing/statistics purposes
-				// Note: This is separate from token counts - it's AWS billing units
+				upstreamCreditUsage = usageVal
+				log.Infof("kiro: parseEventStream received meteringEvent: usage=%.4f %s", usageVal, unit)
 			} else {
 				// Try direct fields
 				unit := ""
@@ -1951,7 +1975,8 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 					usageVal = u
 				}
 				if unit != "" || usageVal > 0 {
-					log.Infof("kiro: parseEventStream received meteringEvent (direct): usage=%.2f %s", usageVal, unit)
+					upstreamCreditUsage = usageVal
+					log.Infof("kiro: parseEventStream received meteringEvent (direct): usage=%.4f %s", usageVal, unit)
 				}
 			}
 
@@ -2010,7 +2035,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 			// For other errors, return the error
 			if errMsg != "" {
-				return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
+				return "", nil, usageInfo, stopReason, upstreamCreditUsage, upstreamContextPercentage, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
 			}
 
 		default:
@@ -2100,10 +2125,12 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		log.Warnf("kiro: response truncated due to max_tokens limit")
 	}
 
-	// Use contextUsagePercentage to calculate more accurate input tokens
-	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
-	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
-	if upstreamContextPercentage > 0 {
+	// Note: input-token reconstruction (from credits + contextPct) is handled
+	// by the caller via helps.ComputeUsageFromCredits, so the response can
+	// surface a Claude-shaped usage breakdown including cache hits. We still
+	// surface the raw signals via the credits/contextPct return values.
+	if upstreamCreditUsage == 0 && upstreamContextPercentage > 0 {
+		// Legacy fallback when no credits were received: use contextPct alone.
 		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
 		if calculatedInputTokens > 0 {
 			localEstimate := usageInfo.InputTokens
@@ -2114,7 +2141,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		}
 	}
 
-	return cleanedContent, toolUses, usageInfo, stopReason, nil
+	return cleanedContent, toolUses, usageInfo, stopReason, upstreamCreditUsage, upstreamContextPercentage, nil
 }
 
 // readEventStreamMessage reads and validates a single AWS Event Stream message.
@@ -2314,7 +2341,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 // Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
 // Extracts stop_reason from upstream events when available.
 // thinkingEnabled controls whether <thinking> tags are parsed - only parse when request enabled thinking.
-func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
+func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model, kiroModelID string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
@@ -3403,17 +3430,30 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 	}
 
-	// Use contextUsagePercentage to calculate more accurate input tokens
-	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
-	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
-	// Note: The effective input context is ~170k (200k - 30k reserved for output)
-	if upstreamContextPercentage > 0 {
-		// Calculate input tokens from context percentage
-		// Using 200k as the base since that's what Kiro reports against
+	// Reverse-engineer a Claude-shaped usage breakdown from the credits
+	// reported by Kiro (1 credit = $0.02) so the response presented to the
+	// client looks like a normal Anthropic Claude usage object with cache
+	// hits. Falls back to the raw contextUsagePercentage estimate when no
+	// metering event was received.
+	if hasUpstreamUsage && upstreamCreditUsage > 0 {
+		reconstructed := helps.ComputeUsageFromCredits(
+			kiroModelID,
+			upstreamCreditUsage,
+			upstreamContextPercentage,
+			totalUsage.OutputTokens,
+			helps.DefaultCreditPricingParams(),
+		)
+		totalUsage.InputTokens = reconstructed.InputTokens
+		totalUsage.CacheCreationTokens = reconstructed.CacheCreationTokens
+		totalUsage.CacheReadTokens = reconstructed.CacheReadTokens
+		totalUsage.Credits = upstreamCreditUsage
+		log.Debugf("kiro: reconstructed usage from credits=%.4f ctx=%.2f%% → input=%d cache_creation=%d cache_read=%d output=%d (model=%s)",
+			upstreamCreditUsage, upstreamContextPercentage,
+			totalUsage.InputTokens, totalUsage.CacheCreationTokens,
+			totalUsage.CacheReadTokens, totalUsage.OutputTokens, kiroModelID)
+	} else if upstreamContextPercentage > 0 {
+		// Legacy estimate when credits are missing.
 		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
-
-		// Only use calculated value if it's significantly different from local estimate
-		// This provides more accurate token counts based on upstream data
 		if calculatedInputTokens > 0 {
 			localEstimate := totalUsage.InputTokens
 			totalUsage.InputTokens = calculatedInputTokens
@@ -3422,7 +3462,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 	}
 
-	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
+	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.CacheCreationTokens + totalUsage.CacheReadTokens + totalUsage.OutputTokens
 
 	// Log upstream usage information if received
 	if hasUpstreamUsage {
