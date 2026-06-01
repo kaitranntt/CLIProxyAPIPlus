@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
@@ -1008,6 +1009,9 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// 3. Update TotalTokens
 			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
 
+			// Derive cache_read split from credits for billing compatibility.
+			helps.ApplyKiroCreditCacheSplit(kiroModelID, &usageInfo)
+
 			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
 			reporter.publish(ctx, usageInfo)
 
@@ -1431,7 +1435,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				// So we always enable thinking parsing for Kiro responses
 				log.Debugf("kiro: stream thinkingEnabled = %v (always true for Kiro)", thinkingEnabled)
 
-				e.streamToChannel(ctx, resp.Body, out, from, payloadRequestedModel(opts, req.Model), opts.OriginalRequest, body, reporter, thinkingEnabled)
+				e.streamToChannel(ctx, resp.Body, out, from, payloadRequestedModel(opts, req.Model), kiroModelID, opts.OriginalRequest, body, reporter, thinkingEnabled)
 			}(httpResp, thinkingEnabled)
 
 			return out, nil
@@ -1655,6 +1659,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 	// Upstream usage tracking - Kiro API returns credit usage and context percentage
 	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
+	var upstreamCreditUsage float64       // Credit usage from upstream meteringEvent (e.g., 0.1847)
 
 	for {
 		msg, eventErr := e.readEventStreamMessage(reader)
@@ -1937,9 +1942,8 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				if u, ok := metering["usage"].(float64); ok {
 					usageVal = u
 				}
-				log.Infof("kiro: parseEventStream received meteringEvent: usage=%.2f %s", usageVal, unit)
-				// Store metering info for potential billing/statistics purposes
-				// Note: This is separate from token counts - it's AWS billing units
+				upstreamCreditUsage = usageVal
+				log.Infof("kiro: parseEventStream received meteringEvent: usage=%.4f %s", usageVal, unit)
 			} else {
 				// Try direct fields
 				unit := ""
@@ -1951,7 +1955,8 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 					usageVal = u
 				}
 				if unit != "" || usageVal > 0 {
-					log.Infof("kiro: parseEventStream received meteringEvent (direct): usage=%.2f %s", usageVal, unit)
+					upstreamCreditUsage = usageVal
+					log.Infof("kiro: parseEventStream received meteringEvent (direct): usage=%.4f %s", usageVal, unit)
 				}
 			}
 
@@ -2113,6 +2118,9 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				upstreamContextPercentage, calculatedInputTokens, localEstimate)
 		}
 	}
+
+	// Carry upstream credit usage (meteringEvent) into the usage detail.
+	usageInfo.Credits = upstreamCreditUsage
 
 	return cleanedContent, toolUses, usageInfo, stopReason, nil
 }
@@ -2314,7 +2322,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 // Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
 // Extracts stop_reason from upstream events when available.
 // thinkingEnabled controls whether <thinking> tags are parsed - only parse when request enabled thinking.
-func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
+func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model, kiroModelID string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
@@ -3423,6 +3431,14 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
+
+	// Carry upstream credit usage (meteringEvent) into the usage detail.
+	if upstreamCreditUsage > 0 {
+		totalUsage.Credits = upstreamCreditUsage
+	}
+
+	// Derive cache_read split from credits for billing compatibility.
+	helps.ApplyKiroCreditCacheSplit(kiroModelID, &totalUsage)
 
 	// Log upstream usage information if received
 	if hasUpstreamUsage {

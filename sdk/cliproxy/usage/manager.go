@@ -54,6 +54,9 @@ type Detail struct {
 	CacheReadTokens     int64
 	CacheCreationTokens int64
 	TotalTokens         int64
+	// Credits holds the provider-billed credit usage (e.g. Kiro meteringEvent).
+	// Zero means the upstream did not report credit usage.
+	Credits float64
 }
 
 type requestedModelAliasContextKey struct{}
