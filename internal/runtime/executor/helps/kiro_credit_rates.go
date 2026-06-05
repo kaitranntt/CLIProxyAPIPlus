@@ -38,7 +38,7 @@ var officialBasePrices = map[string]modelPricing{
 //	Opus 4.7   ($5/MTok): (5/1e6)/0.02 = 0.000250 credits/token
 //	Sonnet 4.6 ($3/MTok): (3/1e6)/0.02 = 0.000150 credits/token
 const (
-	creditToUSD = 20.0 / 1000.0 // 0.02 USD per credit
+	creditToUSD = 0.03 // USD per credit
 )
 
 // fallbackPricing is used when a model is absent from officialBasePrices.
