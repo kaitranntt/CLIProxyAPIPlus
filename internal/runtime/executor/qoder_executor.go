@@ -76,7 +76,8 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	qoderModel := strings.TrimPrefix(model, "qoder/")
 	if mapped, ok := qoderauth.ModelMap[qoderModel]; ok {
 		qoderModel = mapped
-	} else {
+	} else if _, cached := storage.GetModelConfig(qoderModel); !cached {
+		// Not in static map and not in dynamic model cache — reject early.
 		return nil, fmt.Errorf("unsupported qoder model: %q (received %q)", qoderModel, model)
 	}
 
