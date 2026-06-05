@@ -31,12 +31,12 @@ var officialBasePrices = map[string]modelPricing{
 }
 
 // Kiro credit pricing basis.
-//   - creditToUSD: 20$ = 1000 credits => 1 credit = $0.02.
+//   - creditToUSD: 1 credit = $0.03.
 //
 // Derived credit rate per base-input token: c = (input/1e6) / creditToUSD.
 //
-//	Opus 4.7   ($5/MTok): (5/1e6)/0.02 = 0.000250 credits/token
-//	Sonnet 4.6 ($3/MTok): (3/1e6)/0.02 = 0.000150 credits/token
+//	Opus 4.7   ($5/MTok): (5/1e6)/0.03 = 0.000167 credits/token
+//	Sonnet 4.6 ($3/MTok): (3/1e6)/0.03 = 0.000100 credits/token
 const (
 	creditToUSD = 0.03 // USD per credit
 )

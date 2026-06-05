@@ -7,8 +7,8 @@ import (
 )
 
 func TestApplyKiroCreditCacheSplit(t *testing.T) {
-	// Opus 4.7 rates: cIn=(5/1e6)/0.02=0.000250, cRead=0.000025,
-	// cCre=0.0003125, cOut=0.00125 credits/token.
+	// Opus 4.7 rates: cIn=(5/1e6)/0.03=0.000167, cRead=0.000017,
+	// cCre=0.0002083, cOut=0.000833 credits/token.
 	tests := []struct {
 		name                                   string
 		model                                  string
@@ -17,11 +17,11 @@ func TestApplyKiroCreditCacheSplit(t *testing.T) {
 		wantInput, wantCacheRead, wantCacheCre int64
 	}{
 		{
-			// credits below the min billable base (cRead*T + cOut*O), so cache_read
-			// clamps to T (minus 1 borrowed for uncached); cache_creation stays 0.
+			// credits within [min,max]: back-solve cache_read R from
+			// credits = cIn*(T-R) + cRead*R + cOut*O. Uncached = T - R.
 			name: "opus-4.7 real log", model: "claude-opus-4.7",
 			input: 7982, output: 52, credits: 0.1847,
-			wantInput: 1, wantCacheRead: 7981, wantCacheCre: 0,
+			wantInput: 56, wantCacheRead: 7926, wantCacheCre: 0,
 		},
 		{
 			// Unknown model falls back to Opus pricing; credits below min base, so
@@ -32,10 +32,10 @@ func TestApplyKiroCreditCacheSplit(t *testing.T) {
 		},
 		{
 			// credits within [min,max]: back-solve R = (cIn*T - credits)/(cIn-cRead)
-			// = (0.25 - 0.125)/0.000225 = 555. Uncached = T - R = 445.
+			// = (0.166667 - 0.125)/0.000150 = 277. Uncached = T - R = 723.
 			name: "cache read within total", model: "claude-opus-4.7",
 			input: 1000, output: 0, credits: 0.125,
-			wantInput: 445, wantCacheRead: 555, wantCacheCre: 0,
+			wantInput: 723, wantCacheRead: 277, wantCacheCre: 0,
 		},
 		{
 			name: "zero credits no split", model: "claude-opus-4.7",
@@ -48,12 +48,12 @@ func TestApplyKiroCreditCacheSplit(t *testing.T) {
 			wantInput: 0, wantCacheRead: 0, wantCacheCre: 0,
 		},
 		{
-			// credits above max base (cIn*T + cOut*O = 0.25 + 0.0125 = 0.2625):
+			// credits above max base (cIn*T + cOut*O = 0.166667 + 0.008333 = 0.175):
 			// bill all input as uncached and make up the rest with cache_creation.
-			// cc = round((1.0 - 0.2625)/0.0003125) = 2360.
+			// cc = round((1.0 - 0.175)/0.0002083) = 3960.
 			name: "credits above base make up with cache creation", model: "claude-opus-4.7",
 			input: 1000, output: 10, credits: 1.0,
-			wantInput: 1000, wantCacheRead: 0, wantCacheCre: 2360,
+			wantInput: 1000, wantCacheRead: 0, wantCacheCre: 3960,
 		},
 		{
 			// Cheap call (credits below min base) => cache_read clamps to T-1 and the
@@ -99,7 +99,7 @@ func TestApplyKiroCreditCacheSplit(t *testing.T) {
 // credits exceed the all-uncached base, the cache_creation make-up brings the
 // official-price billing back to (approximately) the upstream credit value.
 func TestApplyKiroCreditCacheSplitMakeUpReconstructsCredits(t *testing.T) {
-	const creditToUSD = 20.0 / 1000.0
+	const creditToUSD = 0.03
 	// Opus pricing ($/MTok).
 	cIn := (5.0 / 1e6) / creditToUSD
 	cCre := (6.25 / 1e6) / creditToUSD
