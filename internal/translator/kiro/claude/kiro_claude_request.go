@@ -642,14 +642,143 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	return kiroTools
 }
 
+// extractSystemMessageText extracts the plain text from a mid-conversation
+// system message content, which may be a string or an array of text blocks.
+func extractSystemMessageText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		var b strings.Builder
+		for _, part := range content.Array() {
+			if part.Get("type").String() == "text" {
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(part.Get("text").String())
+			}
+		}
+		return b.String()
+	}
+	return ""
+}
+
+// nearestUserIndex returns the index of the nearest "user" message scanning
+// from start toward end with the given step (-1 for backward, +1 for forward).
+// Returns -1 when none is found.
+func nearestUserIndex(messages []gjson.Result, start, step int) int {
+	for i := start; i >= 0 && i < len(messages); i += step {
+		if messages[i].Get("role").String() == "user" {
+			return i
+		}
+	}
+	return -1
+}
+
+// mergeSystemTextIntoUser rebuilds a user message with the given system text
+// blocks prepended and/or appended to its content, preserving any other fields.
+func mergeSystemTextIntoUser(m gjson.Result, prefix, suffix []string) gjson.Result {
+	var blocks []interface{}
+	for _, t := range prefix {
+		blocks = append(blocks, map[string]interface{}{"type": "text", "text": t})
+	}
+	content := m.Get("content")
+	if content.IsArray() {
+		for _, b := range content.Array() {
+			blocks = append(blocks, b.Value())
+		}
+	} else if content.Type == gjson.String && content.String() != "" {
+		blocks = append(blocks, map[string]interface{}{"type": "text", "text": content.String()})
+	}
+	for _, t := range suffix {
+		blocks = append(blocks, map[string]interface{}{"type": "text", "text": t})
+	}
+
+	msgMap := make(map[string]interface{})
+	m.ForEach(func(k, v gjson.Result) bool {
+		msgMap[k.String()] = v.Value()
+		return true
+	})
+	msgMap["content"] = blocks
+	b, err := json.Marshal(msgMap)
+	if err != nil {
+		log.Debugf("kiro: failed to merge system text into user message: %v", err)
+		return m
+	}
+	return gjson.ParseBytes(b)
+}
+
+// foldSystemMessages folds mid-conversation system messages (Anthropic
+// mid-conversation-system-2026-04-07 beta) into adjacent user turns. Kiro has no
+// concept of a system role inside the conversation, so dropping these messages
+// would lose content and, when a system message is last, break the user/assistant
+// alternation Kiro requires (causing "Improperly formed request"). Each system
+// message's text is attached to the nearest preceding user turn; if none exists,
+// to the nearest following user turn; otherwise it is promoted to a standalone
+// user message.
+func foldSystemMessages(messages []gjson.Result) []gjson.Result {
+	hasSystem := false
+	for _, m := range messages {
+		if m.Get("role").String() == "system" {
+			hasSystem = true
+			break
+		}
+	}
+	if !hasSystem {
+		return messages
+	}
+
+	prefixText := make(map[int][]string)
+	suffixText := make(map[int][]string)
+	var orphanSystem []string
+
+	for i, m := range messages {
+		if m.Get("role").String() != "system" {
+			continue
+		}
+		txt := extractSystemMessageText(m.Get("content"))
+		if strings.TrimSpace(txt) == "" {
+			continue
+		}
+		if j := nearestUserIndex(messages, i-1, -1); j >= 0 {
+			suffixText[j] = append(suffixText[j], txt)
+		} else if j := nearestUserIndex(messages, i+1, 1); j >= 0 {
+			prefixText[j] = append(prefixText[j], txt)
+		} else {
+			orphanSystem = append(orphanSystem, txt)
+		}
+	}
+
+	result := make([]gjson.Result, 0, len(messages))
+	for i, m := range messages {
+		role := m.Get("role").String()
+		if role == "system" {
+			continue
+		}
+		if role == "user" && (len(prefixText[i]) > 0 || len(suffixText[i]) > 0) {
+			m = mergeSystemTextIntoUser(m, prefixText[i], suffixText[i])
+		}
+		result = append(result, m)
+	}
+	for _, txt := range orphanSystem {
+		b, _ := json.Marshal(map[string]interface{}{"role": "user", "content": txt})
+		result = append(result, gjson.ParseBytes(b))
+	}
+	log.Infof("kiro: folded mid-conversation system message(s) into user turns")
+	return result
+}
+
 // processMessages processes Claude messages and builds Kiro history
 func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
 	var history []KiroHistoryMessage
 	var currentUserMsg *KiroUserInputMessage
 	var currentToolResults []KiroToolResult
 
+	// Fold any mid-conversation system messages into adjacent user turns before
+	// merging, so the user/assistant alternation Kiro requires stays intact.
+	folded := foldSystemMessages(messages.Array())
 	// Merge adjacent messages with the same role
-	messagesArray := kirocommon.MergeAdjacentMessages(messages.Array())
+	messagesArray := kirocommon.MergeAdjacentMessages(folded)
 
 	// FIX: Kiro API requires history to start with a user message.
 	// Some clients (e.g., OpenClaw) send conversations starting with an assistant message,
@@ -999,4 +1128,3 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 		ToolUses: toolUses,
 	}
 }
-
