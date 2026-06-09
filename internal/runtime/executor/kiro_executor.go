@@ -2403,10 +2403,10 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	isTextBlockOpen := false
 	var outputLen int
 
-	// Ensure usage is published even on early return
-	defer func() {
-		reporter.publish(ctx, totalUsage)
-	}()
+	// NOTE: usage is published only once on the successful end of stream (see the
+	// reporter.publish call after message_stop below). Every error path returns
+	// early without publishing, so pre-calculated input tokens are never billed for
+	// requests that failed (e.g. oversized context, upstream error events).
 
 	for {
 		select {
@@ -3477,7 +3477,10 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	for _, chunk := range sseData {
 		enqueueTranslatedSSE(out, chunk)
 	}
-	// reporter.publish is called via defer
+
+	// Publish usage only after the stream completed successfully. Error paths above
+	// return early without reaching here, so failed requests report no usage.
+	reporter.publish(ctx, totalUsage)
 }
 
 // NOTE: Claude SSE event builders moved to internal/translator/kiro/claude/kiro_claude_stream.go
