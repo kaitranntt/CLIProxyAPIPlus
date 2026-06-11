@@ -38,10 +38,12 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -1319,8 +1321,13 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, updatedAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
@@ -1419,12 +1426,24 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, updatedAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *Handler) notifyAuthFilePersisted(ctx context.Context, auth *coreauth.Auth) error {
+	if h == nil || h.postAuthPersistHook == nil || auth == nil {
+		return nil
+	}
+	return h.postAuthPersistHook(ctx, auth)
 }
 
 func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
@@ -1563,6 +1582,11 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
 	}
+	if _, ok := touchedRoots["excluded_models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	} else if _, ok := touchedRoots["excluded-models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	}
 }
 
 func syncAuthFileHeaderAttributes(auth *coreauth.Auth) {
@@ -1654,6 +1678,52 @@ func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["websockets"] = strconv.FormatBool(websockets)
+}
+
+func syncAuthFileExcludedModelsAttribute(auth *coreauth.Auth, touchedRoots map[string]struct{}) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	sourceKey := "excluded_models"
+	if _, okUnderscore := touchedRoots["excluded_models"]; !okUnderscore {
+		if _, okHyphen := touchedRoots["excluded-models"]; okHyphen {
+			sourceKey = "excluded-models"
+		}
+	}
+	excluded := authFileExcludedModelsValue(auth.Metadata[sourceKey])
+	excluded = internalconfig.NormalizeExcludedModels(excluded)
+	delete(auth.Metadata, "excluded-models")
+	if len(excluded) == 0 {
+		delete(auth.Metadata, "excluded_models")
+		delete(auth.Attributes, "excluded_models")
+		delete(auth.Attributes, "excluded_models_hash")
+		return
+	}
+	auth.Metadata["excluded_models"] = append([]string(nil), excluded...)
+	auth.Attributes["excluded_models"] = strings.Join(excluded, ",")
+	auth.Attributes["excluded_models_hash"] = diff.ComputeExcludedModelsHash(excluded)
+}
+
+func authFileExcludedModelsValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value, ok := item.(string); ok {
+				out = append(out, value)
+			}
+		}
+		return out
+	case string:
+		return strings.Split(typed, ",")
+	default:
+		return nil
+	}
 }
 
 func authFileBoolValue(value any) (bool, bool) {

@@ -1129,15 +1129,7 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 			activeAuthKind = "apikey"
 		}
 	}
-	activeExcluded := s.oauthExcludedModels(providerKey, activeAuthKind)
-	if a == activeAuth && len(activeExcluded) == 0 {
-		activeExcluded = excluded
-	}
-	if activeAuth.Attributes != nil {
-		if val, ok := activeAuth.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
-			activeExcluded = strings.Split(val, ",")
-		}
-	}
+	activeExcluded := s.effectiveAuthExcludedModels(activeAuth, providerKey, activeAuthKind, excluded)
 	models := applyExcludedModels(result.Models, activeExcluded)
 	models = applyOAuthModelAlias(s.cfg, providerKey, activeAuthKind, models)
 	if len(models) > 0 {
@@ -1785,14 +1777,7 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	if compatDetected {
 		provider = "openai-compatibility"
 	}
-	excluded := s.oauthExcludedModels(provider, authKind)
-	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
-	// If this attribute is present, it represents the complete list of exclusions and overrides the global config.
-	if a.Attributes != nil {
-		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
-			excluded = strings.Split(val, ",")
-		}
-	}
+	excluded := s.effectiveAuthExcludedModels(a, provider, authKind, nil)
 	if s.tryRegisterPluginModelsForAuth(ctx, a, provider, authKind, excluded) {
 		return
 	}
@@ -2181,6 +2166,47 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func (s *Service) effectiveAuthExcludedModels(auth *coreauth.Auth, provider, authKind string, fallback []string) []string {
+	return mergeExcludedModels(
+		fallback,
+		s.oauthExcludedModels(provider, authKind),
+		excludedModelsFromAuthAttributes(auth),
+	)
+}
+
+func excludedModelsFromAuthAttributes(auth *coreauth.Auth) []string {
+	if auth == nil || auth.Attributes == nil {
+		return nil
+	}
+	value := strings.TrimSpace(auth.Attributes["excluded_models"])
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, ",")
+}
+
+func mergeExcludedModels(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, list := range lists {
+		for _, item := range list {
+			trimmed := strings.ToLower(strings.TrimSpace(item))
+			if trimmed == "" {
+				continue
+			}
+			if _, exists := seen[trimmed]; exists {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
