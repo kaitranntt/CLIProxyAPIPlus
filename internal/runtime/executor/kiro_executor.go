@@ -1006,7 +1006,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			}
 
 			// 3. Update TotalTokens
-			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
+			finalizeKiroUsageTotal(&usageInfo)
 
 			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
 			reporter.publish(ctx, usageInfo)
@@ -1638,6 +1638,140 @@ type eventStreamMessage struct {
 // NOTE: Request building functions moved to internal/translator/kiro/claude/kiro_claude_request.go
 // The executor now uses kiroclaude.BuildKiroPayload() instead
 
+func applyKiroTokenUsage(detail *usage.Detail, tokenUsage map[string]interface{}) bool {
+	if detail == nil || tokenUsage == nil {
+		return false
+	}
+	updated := false
+	if outputTokens, ok := kiroTokenUsageInt64(tokenUsage, "outputTokens"); ok {
+		detail.OutputTokens = outputTokens
+		updated = true
+	}
+	if totalTokens, ok := kiroTokenUsageInt64(tokenUsage, "totalTokens"); ok {
+		detail.TotalTokens = totalTokens
+		updated = true
+	}
+	if uncachedInputTokens, ok := kiroTokenUsageInt64(tokenUsage, "uncachedInputTokens"); ok {
+		detail.InputTokens = uncachedInputTokens
+		updated = true
+	}
+	if cacheReadTokens, ok := kiroTokenUsageInt64(tokenUsage, "cacheReadInputTokens"); ok {
+		detail.CacheReadTokens = cacheReadTokens
+		detail.CachedTokens = cacheReadTokens
+		updated = true
+	}
+	if cacheCreationTokens, ok := kiroTokenUsageInt64(tokenUsage, "cacheWriteInputTokens"); ok {
+		detail.CacheCreationTokens = cacheCreationTokens
+		if detail.CachedTokens == 0 {
+			detail.CachedTokens = cacheCreationTokens
+		}
+		updated = true
+	}
+	return updated
+}
+
+func finalizeKiroUsageTotal(detail *usage.Detail) {
+	if detail == nil || detail.TotalTokens != 0 {
+		return
+	}
+	detail.TotalTokens = detail.InputTokens +
+		detail.OutputTokens +
+		detail.ReasoningTokens +
+		detail.CacheReadTokens +
+		detail.CacheCreationTokens
+}
+
+func applyKiroContextUsageFallback(detail *usage.Detail, contextUsagePercentage float64, hasPreciseTokenUsage bool) (int64, bool) {
+	if detail == nil || contextUsagePercentage <= 0 || hasPreciseTokenUsage {
+		return 0, false
+	}
+	calculatedInputTokens := int64(contextUsagePercentage * 200000 / 100)
+	if calculatedInputTokens <= 0 {
+		return 0, false
+	}
+	detail.InputTokens = calculatedInputTokens
+	finalizeKiroUsageTotal(detail)
+	return calculatedInputTokens, true
+}
+
+func kiroTokenUsageInt64(tokenUsage map[string]interface{}, key string) (int64, bool) {
+	raw, ok := tokenUsage[key]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case int:
+		return int64(value), true
+	case int8:
+		return int64(value), true
+	case int16:
+		return int64(value), true
+	case int32:
+		return int64(value), true
+	case int64:
+		return value, true
+	case uint:
+		return int64(value), true
+	case uint8:
+		return int64(value), true
+	case uint16:
+		return int64(value), true
+	case uint32:
+		return int64(value), true
+	case uint64:
+		return int64(value), true
+	case float32:
+		return int64(value), true
+	case float64:
+		return int64(value), true
+	case json.Number:
+		if n, err := value.Int64(); err == nil {
+			return n, true
+		}
+		if n, err := value.Float64(); err == nil {
+			return int64(n), true
+		}
+	}
+	return 0, false
+}
+
+func kiroTokenUsageFloat64(tokenUsage map[string]interface{}, key string) (float64, bool) {
+	raw, ok := tokenUsage[key]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case int:
+		return float64(value), true
+	case int8:
+		return float64(value), true
+	case int16:
+		return float64(value), true
+	case int32:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case uint:
+		return float64(value), true
+	case uint8:
+		return float64(value), true
+	case uint16:
+		return float64(value), true
+	case uint32:
+		return float64(value), true
+	case uint64:
+		return float64(value), true
+	case float32:
+		return float64(value), true
+	case float64:
+		return value, true
+	case json.Number:
+		n, err := value.Float64()
+		return n, err == nil
+	}
+	return 0, false
+}
+
 // parseEventStream parses AWS Event Stream binary format.
 // Extracts text content, tool uses, and stop_reason from the response.
 // Supports embedded [Called ...] tool calls and input buffering for toolUseEvent.
@@ -1655,6 +1789,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 	// Upstream usage tracking - Kiro API returns credit usage and context percentage
 	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
+	var hasPreciseTokenUsage bool         // Whether official tokenUsage supplied precise counts
 
 	for {
 		msg, eventErr := e.readEventStreamMessage(reader)
@@ -1827,33 +1962,13 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 			// Check for nested tokenUsage object (official format)
 			if tokenUsage, ok := metadata["tokenUsage"].(map[string]interface{}); ok {
-				// outputTokens - precise output token count
-				if outputTokens, ok := tokenUsage["outputTokens"].(float64); ok {
-					usageInfo.OutputTokens = int64(outputTokens)
-					log.Infof("kiro: parseEventStream found precise outputTokens in tokenUsage: %d", usageInfo.OutputTokens)
-				}
-				// totalTokens - precise total token count
-				if totalTokens, ok := tokenUsage["totalTokens"].(float64); ok {
-					usageInfo.TotalTokens = int64(totalTokens)
-					log.Infof("kiro: parseEventStream found precise totalTokens in tokenUsage: %d", usageInfo.TotalTokens)
-				}
-				// uncachedInputTokens - input tokens not from cache
-				if uncachedInputTokens, ok := tokenUsage["uncachedInputTokens"].(float64); ok {
-					usageInfo.InputTokens = int64(uncachedInputTokens)
-					log.Infof("kiro: parseEventStream found uncachedInputTokens in tokenUsage: %d", usageInfo.InputTokens)
-				}
-				// cacheReadInputTokens - tokens read from cache
-				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
-					// Add to input tokens if we have uncached tokens, otherwise use as input
-					if usageInfo.InputTokens > 0 {
-						usageInfo.InputTokens += int64(cacheReadTokens)
-					} else {
-						usageInfo.InputTokens = int64(cacheReadTokens)
-					}
-					log.Debugf("kiro: parseEventStream found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
+				if applyKiroTokenUsage(&usageInfo, tokenUsage) {
+					hasPreciseTokenUsage = true
+					log.Infof("kiro: parseEventStream found tokenUsage input=%d cache_read=%d cache_creation=%d output=%d total=%d",
+						usageInfo.InputTokens, usageInfo.CacheReadTokens, usageInfo.CacheCreationTokens, usageInfo.OutputTokens, usageInfo.TotalTokens)
 				}
 				// contextUsagePercentage - can be used as fallback for input token estimation
-				if ctxPct, ok := tokenUsage["contextUsagePercentage"].(float64); ok {
+				if ctxPct, ok := kiroTokenUsageFloat64(tokenUsage, "contextUsagePercentage"); ok {
 					upstreamContextPercentage = ctxPct
 					log.Debugf("kiro: parseEventStream found contextUsagePercentage in tokenUsage: %.2f%%", ctxPct)
 				}
@@ -2103,15 +2218,10 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 	// Use contextUsagePercentage to calculate more accurate input tokens
 	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
 	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
-	if upstreamContextPercentage > 0 {
-		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
-		if calculatedInputTokens > 0 {
-			localEstimate := usageInfo.InputTokens
-			usageInfo.InputTokens = calculatedInputTokens
-			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
-			log.Infof("kiro: parseEventStream using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
-				upstreamContextPercentage, calculatedInputTokens, localEstimate)
-		}
+	localEstimate := usageInfo.InputTokens
+	if calculatedInputTokens, ok := applyKiroContextUsageFallback(&usageInfo, upstreamContextPercentage, hasPreciseTokenUsage); ok {
+		log.Infof("kiro: parseEventStream using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
+			upstreamContextPercentage, calculatedInputTokens, localEstimate)
 	}
 
 	return cleanedContent, toolUses, usageInfo, stopReason, nil
@@ -2344,6 +2454,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	var upstreamCreditUsage float64       // Credit usage from upstream (e.g., 1.458)
 	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
 	var hasUpstreamUsage bool             // Whether we received usage from upstream
+	var hasPreciseTokenUsage bool         // Whether official tokenUsage supplied precise counts
 
 	// Translator param for maintaining tool call state across streaming events
 	// IMPORTANT: This must persist across all TranslateStream calls
@@ -3165,36 +3276,14 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 			// Check for nested tokenUsage object (official format)
 			if tokenUsage, ok := metadata["tokenUsage"].(map[string]interface{}); ok {
-				// outputTokens - precise output token count
-				if outputTokens, ok := tokenUsage["outputTokens"].(float64); ok {
-					totalUsage.OutputTokens = int64(outputTokens)
+				if applyKiroTokenUsage(&totalUsage, tokenUsage) {
+					hasPreciseTokenUsage = true
 					hasUpstreamUsage = true
-					log.Infof("kiro: streamToChannel found precise outputTokens in tokenUsage: %d", totalUsage.OutputTokens)
-				}
-				// totalTokens - precise total token count
-				if totalTokens, ok := tokenUsage["totalTokens"].(float64); ok {
-					totalUsage.TotalTokens = int64(totalTokens)
-					log.Infof("kiro: streamToChannel found precise totalTokens in tokenUsage: %d", totalUsage.TotalTokens)
-				}
-				// uncachedInputTokens - input tokens not from cache
-				if uncachedInputTokens, ok := tokenUsage["uncachedInputTokens"].(float64); ok {
-					totalUsage.InputTokens = int64(uncachedInputTokens)
-					hasUpstreamUsage = true
-					log.Infof("kiro: streamToChannel found uncachedInputTokens in tokenUsage: %d", totalUsage.InputTokens)
-				}
-				// cacheReadInputTokens - tokens read from cache
-				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
-					// Add to input tokens if we have uncached tokens, otherwise use as input
-					if totalUsage.InputTokens > 0 {
-						totalUsage.InputTokens += int64(cacheReadTokens)
-					} else {
-						totalUsage.InputTokens = int64(cacheReadTokens)
-					}
-					hasUpstreamUsage = true
-					log.Debugf("kiro: streamToChannel found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
+					log.Infof("kiro: streamToChannel found tokenUsage input=%d cache_read=%d cache_creation=%d output=%d total=%d",
+						totalUsage.InputTokens, totalUsage.CacheReadTokens, totalUsage.CacheCreationTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
 				}
 				// contextUsagePercentage - can be used as fallback for input token estimation
-				if ctxPct, ok := tokenUsage["contextUsagePercentage"].(float64); ok {
+				if ctxPct, ok := kiroTokenUsageFloat64(tokenUsage, "contextUsagePercentage"); ok {
 					upstreamContextPercentage = ctxPct
 					log.Debugf("kiro: streamToChannel found contextUsagePercentage in tokenUsage: %.2f%%", ctxPct)
 				}
@@ -3407,22 +3496,13 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
 	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
 	// Note: The effective input context is ~170k (200k - 30k reserved for output)
-	if upstreamContextPercentage > 0 {
-		// Calculate input tokens from context percentage
-		// Using 200k as the base since that's what Kiro reports against
-		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
-
-		// Only use calculated value if it's significantly different from local estimate
-		// This provides more accurate token counts based on upstream data
-		if calculatedInputTokens > 0 {
-			localEstimate := totalUsage.InputTokens
-			totalUsage.InputTokens = calculatedInputTokens
-			log.Debugf("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
-				upstreamContextPercentage, calculatedInputTokens, localEstimate)
-		}
+	localEstimate := totalUsage.InputTokens
+	if calculatedInputTokens, ok := applyKiroContextUsageFallback(&totalUsage, upstreamContextPercentage, hasPreciseTokenUsage); ok {
+		log.Debugf("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
+			upstreamContextPercentage, calculatedInputTokens, localEstimate)
 	}
 
-	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
+	finalizeKiroUsageTotal(&totalUsage)
 
 	// Log upstream usage information if received
 	if hasUpstreamUsage {

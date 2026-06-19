@@ -6,6 +6,7 @@ import (
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
@@ -492,5 +493,91 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 				t.Fatalf("mapModelToKiro(%q) = %q, want %q", tt.model, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestApplyKiroTokenUsagePreservesCacheTokenBreakdown(t *testing.T) {
+	detail := usage.Detail{}
+	ok := applyKiroTokenUsage(&detail, map[string]interface{}{
+		"uncachedInputTokens":   float64(290),
+		"outputTokens":          float64(1),
+		"totalTokens":           float64(4130),
+		"cacheReadInputTokens":  float64(3822),
+		"cacheWriteInputTokens": float64(17),
+	})
+	if !ok {
+		t.Fatal("applyKiroTokenUsage() = false, want true")
+	}
+	if detail.InputTokens != 290 {
+		t.Fatalf("InputTokens = %d, want 290", detail.InputTokens)
+	}
+	if detail.OutputTokens != 1 {
+		t.Fatalf("OutputTokens = %d, want 1", detail.OutputTokens)
+	}
+	if detail.TotalTokens != 4130 {
+		t.Fatalf("TotalTokens = %d, want 4130", detail.TotalTokens)
+	}
+	if detail.CacheReadTokens != 3822 {
+		t.Fatalf("CacheReadTokens = %d, want 3822", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 17 {
+		t.Fatalf("CacheCreationTokens = %d, want 17", detail.CacheCreationTokens)
+	}
+	if detail.CachedTokens != 3822 {
+		t.Fatalf("CachedTokens = %d, want 3822", detail.CachedTokens)
+	}
+}
+
+func TestFinalizeKiroUsageTotalIncludesCacheTokensWhenUpstreamTotalMissing(t *testing.T) {
+	detail := usage.Detail{
+		InputTokens:         290,
+		OutputTokens:        1,
+		CacheReadTokens:     3822,
+		CacheCreationTokens: 17,
+	}
+	finalizeKiroUsageTotal(&detail)
+	if detail.TotalTokens != 4130 {
+		t.Fatalf("TotalTokens = %d, want 4130", detail.TotalTokens)
+	}
+}
+
+func TestKiroContextUsageFallbackDoesNotOverwritePreciseTokenUsage(t *testing.T) {
+	detail := usage.Detail{}
+	hasPreciseTokenUsage := applyKiroTokenUsage(&detail, map[string]interface{}{
+		"uncachedInputTokens":    float64(290),
+		"outputTokens":           float64(1),
+		"totalTokens":            float64(4130),
+		"cacheReadInputTokens":   float64(3822),
+		"cacheWriteInputTokens":  float64(17),
+		"contextUsagePercentage": float64(50),
+	})
+	if !hasPreciseTokenUsage {
+		t.Fatal("applyKiroTokenUsage() = false, want true")
+	}
+	if _, applied := applyKiroContextUsageFallback(&detail, 50, hasPreciseTokenUsage); applied {
+		t.Fatal("applyKiroContextUsageFallback() applied despite precise token usage")
+	}
+	if detail.InputTokens != 290 {
+		t.Fatalf("InputTokens = %d, want precise uncached value 290", detail.InputTokens)
+	}
+	if detail.TotalTokens != 4130 {
+		t.Fatalf("TotalTokens = %d, want upstream total 4130", detail.TotalTokens)
+	}
+}
+
+func TestKiroContextUsageFallbackAppliesWhenPreciseTokenUsageMissing(t *testing.T) {
+	detail := usage.Detail{OutputTokens: 3}
+	calculated, applied := applyKiroContextUsageFallback(&detail, 50, false)
+	if !applied {
+		t.Fatal("applyKiroContextUsageFallback() applied = false, want true")
+	}
+	if calculated != 100000 {
+		t.Fatalf("calculated input tokens = %d, want 100000", calculated)
+	}
+	if detail.InputTokens != 100000 {
+		t.Fatalf("InputTokens = %d, want 100000", detail.InputTokens)
+	}
+	if detail.TotalTokens != 100003 {
+		t.Fatalf("TotalTokens = %d, want 100003", detail.TotalTokens)
 	}
 }

@@ -84,15 +84,32 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 				"finish_reason": finishReason,
 			},
 		},
-		"usage": map[string]interface{}{
-			"prompt_tokens":     usageInfo.InputTokens,
-			"completion_tokens": usageInfo.OutputTokens,
-			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
-		},
+		"usage": buildOpenAIUsage(usageInfo),
 	}
 
 	result, _ := json.Marshal(response)
 	return result
+}
+
+func buildOpenAIUsage(usageInfo usage.Detail) map[string]interface{} {
+	promptTokens := usageInfo.InputTokens + usageInfo.CacheCreationTokens + usageInfo.CacheReadTokens
+	completionTokens := usageInfo.OutputTokens
+	totalTokens := usageInfo.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = promptTokens + completionTokens
+	}
+
+	payload := map[string]interface{}{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      totalTokens,
+	}
+	if usageInfo.CacheReadTokens != 0 {
+		payload["prompt_tokens_details"] = map[string]interface{}{
+			"cached_tokens": usageInfo.CacheReadTokens,
+		}
+	}
+	return payload
 }
 
 // mapKiroStopReasonToOpenAI converts Kiro/Claude stop_reason to OpenAI finish_reason
