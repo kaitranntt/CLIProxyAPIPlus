@@ -643,9 +643,9 @@ const (
         <div class="manual-form" id="manualForm">
             <form id="importForm" onsubmit="submitImport(event)">
                 <div class="form-group">
-                    <label for="refreshToken">Refresh Token</label>
-                    <textarea id="refreshToken" name="refreshToken" placeholder="Paste your refreshToken here (starts with aorAAAAAG...)" required></textarea>
-                    <div class="hint">Copy from Kiro IDE: ~/.kiro/kiro-auth-token.json → refreshToken field</div>
+                    <label for="refreshToken">Kiro Token JSON or Refresh Token</label>
+                    <textarea id="refreshToken" name="refreshToken" placeholder="Paste the full kiro-auth-token.json content, or just refreshToken (starts with aorAAAAAG...)" required></textarea>
+                    <div class="hint">Copy from Kiro IDE: ~/.aws/sso/cache/kiro-auth-token.json, or paste only its refreshToken field</div>
                 </div>
                 
                 <button type="submit" class="submit-btn" id="importBtn">
@@ -663,8 +663,8 @@ const (
         <div class="info-box">
             💡 <strong>How to get RefreshToken:</strong><br>
             1. Open Kiro IDE and login with Google/GitHub<br>
-            2. Find the token file: <code>~/.kiro/kiro-auth-token.json</code><br>
-            3. Copy the <code>refreshToken</code> value and paste it above
+            2. Find the token file: <code>~/.aws/sso/cache/kiro-auth-token.json</code><br>
+            3. Paste the full JSON content above, or copy only the <code>refreshToken</code> value
         </div>
     </div>
     
@@ -701,10 +701,22 @@ const (
                 return;
             }
             
-            if (!refreshToken.startsWith('aorAAAAAG')) {
+            let requestBody;
+            if (refreshToken.startsWith('{')) {
+                try {
+                    JSON.parse(refreshToken);
+                    requestBody = refreshToken;
+                } catch (error) {
+                    statusEl.className = 'status-message error';
+                    statusEl.textContent = 'Invalid token JSON: ' + error.message;
+                    return;
+                }
+            } else if (!refreshToken.startsWith('aorAAAAAG')) {
                 statusEl.className = 'status-message error';
-                statusEl.textContent = 'Invalid token format. Token should start with aorAAAAAG...';
+                statusEl.textContent = 'Invalid token format. Paste full token JSON, or a refreshToken starting with aorAAAAAG...';
                 return;
+            } else {
+                requestBody = JSON.stringify({ refreshToken: refreshToken });
             }
             
             btn.disabled = true;
@@ -716,7 +728,7 @@ const (
                 const response = await fetch('/v0/oauth/kiro/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ refreshToken: refreshToken })
+                    body: requestBody
                 });
                 
                 const data = await response.json();

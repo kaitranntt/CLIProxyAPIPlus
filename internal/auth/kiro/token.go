@@ -29,6 +29,8 @@ type KiroTokenStorage struct {
 	ClientID string `json:"client_id,omitempty"`
 	// ClientSecret is the OAuth client secret (required for token refresh)
 	ClientSecret string `json:"client_secret,omitempty"`
+	// ClientIDHash identifies the Kiro IDE device-registration file.
+	ClientIDHash string `json:"client_id_hash,omitempty"`
 	// Region is the OIDC region for IDC login and token refresh
 	Region string `json:"region,omitempty"`
 	// StartURL is the AWS Identity Center start URL (for IDC auth)
@@ -82,6 +84,7 @@ func (s *KiroTokenStorage) ToTokenData() *KiroTokenData {
 		Provider:     s.Provider,
 		ClientID:     s.ClientID,
 		ClientSecret: s.ClientSecret,
+		ClientIDHash: s.ClientIDHash,
 		Region:       s.Region,
 		StartURL:     s.StartURL,
 		Email:        s.Email,

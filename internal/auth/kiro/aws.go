@@ -495,17 +495,12 @@ func ExtractIDCIdentifier(startURL string) string {
 // when email is unavailable to prevent filename collisions.
 // Format: kiro-{authMethod}-{identifier}[-{seq}].json
 func GenerateTokenFileName(tokenData *KiroTokenData) string {
-	authMethod := tokenData.AuthMethod
-	if authMethod == "" {
-		authMethod = "unknown"
-	}
+	authMethod := sanitizeTokenFileComponent(tokenData.AuthMethod, "unknown")
 
 	// Priority 1: Use email if available (no sequence needed, email is unique)
 	if tokenData.Email != "" {
 		// Sanitize email for filename (replace @ and . with -)
-		sanitizedEmail := tokenData.Email
-		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, "@", "-")
-		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, ".", "-")
+		sanitizedEmail := sanitizeTokenFileComponent(tokenData.Email, "account")
 		return fmt.Sprintf("kiro-%s-%s.json", authMethod, sanitizedEmail)
 	}
 
@@ -514,7 +509,7 @@ func GenerateTokenFileName(tokenData *KiroTokenData) string {
 
 	// Priority 2: For IDC, use startUrl identifier with sequence
 	if authMethod == "idc" && tokenData.StartURL != "" {
-		identifier := ExtractIDCIdentifier(tokenData.StartURL)
+		identifier := sanitizeTokenFileComponent(ExtractIDCIdentifier(tokenData.StartURL), "")
 		if identifier != "" {
 			return fmt.Sprintf("kiro-%s-%s-%05d.json", authMethod, identifier, seq)
 		}
@@ -522,6 +517,37 @@ func GenerateTokenFileName(tokenData *KiroTokenData) string {
 
 	// Priority 3: Fallback to authMethod only with sequence
 	return fmt.Sprintf("kiro-%s-%05d.json", authMethod, seq)
+}
+
+func sanitizeTokenFileComponent(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		keep := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '+'
+		if keep {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	safe := strings.Trim(builder.String(), "-_")
+	if safe == "" {
+		return fallback
+	}
+	return safe
 }
 
 // DefaultKiroRegion is the fallback region when none is specified.

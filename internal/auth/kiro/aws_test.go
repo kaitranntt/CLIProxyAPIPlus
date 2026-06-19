@@ -318,6 +318,47 @@ func TestGenerateTokenFileName(t *testing.T) {
 	}
 }
 
+func TestGenerateTokenFileNameSanitizesUserControlledComponents(t *testing.T) {
+	tests := []struct {
+		name      string
+		tokenData *KiroTokenData
+	}{
+		{
+			name: "auth method traversal",
+			tokenData: &KiroTokenData{
+				AuthMethod: "../evil",
+				Email:      "user@example.com",
+			},
+		},
+		{
+			name: "email traversal",
+			tokenData: &KiroTokenData{
+				AuthMethod: "social",
+				Email:      "../../owned@example.com",
+			},
+		},
+		{
+			name: "idc identifier traversal",
+			tokenData: &KiroTokenData{
+				AuthMethod: "idc",
+				StartURL:   "https://../../etc.awsapps.com/start",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name := GenerateTokenFileName(tt.tokenData)
+			if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+				t.Fatalf("GenerateTokenFileName() = %q, contains unsafe path component", name)
+			}
+			if !strings.HasPrefix(name, "kiro-") || !strings.HasSuffix(name, ".json") {
+				t.Fatalf("GenerateTokenFileName() = %q, want kiro-*.json", name)
+			}
+		})
+	}
+}
+
 func TestParseProfileARN(t *testing.T) {
 	tests := []struct {
 		name     string
