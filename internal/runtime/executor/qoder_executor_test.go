@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -249,6 +251,174 @@ func TestExecuteStream_NonOKResponse(t *testing.T) {
 	}
 }
 
+func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
+	executor := NewQoderExecutor(&config.Config{})
+	storage := testQoderStorageWithModelConfig()
+	authRecord := &cliproxyauth.Auth{
+		ID:       "qoder-test-auth",
+		Provider: "qoder",
+		Storage:  storage,
+	}
+
+	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 4)}
+	usage.RegisterNamedPlugin("test:qoder-stream-usage", plugin)
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return qoderSSEHTTPResponse(req, http.StatusOK, qoderStreamBodyWithUsage(t, 3, 4, 7)), nil
+	}))
+
+	result, err := executor.ExecuteStream(ctx, authRecord, cliproxyexecutor.Request{
+		Model:   "qoder/auto",
+		Payload: []byte(`{"model":"qoder/auto","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	if record.Provider != "qoder" {
+		t.Fatalf("Provider = %q, want qoder", record.Provider)
+	}
+	if record.ExecutorType != "QoderExecutor" {
+		t.Fatalf("ExecutorType = %q, want QoderExecutor", record.ExecutorType)
+	}
+	if record.Failed {
+		t.Fatalf("Failed = true, want false: %+v", record.Fail)
+	}
+	if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 7 {
+		t.Fatalf("Detail = %+v, want input=3 output=4 total=7", record.Detail)
+	}
+}
+
+func TestExecuteStream_PublishesFailureRecordForUpstreamStatus(t *testing.T) {
+	executor := NewQoderExecutor(&config.Config{})
+	storage := testQoderStorageWithModelConfig()
+	authRecord := &cliproxyauth.Auth{
+		ID:       "qoder-test-auth",
+		Provider: "qoder",
+		Storage:  storage,
+	}
+
+	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 4)}
+	usage.RegisterNamedPlugin("test:qoder-status-failure", plugin)
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return qoderSSEHTTPResponse(req, http.StatusServiceUnavailable, "upstream down"), nil
+	}))
+
+	result, err := executor.ExecuteStream(ctx, authRecord, cliproxyexecutor.Request{
+		Model:   "qoder/auto",
+		Payload: []byte(`{"model":"qoder/auto","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if result != nil {
+		t.Fatalf("ExecuteStream() result = %+v, want nil", result)
+	}
+	if err == nil {
+		t.Fatal("ExecuteStream() error = nil, want error")
+	}
+
+	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	if !record.Failed {
+		t.Fatalf("Failed = false, want true")
+	}
+	if record.Fail.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("Fail.StatusCode = %d, want %d", record.Fail.StatusCode, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(record.Fail.Body, "upstream down") {
+		t.Fatalf("Fail.Body = %q, want upstream body", record.Fail.Body)
+	}
+}
+
+func TestExecuteStream_EnsuresUsageRecordForRawDoneWithoutUsage(t *testing.T) {
+	executor := NewQoderExecutor(&config.Config{})
+	storage := testQoderStorageWithModelConfig()
+	authRecord := &cliproxyauth.Auth{
+		ID:       "qoder-test-auth",
+		Provider: "qoder",
+		Storage:  storage,
+	}
+
+	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 4)}
+	usage.RegisterNamedPlugin("test:qoder-raw-done", plugin)
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return qoderSSEHTTPResponse(req, http.StatusOK, "data: [DONE]\n\n"), nil
+	}))
+
+	result, err := executor.ExecuteStream(ctx, authRecord, cliproxyexecutor.Request{
+		Model:   "qoder/auto",
+		Payload: []byte(`{"model":"qoder/auto","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	if record.Failed {
+		t.Fatalf("Failed = true, want false: %+v", record.Fail)
+	}
+	if record.Detail != (usage.Detail{}) {
+		t.Fatalf("Detail = %+v, want empty fallback detail", record.Detail)
+	}
+	assertNoExtraQoderRecord(t, plugin.records)
+}
+
+func TestExecuteStream_PublishesFailureRecordForStreamEnvelopeStatus(t *testing.T) {
+	executor := NewQoderExecutor(&config.Config{})
+	storage := testQoderStorageWithModelConfig()
+	authRecord := &cliproxyauth.Auth{
+		ID:       "qoder-test-auth",
+		Provider: "qoder",
+		Storage:  storage,
+	}
+
+	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 4)}
+	usage.RegisterNamedPlugin("test:qoder-envelope-failure", plugin)
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := qoderStreamBodyWithStatus(t, http.StatusTooManyRequests, "quota exhausted")
+		return qoderSSEHTTPResponse(req, http.StatusOK, body), nil
+	}))
+
+	result, err := executor.ExecuteStream(ctx, authRecord, cliproxyexecutor.Request{
+		Model:   "qoder/auto",
+		Payload: []byte(`{"model":"qoder/auto","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var streamErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("stream error = nil, want envelope error")
+	}
+
+	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	if !record.Failed {
+		t.Fatal("Failed = false, want true")
+	}
+	if record.Fail.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("Fail.StatusCode = %d, want %d", record.Fail.StatusCode, http.StatusTooManyRequests)
+	}
+	if !strings.Contains(record.Fail.Body, "quota exhausted") {
+		t.Fatalf("Fail.Body = %q, want envelope body", record.Fail.Body)
+	}
+}
+
 // TestExecuteStream_StreamParsing tests successful stream parsing
 func TestExecuteStream_StreamParsing(t *testing.T) {
 	// This test requires overriding QoderChatURL which is a constant
@@ -268,6 +438,128 @@ func TestExecuteStream_StreamContextCancel(t *testing.T) {
 	// This test requires overriding QoderChatURL which is a constant
 	// Skipping as it can't be properly tested without code changes
 	t.Skip("requires ability to override QoderChatURL")
+}
+
+type qoderRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f qoderRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type captureQoderUsagePlugin struct {
+	records chan usage.Record
+}
+
+func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if p == nil {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, model string) usage.Record {
+	t.Helper()
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case record := <-records:
+			if record.Provider == "qoder" && record.Model == model {
+				return record
+			}
+		case <-timeout:
+			t.Fatalf("timed out waiting for Qoder usage record for model %q", model)
+		}
+	}
+}
+
+func assertNoExtraQoderRecord(t *testing.T, records <-chan usage.Record) {
+	t.Helper()
+	select {
+	case record := <-records:
+		t.Fatalf("unexpected extra Qoder usage record: %+v", record)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func testQoderStorageWithModelConfig() *qoder.QoderTokenStorage {
+	return &qoder.QoderTokenStorage{
+		Token:        "token",
+		RefreshToken: "refresh",
+		ExpireTime:   time.Now().Add(1 * time.Hour).UnixMilli(),
+		UserID:       "user123",
+		Name:         "Test User",
+		Email:        "test@example.com",
+		MachineID:    "machine123",
+		ModelConfigs: map[string]json.RawMessage{
+			"auto": json.RawMessage(`{"key":"auto","source":"system","is_reasoning":false,"max_output_tokens":8192}`),
+		},
+	}
+}
+
+func qoderSSEHTTPResponse(req *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func qoderStreamBodyWithUsage(t *testing.T, promptTokens, completionTokens, totalTokens int) string {
+	t.Helper()
+	inner := map[string]interface{}{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion.chunk",
+		"created": 0,
+		"model":   "auto",
+		"choices": []map[string]interface{}{
+			{
+				"index":         0,
+				"delta":         map[string]interface{}{"content": "ok"},
+				"finish_reason": nil,
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     promptTokens,
+			"completion_tokens": completionTokens,
+			"total_tokens":      totalTokens,
+		},
+	}
+	innerBytes, err := json.Marshal(inner)
+	if err != nil {
+		t.Fatalf("marshal inner chunk: %v", err)
+	}
+	eventBytes, err := json.Marshal(map[string]interface{}{
+		"statusCodeValue": http.StatusOK,
+		"body":            string(innerBytes),
+	})
+	if err != nil {
+		t.Fatalf("marshal Qoder envelope: %v", err)
+	}
+	doneBytes, err := json.Marshal(map[string]interface{}{
+		"statusCodeValue": http.StatusOK,
+		"body":            "[DONE]",
+	})
+	if err != nil {
+		t.Fatalf("marshal Qoder done envelope: %v", err)
+	}
+	return "data: " + string(eventBytes) + "\n\n" + "data: " + string(doneBytes) + "\n\n"
+}
+
+func qoderStreamBodyWithStatus(t *testing.T, status int, body string) string {
+	t.Helper()
+	eventBytes, err := json.Marshal(map[string]interface{}{
+		"statusCodeValue": status,
+		"body":            body,
+	})
+	if err != nil {
+		t.Fatalf("marshal Qoder status envelope: %v", err)
+	}
+	return "data: " + string(eventBytes) + "\n\n"
 }
 
 // TestBuildOpenAIChunk tests message transformation

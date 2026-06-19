@@ -45,7 +45,7 @@ func (e *QoderExecutor) Identifier() string {
 }
 
 // ExecuteStream executes a streaming request against Qoder API
-func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	// Get token storage from auth record
 	storage, ok := authRecord.Storage.(*qoderauth.QoderTokenStorage)
 	if !ok {
@@ -80,6 +80,8 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 		// Not in static map and not in dynamic model cache — reject early.
 		return nil, fmt.Errorf("unsupported qoder model: %q (received %q)", qoderModel, model)
 	}
+	reporter := helps.NewExecutorUsageReporter(ctx, e, qoderModel, authRecord)
+	defer reporter.TrackFailure(ctx, &err)
 
 	// Normalize messages: flatten Anthropic/OpenAI multipart content arrays
 	// to plain strings (Qoder's chat endpoint expects content to be a string).
@@ -221,6 +223,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	httpReq.Header.Set("Accept-Encoding", "identity")
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, authRecord, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -274,6 +277,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			data = bytes.TrimPrefix(data, []byte(" "))
 			if bytes.Equal(data, []byte("[DONE]")) {
 				emitDone(ctx, out, opts.SourceFormat, req.Model, opts.OriginalRequest, payload, &streamParam)
+				reporter.EnsurePublished(ctx)
 				return
 			}
 
@@ -297,7 +301,9 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 				if msg == "" {
 					msg = fmt.Sprintf("upstream status %d", statusVal)
 				}
-				out <- cliproxyexecutor.StreamChunk{Err: newQoderStatusError(statusVal, msg)}
+				streamErr := newQoderStatusError(statusVal, msg)
+				reporter.PublishFailure(ctx, streamErr)
+				out <- cliproxyexecutor.StreamChunk{Err: streamErr}
 				return
 			}
 			if innerStr == "" {
@@ -305,6 +311,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			}
 			if innerStr == "[DONE]" {
 				emitDone(ctx, out, opts.SourceFormat, req.Model, opts.OriginalRequest, payload, &streamParam)
+				reporter.EnsurePublished(ctx)
 				return
 			}
 			var inner map[string]interface{}
@@ -323,6 +330,9 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			// other executors feed into TranslateStream so the translators'
 			// "expects data: prefix" assumption holds.
 			ssePayload := append([]byte("data: "), chunkBytes...)
+			if detail, ok := helps.ParseOpenAIStreamUsage(ssePayload); ok {
+				reporter.Publish(ctx, detail)
+			}
 
 			// Always run through TranslateStream. When source==target
 			// (OpenAI client) it strips the "data:" prefix and returns
@@ -352,8 +362,12 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 		emitDone(ctx, out, opts.SourceFormat, req.Model, opts.OriginalRequest, payload, &streamParam)
 		// Check for scanner errors
 		if err := scanner.Err(); err != nil {
-			out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("scanner error: %w", err)}
+			streamErr := fmt.Errorf("scanner error: %w", err)
+			reporter.PublishFailure(ctx, streamErr)
+			out <- cliproxyexecutor.StreamChunk{Err: streamErr}
+			return
 		}
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{
