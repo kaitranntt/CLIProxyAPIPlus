@@ -1010,13 +1010,34 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	persistData := data
+	if metadata := metadataFromAuthFileBytes(data); metadata != nil {
+		if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
+			normalizedData, errMarshal := json.MarshalIndent(normalized, "", "  ")
+			if errMarshal != nil {
+				return fmt.Errorf("failed to encode normalized auth file: %w", errMarshal)
+			}
+			persistData = append(normalizedData, '\n')
+		}
+	}
+	if errWrite := os.WriteFile(dst, persistData, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
 	}
 	return nil
+}
+
+func metadataFromAuthFileBytes(data []byte) map[string]any {
+	if len(data) == 0 {
+		return nil
+	}
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil
+	}
+	return metadata
 }
 
 func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
@@ -1204,6 +1225,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
+	if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
+		metadata = normalized
+	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
@@ -1248,6 +1272,64 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+func normalizeKiroIDETokenMetadata(metadata map[string]any) (map[string]any, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	if existingType, _ := metadata["type"].(string); strings.TrimSpace(existingType) != "" {
+		return nil, false
+	}
+	accessToken := strings.TrimSpace(stringFromMetadata(metadata, "accessToken"))
+	if accessToken == "" {
+		return nil, false
+	}
+	hasKiroIDEField := false
+	for _, key := range []string{"profileArn", "clientIdHash", "startUrl"} {
+		if strings.TrimSpace(stringFromMetadata(metadata, key)) != "" {
+			hasKiroIDEField = true
+			break
+		}
+	}
+	if !hasKiroIDEField {
+		return nil, false
+	}
+
+	email := strings.TrimSpace(stringFromMetadata(metadata, "email"))
+	if email == "" {
+		email = kiroauth.ExtractEmailFromJWT(accessToken)
+	}
+	return map[string]any{
+		"type":           "kiro",
+		"access_token":   accessToken,
+		"refresh_token":  strings.TrimSpace(stringFromMetadata(metadata, "refreshToken")),
+		"profile_arn":    strings.TrimSpace(stringFromMetadata(metadata, "profileArn")),
+		"expires_at":     strings.TrimSpace(stringFromMetadata(metadata, "expiresAt")),
+		"auth_method":    strings.ToLower(strings.TrimSpace(stringFromMetadata(metadata, "authMethod"))),
+		"provider":       strings.TrimSpace(stringFromMetadata(metadata, "provider")),
+		"client_id":      strings.TrimSpace(stringFromMetadata(metadata, "clientId")),
+		"client_secret":  strings.TrimSpace(stringFromMetadata(metadata, "clientSecret")),
+		"client_id_hash": strings.TrimSpace(stringFromMetadata(metadata, "clientIdHash")),
+		"email":          email,
+		"start_url":      strings.TrimSpace(stringFromMetadata(metadata, "startUrl")),
+		"region":         strings.TrimSpace(stringFromMetadata(metadata, "region")),
+	}, true
+}
+
+func stringFromMetadata(metadata map[string]any, key string) string {
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return fmt.Sprint(value)
+	}
 }
 
 func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) error {

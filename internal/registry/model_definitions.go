@@ -692,24 +692,74 @@ func GetGitHubCopilotModels() []*ModelInfo {
 	}...)
 }
 
-// GetKiroModels returns Kiro-hosted model definitions.
+// GetKiroModels returns Kiro-hosted fallback model definitions.
 //
-// Kiro supports a growing list of models (Claude variants, GLM, DeepSeek,
-// MiniMax, Qwen, …) and the set changes without SDK releases. Rather than
-// hardcoding every model, we rely entirely on the dynamic discovery path
-// (sdk/cliproxy/service.go fetchKiroModels → ConvertKiroAPIModels), which
-// asks Kiro's own API what is currently available and generates ModelInfo
-// entries on the fly. That keeps the proxy in sync with Kiro automatically.
-//
-// An empty (non-nil) slice is returned so callers can distinguish "kiro is a
-// known channel with no static entries" from "unknown channel" — the latter
-// is signaled by nil and produces an HTTP 400 in the management endpoint.
-// When API discovery is unreachable, /v1/models simply shows no Kiro models
-// until the next successful fetch. GenerateAgenticVariants is still the
-// place where agentic variants are layered on top of whatever the API
-// returns.
+// Dynamic Kiro discovery remains the primary source of truth. This small
+// fallback set mirrors the built-in Kiro OAuth aliases and prevents a valid
+// Kiro auth from registering zero models when model discovery is temporarily
+// unavailable.
 func GetKiroModels() []*ModelInfo {
-	return []*ModelInfo{}
+	now := int64(1732752000) // 2024-11-27
+	endpoints := []string{"/chat/completions", "/messages"}
+	entries := []struct {
+		id          string
+		displayName string
+		description string
+	}{
+		{
+			id:          "kiro-claude-sonnet-4-6",
+			displayName: "Claude Sonnet 4.6",
+			description: "Claude Sonnet 4.6 via Kiro",
+		},
+		{
+			id:          "kiro-claude-sonnet-4-5",
+			displayName: "Claude Sonnet 4.5",
+			description: "Claude Sonnet 4.5 via Kiro",
+		},
+		{
+			id:          "kiro-claude-sonnet-4",
+			displayName: "Claude Sonnet 4",
+			description: "Claude Sonnet 4 via Kiro",
+		},
+		{
+			id:          "kiro-claude-opus-4-7",
+			displayName: "Claude Opus 4.7",
+			description: "Claude Opus 4.7 via Kiro",
+		},
+		{
+			id:          "kiro-claude-opus-4-6",
+			displayName: "Claude Opus 4.6",
+			description: "Claude Opus 4.6 via Kiro",
+		},
+		{
+			id:          "kiro-claude-opus-4-5",
+			displayName: "Claude Opus 4.5",
+			description: "Claude Opus 4.5 via Kiro",
+		},
+		{
+			id:          "kiro-claude-haiku-4-5",
+			displayName: "Claude Haiku 4.5",
+			description: "Claude Haiku 4.5 via Kiro",
+		},
+	}
+
+	models := make([]*ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, &ModelInfo{
+			ID:                  entry.id,
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         entry.displayName,
+			Description:         entry.description,
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			SupportedEndpoints:  endpoints,
+			Thinking:            cloneThinkingSupport(DefaultKiroThinkingSupport),
+		})
+	}
+	return models
 }
 
 // GetAmazonQModels returns the Amazon Q (AWS CodeWhisperer) model definitions.

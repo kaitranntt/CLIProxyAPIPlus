@@ -66,6 +66,46 @@ func TestRegisterModelsForAuth_MergesOAuthExcludedModelsFromConfigAndAuthAttribu
 	}
 }
 
+func TestRegisterModelsForAuth_KiroFallbackModelsApplyExcludedModels(t *testing.T) {
+	excludedModel := "kiro-claude-sonnet-4-6"
+	service := &Service{
+		cfg: &config.Config{},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-kiro-fallback",
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":       "oauth",
+			"excluded_models": excludedModel,
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected Kiro fallback models to be registered")
+	}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(model.ID), excludedModel) {
+			t.Fatalf("expected Kiro fallback model %q to be excluded", excludedModel)
+		}
+		if model.Type != "kiro" {
+			t.Fatalf("model %q type = %q, want kiro", model.ID, model.Type)
+		}
+	}
+}
+
 func TestPatchAuthFileFields_RefreshesModelRegistryImmediately(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
