@@ -38,6 +38,10 @@ const (
 	cursorHeartbeatInterval = 5 * time.Second
 	cursorSessionTTL        = 5 * time.Minute
 	cursorCheckpointTTL     = 30 * time.Minute
+	// cursorModelsCacheTTL bounds how long a cached model list is reused
+	// before a new fetch is attempted. This prevents a stale model list from
+	// persisting across auth token refreshes or long-lived executor processes.
+	cursorModelsCacheTTL = 30 * time.Minute
 )
 
 // CursorExecutor handles requests to the Cursor API via Connect+Protobuf protocol.
@@ -1138,6 +1142,13 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 			p.Images = extractImages(msg.Get("content"))
 		case "assistant":
 			assistantText := extractTextContent(msg.Get("content"))
+			if toolCallsText := extractToolCallsText(msg.Get("tool_calls")); toolCallsText != "" {
+				if assistantText != "" {
+					assistantText += "\n" + toolCallsText
+				} else {
+					assistantText = toolCallsText
+				}
+			}
 			if pendingUser != "" {
 				p.Turns = append(p.Turns, cursorproto.TurnData{
 					UserText:      pendingUser,
@@ -1240,6 +1251,34 @@ func extractTextContent(content gjson.Result) string {
 		return strings.Join(parts, "")
 	}
 	return content.String()
+}
+
+// extractToolCallsText returns a compact text representation of assistant
+// tool_calls for inclusion in the flattened conversation history. This ensures
+// that a fresh H2 stream still sees which tools the assistant invoked even
+// when the assistant message has no text content.
+func extractToolCallsText(toolCalls gjson.Result) string {
+	if !toolCalls.IsArray() {
+		return ""
+	}
+	var entries []string
+	for _, tc := range toolCalls.Array() {
+		if tc.Get("type").String() != "function" {
+			continue
+		}
+		id := tc.Get("id").String()
+		name := tc.Get("function.name").String()
+		args := tc.Get("function.arguments").String()
+		if name == "" {
+			continue
+		}
+		if id != "" {
+			entries = append(entries, fmt.Sprintf("[tool_call %s: %s(%s)]", id, name, args))
+		} else {
+			entries = append(entries, fmt.Sprintf("[tool_call: %s(%s)]", name, args))
+		}
+	}
+	return strings.Join(entries, "\n")
 }
 
 func extractImages(content gjson.Result) []cursorproto.ImageData {
@@ -1488,50 +1527,91 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 
 // --- Model Discovery ---
 
+// modelsCacheEntry holds a cached model list with a creation timestamp.
+type modelsCacheEntry struct {
+	models    []*registry.ModelInfo
+	createdAt time.Time
+}
+
 // cursorModelsCache stores the last successful model list per auth so a
 // transient GetUsableModels failure does not collapse the model registry to
 // the hardcoded fallback (which can drop models the user actually calls,
 // e.g. composer-2.5). Keyed by auth.ID (the auth file name).
+//
+// Each entry has a TTL: after cursorModelsCacheTTL, stale entries are
+// discarded and the next call triggers a fresh fetch.
 var (
 	cursorModelsCacheMu sync.RWMutex
-	cursorModelsCache   = make(map[string][]*registry.ModelInfo)
+	cursorModelsCache   = make(map[string]*modelsCacheEntry)
 )
 
 // cursorModelsOrFallback returns the cached model list for authID when one
-// exists, otherwise the hardcoded fallback. The fallback is only ever used
-// when no prior successful fetch has populated the cache for this auth.
+// exists and is fresh, otherwise the hardcoded fallback. The fallback is
+// only ever used when no prior successful fetch has populated the cache
+// for this auth, or when the cached entry has expired.
 //
-// The returned slice is a shallow copy of the cached entry: callers may
-// safely replace slice elements without corrupting the cache. Callers must
-// still treat ModelInfo fields as read-only -- a full deep copy would also
-// clone each entry's *ThinkingSupport, which is unnecessary given that
-// downstream consumers (registry reconcile) treat models as immutable.
+// The returned slice is a deep copy of the cached entries: each ModelInfo
+// is cloned to prevent mutation from corrupting the cache for other
+// callers or future fetches.
 func cursorModelsOrFallback(authID string) []*registry.ModelInfo {
 	if authID != "" {
 		cursorModelsCacheMu.RLock()
 		cached, ok := cursorModelsCache[authID]
 		cursorModelsCacheMu.RUnlock()
-		if ok && len(cached) > 0 {
-			dup := make([]*registry.ModelInfo, len(cached))
-			copy(dup, cached)
-			return dup
+		if ok && cached != nil && time.Since(cached.createdAt) <= cursorModelsCacheTTL {
+			return cloneModelsList(cached.models)
 		}
 	}
 	return GetCursorFallbackModels()
 }
 
-// cacheCursorModels records a successful model fetch for future fallback use.
-// A shallow copy of the slice is stored so the caller can freely mutate its
-// own slice header (append, element replacement) without corrupting the cache.
+// cacheCursorModels records a successful model fetch for future fallback use
+// with a TTL. Stale entries are lazily cleaned up: when a new fetch succeeds,
+// only the matching auth's entry is refreshed; other auths' expired entries
+// are evicted on their next read in cursorModelsOrFallback.
 func cacheCursorModels(authID string, models []*registry.ModelInfo) {
 	if authID == "" || len(models) == 0 {
 		return
 	}
-	dup := make([]*registry.ModelInfo, len(models))
-	copy(dup, models)
+	dense := deepCopyModels(models)
 	cursorModelsCacheMu.Lock()
-	cursorModelsCache[authID] = dup
+	cursorModelsCache[authID] = &modelsCacheEntry{
+		models:    dense,
+		createdAt: time.Now(),
+	}
 	cursorModelsCacheMu.Unlock()
+}
+
+// cloneModelsList returns a deep copy of a model list for safe concurrent
+// use. The returned slice and its entries are independent of the source.
+func cloneModelsList(src []*registry.ModelInfo) []*registry.ModelInfo {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]*registry.ModelInfo, len(src))
+	for i, m := range src {
+		dst[i] = deepCopyModel(m)
+	}
+	return dst
+}
+
+// deepCopyModels is a convenience wrapper that clones all entries.
+func deepCopyModels(src []*registry.ModelInfo) []*registry.ModelInfo {
+	return cloneModelsList(src)
+}
+
+// deepCopyModel creates an independent copy of a ModelInfo, including
+// its slice fields (SupportedGenerationMethods, etc.).
+func deepCopyModel(src *registry.ModelInfo) *registry.ModelInfo {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	if src.SupportedGenerationMethods != nil {
+		dst.SupportedGenerationMethods = make([]string, len(src.SupportedGenerationMethods))
+		copy(dst.SupportedGenerationMethods, src.SupportedGenerationMethods)
+	}
+	return &dst
 }
 
 // FetchCursorModels retrieves available models from Cursor's API. On failure,
