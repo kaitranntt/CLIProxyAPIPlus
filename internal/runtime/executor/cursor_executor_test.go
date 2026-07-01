@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestParseOpenAIRequest_AssistantToolCalls(t *testing.T) {
@@ -122,6 +124,48 @@ func TestParseOpenAIRequest_AssistantToolCalls(t *testing.T) {
 			}
 			if len(parsed.ToolResults) != tc.wantToolResults {
 				t.Errorf("len(ToolResults) = %d, want %d", len(parsed.ToolResults), tc.wantToolResults)
+			}
+		})
+	}
+}
+
+func TestExtractToolCallsText(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		expected string
+	}{
+		{
+			name:     "single function call",
+			payload:  `[{"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]`,
+			expected: "[tool_call call_abc123: get_weather({\"city\":\"Paris\"})]",
+		},
+		{
+			name:     "multiple function calls",
+			payload:  `[{"id":"call_1","type":"function","function":{"name":"a","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"b","arguments":"{\"x\":1}"}}]`,
+			expected: "[tool_call call_1: a({})]\n[tool_call call_2: b({\"x\":1})]",
+		},
+		{
+			name:     "missing id falls back",
+			payload:  `[{"type":"function","function":{"name":"no_id","arguments":"{}"}}]`,
+			expected: "[tool_call: no_id({})]",
+		},
+		{
+			name:     "non-function type is skipped",
+			payload:  `[{"id":"call_x","type":"retrieval","function":{"name":"retrieve","arguments":"{}"}}]`,
+			expected: "",
+		},
+		{
+			name:     "malformed tool_calls returns empty",
+			payload:  `{}`,
+			expected: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractToolCallsText(gjson.Parse(tc.payload))
+			if got != tc.expected {
+				t.Errorf("extractToolCallsText() = %q, want %q", got, tc.expected)
 			}
 		})
 	}
