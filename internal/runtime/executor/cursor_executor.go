@@ -38,6 +38,12 @@ const (
 	cursorHeartbeatInterval = 5 * time.Second
 	cursorSessionTTL        = 5 * time.Minute
 	cursorCheckpointTTL     = 30 * time.Minute
+	// cursorToolResultTimeout bounds how long processH2SessionFrames waits
+	// for client tool results before failing the session. This prevents
+	// orphaned goroutines/H2 streams when clients never send role=tool
+	// messages (e.g., cursor/composer-2.5 getting stuck after the first
+	// tool-calling reply).
+	cursorToolResultTimeout = 5 * time.Minute
 	// cursorModelsCacheTTL bounds how long a cached model list is reused
 	// before a new fetch is attempted. This prevents a stale model list from
 	// persisting across auth token refreshes or long-lived executor processes.
@@ -331,6 +337,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		nil,
 		nil, // tokenUsage - non-streaming
 		nil, // onCheckpoint - non-streaming doesn't persist
+		nil, // onTimeout - non-streaming doesn't wait for tool results
 	); streamErr != nil && fullText.Len() == 0 {
 		return resp, classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
 	}
@@ -613,8 +620,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					thinkingActive = false
 					sendChunkSwitchable(`{"content":"</think>"}`, "")
 				}
-				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
-					toolCallIndex, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
+				toolCallJSON := buildToolCallDelta(toolCallIndex, exec)
 				toolCallIndex++
 				sendChunkSwitchable(toolCallJSON, "")
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
@@ -674,9 +680,29 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				e.mu.Unlock()
 				log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
 			},
+			func() error {
+				// Tool result wait timed out. Close the resume output channel
+				// with an error chunk so any pending HTTP request fails cleanly,
+				// and remove the stale session so it cannot be resumed.
+				e.mu.Lock()
+				delete(e.sessions, sessionKey)
+				e.mu.Unlock()
+				if resumeOutCh != nil {
+					errPayload := fmt.Sprintf(`{"error":{"message":"cursor: timed out waiting for tool results after %v","type":"timeout"}}`, cursorToolResultTimeout)
+					resumeOutCh <- cliproxyexecutor.StreamChunk{Payload: []byte(errPayload), Err: fmt.Errorf("cursor: tool result timeout")}
+					close(resumeOutCh)
+					resumeOutCh = nil
+				}
+				return fmt.Errorf("cursor: timed out waiting for tool results after %v", cursorToolResultTimeout)
+			},
 		)
 
 		// processH2SessionFrames returned — stream is done.
+		// Remove the session so it cannot be resumed after the stream ends.
+		e.mu.Lock()
+		delete(e.sessions, sessionKey)
+		e.mu.Unlock()
+
 		// Check if error happened before any chunks were emitted.
 		if streamErr != nil {
 			select {
@@ -860,6 +886,7 @@ func processH2SessionFrames(
 	toolResultCh <-chan []toolResultInfo, // nil for no tool result injection; non-nil to wait for results
 	tokenUsage *cursorTokenUsage, // tracks accumulated token usage (may be nil)
 	onCheckpoint func(data []byte), // called when server sends conversation_checkpoint_update
+	onTimeout func() error, // called when tool result wait times out
 ) error {
 	var buf bytes.Buffer
 	rejectReason := "Tool not available in this environment. Use the MCP tools provided instead."
@@ -984,11 +1011,21 @@ func processH2SessionFrames(
 						// Inline mode: wait for tool result while handling KV/heartbeat
 						log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
 						var toolResults []toolResultInfo
+						timeout := time.NewTimer(cursorToolResultTimeout)
+						defer timeout.Stop()
 					waitLoop:
 						for {
 							select {
 							case <-ctx.Done():
 								return ctx.Err()
+							case <-timeout.C:
+								log.Warnf("cursor: timed out waiting for tool results after %v", cursorToolResultTimeout)
+								if onTimeout != nil {
+									if err := onTimeout(); err != nil {
+										return err
+									}
+								}
+								return fmt.Errorf("cursor: timed out waiting for tool results after %v", cursorToolResultTimeout)
 							case results, ok := <-toolResultCh:
 								if !ok {
 									return nil
@@ -1495,6 +1532,14 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 	return cliproxyexecutor.StreamChunk{
 		Payload: []byte(data),
 	}
+}
+
+// buildToolCallDelta formats a single tool_call delta in OpenAI streaming
+// format. exec.Args is expected to already be a JSON object string produced by
+// decodeMcpArgsToJSON, so it is inserted directly without re-encoding.
+func buildToolCallDelta(toolCallIndex int, exec pendingMcpExec) string {
+	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
+		toolCallIndex, exec.ToolCallId, exec.ToolName, exec.Args)
 }
 
 func jsonString(s string) string {

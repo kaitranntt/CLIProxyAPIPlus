@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -121,6 +122,72 @@ func TestParseOpenAIRequest_AssistantToolCalls(t *testing.T) {
 			}
 			if len(parsed.ToolResults) != tc.wantToolResults {
 				t.Errorf("len(ToolResults) = %d, want %d", len(parsed.ToolResults), tc.wantToolResults)
+			}
+		})
+	}
+}
+
+func TestBuildToolCallDelta_ArgumentsAreJSONObject(t *testing.T) {
+	exec := pendingMcpExec{
+		ToolCallId: "call_abc123",
+		ToolName:   "get_weather",
+		Args:       `{"city":"Paris"}`,
+	}
+	delta := buildToolCallDelta(0, exec)
+
+	var parsed struct {
+		ToolCalls []struct {
+			Function struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(delta), &parsed); err != nil {
+		t.Fatalf("delta is not valid JSON: %v\ndelta: %s", err, delta)
+	}
+	if len(parsed.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool_call, got %d", len(parsed.ToolCalls))
+	}
+	got := parsed.ToolCalls[0].Function.Name
+	if got != "get_weather" {
+		t.Errorf("function name = %q, want get_weather", got)
+	}
+	if len(parsed.ToolCalls[0].Function.Arguments) == 0 {
+		t.Fatalf("arguments field is missing")
+	}
+	if parsed.ToolCalls[0].Function.Arguments[0] != '{' {
+		t.Errorf("arguments should be a JSON object, got %s", string(parsed.ToolCalls[0].Function.Arguments))
+	}
+}
+
+func TestDecodeMcpArgsToJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string][]byte
+		want string
+	}{
+		{
+			name: "empty args",
+			args: map[string][]byte{},
+			want: "{}",
+		},
+		{
+			name: "simple string arg",
+			args: map[string][]byte{"city": []byte(`"Paris"`)},
+			want: `{"city":"Paris"}`,
+		},
+		{
+			name: "nested object arg",
+			args: map[string][]byte{"query": []byte(`{"city":"Paris","country":"FR"}`)},
+			want: `{"query":{"city":"Paris","country":"FR"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := decodeMcpArgsToJSON(tc.args)
+			if got != tc.want {
+				t.Errorf("decodeMcpArgsToJSON() = %q, want %q", got, tc.want)
 			}
 		})
 	}
