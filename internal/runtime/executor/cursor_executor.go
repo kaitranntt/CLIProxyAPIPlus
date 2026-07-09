@@ -556,14 +556,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// Wrap sendChunk/sendDone to use emitToOut
-	sendChunkSwitchable := func(delta string, finishReason string) {
-		fr := "null"
-		if finishReason != "" {
-			fr = finishReason
+	sendChunkSwitchable := func(delta map[string]interface{}, finishReason string) {
+		openaiJSON, err := helps.BuildChatCompletionChunk(chatId, created, parsed.Model, delta, finishReason, nil)
+		if err != nil {
+			log.Errorf("cursor: failed to build stream chunk: %v", err)
+			return
 		}
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-			chatId, created, parsed.Model, delta, fr)
-		sseLine := []byte("data: " + openaiJSON + "\n")
+		sseLine := append([]byte("data: "), openaiJSON...)
+		sseLine = append(sseLine, '\n')
 
 		if needsTranslate {
 			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
@@ -571,7 +571,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(t)})
 			}
 		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
+			emitToOut(cliproxyexecutor.StreamChunk{Payload: openaiJSON})
 		}
 	}
 
@@ -614,27 +614,35 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if isThinking {
 					if !thinkingActive {
 						thinkingActive = true
-						sendChunkSwitchable(`{"role":"assistant","content":"<think>"}`, "")
+						sendChunkSwitchable(map[string]interface{}{"role": "assistant", "content": "<think>"}, "")
 					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+					sendChunkSwitchable(map[string]interface{}{"content": text}, "")
 				} else {
 					if thinkingActive {
 						thinkingActive = false
-						sendChunkSwitchable(`{"content":"</think>"}`, "")
+						sendChunkSwitchable(map[string]interface{}{"content": "</think>"}, "")
 					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+					sendChunkSwitchable(map[string]interface{}{"content": text}, "")
 				}
 			},
 			func(exec pendingMcpExec) {
 				if thinkingActive {
 					thinkingActive = false
-					sendChunkSwitchable(`{"content":"</think>"}`, "")
+					sendChunkSwitchable(map[string]interface{}{"content": "</think>"}, "")
 				}
-				toolCallJSON := buildToolCallDelta(toolCallIndex, exec)
-				log.Debugf("cursor: emitting tool_call delta: %s", toolCallJSON)
-				toolCallIndex++
-				sendChunkSwitchable(toolCallJSON, "")
-				sendChunkSwitchable(`{}`, `"tool_calls"`)
+				startDelta, err := helps.BuildToolCallStartDelta(toolCallIndex, exec.ToolCallId, exec.ToolName)
+				if err != nil {
+					log.Errorf("cursor: failed to build tool-call start delta: %v", err)
+				} else {
+					sendChunkSwitchable(map[string]interface{}{"tool_calls": extractFirstToolCall(startDelta)}, "")
+				}
+				argsDelta, err := helps.BuildToolCallArgumentsDelta(toolCallIndex, exec.Args)
+				if err != nil {
+					log.Errorf("cursor: failed to build tool-call args delta: %v", err)
+				} else {
+					sendChunkSwitchable(map[string]interface{}{"tool_calls": extractFirstToolCall(argsDelta)}, "")
+				}
+				sendChunkSwitchable(map[string]interface{}{}, "tool_calls")
 
 				// Only end the response and save the session if we're in multi-round mode
 				// (toolResultCh is non-nil — we have tool results to inject from a previous round).
@@ -746,27 +754,31 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 
 		if thinkingActive {
-			sendChunkSwitchable(`{"content":"</think>"}`, "")
+			sendChunkSwitchable(map[string]interface{}{"content": "</think>"}, "")
 		}
 		// Include token usage in the final stop chunk
 		inputTok, outputTok := usage.get()
-		stopDelta := fmt.Sprintf(`{},"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`,
-			inputTok, outputTok, inputTok+outputTok)
-		// Build the stop chunk with usage embedded in the choices array level
-		fr := `"stop"`
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
-			chatId, created, parsed.Model, fr, inputTok, outputTok, inputTok+outputTok)
-		sseLine := []byte("data: " + openaiJSON + "\n")
-		if needsTranslate {
-			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
-			for _, t := range translated {
-				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(t)})
-			}
+		usageMap := map[string]interface{}{
+			"prompt_tokens":     inputTok,
+			"completion_tokens": outputTok,
+			"total_tokens":      inputTok + outputTok,
+		}
+		openaiJSON, err := helps.BuildChatCompletionChunk(chatId, created, parsed.Model, map[string]interface{}{}, "stop", usageMap)
+		if err != nil {
+			log.Errorf("cursor: failed to build final stop chunk: %v", err)
 		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
+			sseLine := append([]byte("data: "), openaiJSON...)
+			sseLine = append(sseLine, '\n')
+			if needsTranslate {
+				translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
+				for _, t := range translated {
+					emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(t)})
+				}
+			} else {
+				emitToOut(cliproxyexecutor.StreamChunk{Payload: openaiJSON})
+			}
 		}
 		sendDoneSwitchable()
-		_ = stopDelta // unused
 
 		// Close whatever output channel is still active
 		outMu.Lock()
@@ -1561,17 +1573,16 @@ func deriveSessionKey(clientKey string, model string, messages []gjson.Result) s
 	return hex.EncodeToString(h[:])[:16]
 }
 
-func sseChunk(id string, created int64, model string, delta string, finishReason string) cliproxyexecutor.StreamChunk {
-	fr := "null"
-	if finishReason != "" {
-		fr = finishReason
-	}
+func sseChunk(id string, created int64, model string, delta map[string]interface{}, finishReason string) cliproxyexecutor.StreamChunk {
 	// Note: the framework's WriteChunk adds "data: " prefix and "\n\n" suffix,
 	// so we only output the raw JSON here.
-	data := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-		id, created, model, delta, fr)
+	data, err := helps.BuildChatCompletionChunk(id, created, model, delta, finishReason, nil)
+	if err != nil {
+		log.Errorf("cursor: failed to build sse chunk: %v", err)
+		return cliproxyexecutor.StreamChunk{Payload: []byte("{}")}
+	}
 	return cliproxyexecutor.StreamChunk{
-		Payload: []byte(data),
+		Payload: data,
 	}
 }
 
@@ -1579,11 +1590,43 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 // format. exec.Args is expected to already be a JSON object string produced by
 // decodeMcpArgsToJSON, so it is inserted directly without re-encoding.
 func buildToolCallDelta(toolCallIndex int, exec pendingMcpExec) string {
-	// Note: %q ensures arguments is a JSON-encoded string, not a raw object.
+	// Note: json.Marshal encodes arguments as a JSON string, not a raw object.
 	// OpenAI schema requires arguments to be a JSON string containing the
 	// serialized arguments object.
-	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%q}}]}`,
-		toolCallIndex, exec.ToolCallId, exec.ToolName, exec.Args)
+	delta, _ := json.Marshal(map[string]interface{}{
+		"tool_calls": []map[string]interface{}{
+			{
+				"index": toolCallIndex,
+				"id":    exec.ToolCallId,
+				"type":  "function",
+				"function": map[string]interface{}{
+					"name":      exec.ToolName,
+					"arguments": exec.Args,
+				},
+			},
+		},
+	})
+	return string(delta)
+}
+
+// extractFirstToolCall parses a JSON delta object and returns the first
+// tool_call entry from its "tool_calls" array. It is used to unwrap the
+// full delta produced by the helper builders so it can be passed through
+// sendChunkSwitchable.
+func extractFirstToolCall(deltaJSON []byte) map[string]interface{} {
+	var delta map[string]interface{}
+	if err := json.Unmarshal(deltaJSON, &delta); err != nil {
+		return nil
+	}
+	calls, ok := delta["tool_calls"].([]interface{})
+	if !ok || len(calls) == 0 {
+		return nil
+	}
+	call, ok := calls[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return call
 }
 
 // parseComposerToolCalls parses <|tool_calls_begin|>...<|tool_calls_end|> markers
@@ -1632,11 +1675,6 @@ type cursorToolCall struct {
 
 // cursorToolCallList is a convenience alias for clarity in function signatures.
 type cursorToolCallList = []cursorToolCall
-
-func jsonString(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {
 	if len(args) == 0 {
