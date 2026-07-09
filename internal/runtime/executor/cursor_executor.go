@@ -1609,11 +1609,11 @@ func buildToolCallDelta(toolCallIndex int, exec pendingMcpExec) string {
 	return string(delta)
 }
 
-// extractFirstToolCall parses a JSON delta object and returns the first
-// tool_call entry from its "tool_calls" array. It is used to unwrap the
-// full delta produced by the helper builders so it can be passed through
-// sendChunkSwitchable.
-func extractFirstToolCall(deltaJSON []byte) map[string]interface{} {
+// extractFirstToolCall parses a JSON delta object and returns the entire
+// "tool_calls" array (not a single call object). OpenAI streaming schema
+// expects tool_calls at delta to be an array of tool call objects.
+// The delta itself is already an array when produced by the helper builders.
+func extractFirstToolCall(deltaJSON []byte) []interface{} {
 	var delta map[string]interface{}
 	if err := json.Unmarshal(deltaJSON, &delta); err != nil {
 		return nil
@@ -1622,11 +1622,7 @@ func extractFirstToolCall(deltaJSON []byte) map[string]interface{} {
 	if !ok || len(calls) == 0 {
 		return nil
 	}
-	call, ok := calls[0].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	return call
+	return calls
 }
 
 // parseComposerToolCalls parses <|tool_calls_begin|>...<|tool_calls_end|> markers
