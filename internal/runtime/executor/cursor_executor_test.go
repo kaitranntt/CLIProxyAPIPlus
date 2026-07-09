@@ -182,6 +182,9 @@ func TestBuildToolCallDelta_ArgumentsAreJSONObject(t *testing.T) {
 
 	var parsed struct {
 		ToolCalls []struct {
+			Index    int    `json:"index"`
+			ID       string `json:"id"`
+			Type     string `json:"type"`
 			Function struct {
 				Name      string          `json:"name"`
 				Arguments json.RawMessage `json:"arguments"`
@@ -194,9 +197,62 @@ func TestBuildToolCallDelta_ArgumentsAreJSONObject(t *testing.T) {
 	if len(parsed.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool_call, got %d", len(parsed.ToolCalls))
 	}
-	got := parsed.ToolCalls[0].Function.Name
-	if got != "get_weather" {
-		t.Errorf("function name = %q, want get_weather", got)
+	if parsed.ToolCalls[0].Index != 0 {
+		t.Errorf("index = %d, want 0", parsed.ToolCalls[0].Index)
+	}
+	if parsed.ToolCalls[0].ID != "call_abc123" {
+		t.Errorf("id = %q, want call_abc123", parsed.ToolCalls[0].ID)
+	}
+	if parsed.ToolCalls[0].Type != "function" {
+		t.Errorf("type = %q, want function", parsed.ToolCalls[0].Type)
+	}
+	if parsed.ToolCalls[0].Function.Name != "get_weather" {
+		t.Errorf("function name = %q, want get_weather", parsed.ToolCalls[0].Function.Name)
+	}
+	if len(parsed.ToolCalls[0].Function.Arguments) == 0 {
+		t.Fatalf("arguments field is missing")
+	}
+	if parsed.ToolCalls[0].Function.Arguments[0] != '"' {
+		t.Errorf("arguments should be a JSON string, got %s", string(parsed.ToolCalls[0].Function.Arguments))
+	}
+}
+
+func TestBuildToolCallDelta_SpecialCharactersEscaped(t *testing.T) {
+	exec := pendingMcpExec{
+		ToolCallId: `call_"quoted"`,
+		ToolName:   `get_weather"/><script>`,
+		Args:       `{"city":"Paris"}`,
+	}
+	delta := buildToolCallDelta(0, exec)
+
+	var parsed struct {
+		ToolCalls []struct {
+			Index    int    `json:"index"`
+			ID       string `json:"id"`
+			Type     string `json:"type"`
+			Function struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(delta), &parsed); err != nil {
+		t.Fatalf("delta is not valid JSON: %v\ndelta: %s", err, delta)
+	}
+	if len(parsed.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool_call, got %d", len(parsed.ToolCalls))
+	}
+	if parsed.ToolCalls[0].Index != 0 {
+		t.Errorf("index = %d, want 0", parsed.ToolCalls[0].Index)
+	}
+	if parsed.ToolCalls[0].ID != "call_\"quoted\"" {
+		t.Errorf("id = %q, want call_\"quoted\"", parsed.ToolCalls[0].ID)
+	}
+	if parsed.ToolCalls[0].Type != "function" {
+		t.Errorf("type = %q, want function", parsed.ToolCalls[0].Type)
+	}
+	if parsed.ToolCalls[0].Function.Name != "get_weather\"/><script>" {
+		t.Errorf("function name = %q, want get_weather\"/><script>", parsed.ToolCalls[0].Function.Name)
 	}
 	if len(parsed.ToolCalls[0].Function.Arguments) == 0 {
 		t.Fatalf("arguments field is missing")
