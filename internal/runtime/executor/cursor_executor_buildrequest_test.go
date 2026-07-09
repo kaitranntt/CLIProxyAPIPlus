@@ -8,10 +8,10 @@ import "testing"
 // and falls back to parsed.Model when the override is empty or whitespace.
 func TestBuildRunRequestParams_ModelOverride(t *testing.T) {
 	tests := []struct {
-		name         string
-		parsedModel  string
-		override     string
-		wantModelId  string
+		name        string
+		parsedModel string
+		override    string
+		wantModelId string
 	}{
 		{
 			name:        "override wins over parsed.Model",

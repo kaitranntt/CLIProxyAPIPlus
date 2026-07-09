@@ -21,6 +21,7 @@ import (
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -333,8 +334,9 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		func(text string, isThinking bool) {
 			fullText.WriteString(text)
 		},
-		nil,
-		nil,
+		nil, // onMcpExec - non-streaming doesn't need MCP exec
+		nil, // onToolCall - non-streaming doesn't need tool call detection
+		nil, // toolResultCh - non-streaming doesn't wait for tool results
 		nil, // tokenUsage - non-streaming
 		nil, // onCheckpoint - non-streaming doesn't persist
 		nil, // onTimeout - non-streaming doesn't wait for tool results
@@ -344,11 +346,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	id := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
-	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-		id, created, parsed.Model, jsonString(fullText.String()))
+	openaiResp, err := helps.BuildChatCompletion(id, created, parsed.Model, fullText.String(), "stop", 0, 0, 0)
+	if err != nil {
+		return resp, classifyCursorError(fmt.Errorf("cursor: failed to build completion response: %w", err))
+	}
 
 	// Translate response back to source format if needed
-	result := []byte(openaiResp)
+	result := openaiResp
 	if from.String() != "" && from.String() != "openai" {
 		var param any
 		result = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), payload, result, &param)
@@ -527,7 +531,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Tool result channel for inline mode. processH2SessionFrames blocks on it
 	// when mcpArgs is received, while continuing to handle KV/heartbeat.
-	toolResultCh := make(chan []toolResultInfo, 1)
+	// Only created when we have tool results to inject (resuming a session).
+	// For the initial request (no tool results), pass nil so processH2SessionFrames
+	// returns the tool call immediately without blocking.
+	var toolResultCh chan []toolResultInfo
+	if len(parsed.ToolResults) > 0 {
+		toolResultCh = make(chan []toolResultInfo, 1)
+	}
 
 	// Switchable output: initially writes to `chunks`. After mcpArgs, the
 	// onMcpExec callback closes `chunks` (ending the first HTTP response),
@@ -621,51 +631,60 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					sendChunkSwitchable(`{"content":"</think>"}`, "")
 				}
 				toolCallJSON := buildToolCallDelta(toolCallIndex, exec)
+				log.Debugf("cursor: emitting tool_call delta: %s", toolCallJSON)
 				toolCallIndex++
 				sendChunkSwitchable(toolCallJSON, "")
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
-				sendDoneSwitchable()
 
-				// Close current output to end the current HTTP SSE response
-				outMu.Lock()
-				if currentOut != nil {
-					close(currentOut)
-					currentOut = nil
+				// Only end the response and save the session if we're in multi-round mode
+				// (toolResultCh is non-nil — we have tool results to inject from a previous round).
+				// When toolResultCh is nil, processH2SessionFrames returns the tool call immediately
+				// and this is a single-request response — the client gets the tool call inline.
+				if toolResultCh != nil {
+					sendDoneSwitchable()
+
+					// Close current output to end the current HTTP SSE response
+					outMu.Lock()
+					if currentOut != nil {
+						close(currentOut)
+						currentOut = nil
+					}
+					outMu.Unlock()
+
+					// Create new resume output channel, reuse the same toolResultCh
+					resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
+					log.Debugf("cursor: saving session %s for MCP tool resume (tool=%s)", sessionKey, exec.ToolName)
+					e.mu.Lock()
+					e.sessions[sessionKey] = &cursorSession{
+						stream:       stream,
+						blobStore:    params.BlobStore,
+						mcpTools:     params.McpTools,
+						pending:      []pendingMcpExec{exec},
+						cancel:       sessionCancel,
+						createdAt:    time.Now(),
+						authID:       authID,
+						toolResultCh: toolResultCh, // reuse same channel across rounds
+						resumeOutCh:  resumeOut,
+						switchOutput: func(ch chan cliproxyexecutor.StreamChunk) {
+							outMu.Lock()
+							currentOut = ch
+							// Reset translator state so the new HTTP response gets
+							// a fresh message_start, content_block_start, etc.
+							streamParam = nil
+							// New response needs its own message ID
+							chatId = "chatcmpl-" + uuid.New().String()[:28]
+							created = time.Now().Unix()
+							outMu.Unlock()
+						},
+					}
+					e.mu.Unlock()
+					resumeOutCh = resumeOut
+
+					// processH2SessionFrames will now block on toolResultCh (inline wait loop)
+					// while continuing to handle KV messages
 				}
-				outMu.Unlock()
-
-				// Create new resume output channel, reuse the same toolResultCh
-				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
-				log.Debugf("cursor: saving session %s for MCP tool resume (tool=%s)", sessionKey, exec.ToolName)
-				e.mu.Lock()
-				e.sessions[sessionKey] = &cursorSession{
-					stream:       stream,
-					blobStore:    params.BlobStore,
-					mcpTools:     params.McpTools,
-					pending:      []pendingMcpExec{exec},
-					cancel:       sessionCancel,
-					createdAt:    time.Now(),
-					authID:       authID,
-					toolResultCh: toolResultCh, // reuse same channel across rounds
-					resumeOutCh:  resumeOut,
-					switchOutput: func(ch chan cliproxyexecutor.StreamChunk) {
-						outMu.Lock()
-						currentOut = ch
-						// Reset translator state so the new HTTP response gets
-						// a fresh message_start, content_block_start, etc.
-						streamParam = nil
-						// New response needs its own message ID
-						chatId = "chatcmpl-" + uuid.New().String()[:28]
-						created = time.Now().Unix()
-						outMu.Unlock()
-					},
-				}
-				e.mu.Unlock()
-				resumeOutCh = resumeOut
-
-				// processH2SessionFrames will now block on toolResultCh (inline wait loop)
-				// while continuing to handle KV messages
 			},
+			nil, // onToolCall - will be wired later
 			toolResultCh,
 			usage,
 			func(cpData []byte) {
@@ -883,6 +902,7 @@ func processH2SessionFrames(
 	mcpTools []cursorproto.McpToolDef,
 	onText func(text string, isThinking bool),
 	onMcpExec func(exec pendingMcpExec),
+	onToolCall func(calls []cursorToolCall), // called when tool call markers are found in the text response
 	toolResultCh <-chan []toolResultInfo, // nil for no tool result injection; non-nil to wait for results
 	tokenUsage *cursorTokenUsage, // tracks accumulated token usage (may be nil)
 	onCheckpoint func(data []byte), // called when server sends conversation_checkpoint_update
@@ -993,8 +1013,8 @@ func processH2SessionFrames(
 						if toolCallId == "" {
 							toolCallId = uuid.New().String()
 						}
-						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
-							msg.ExecMsgId, msg.ExecId, msg.McpToolName, toolCallId)
+						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s toolCallId=%s args=%s",
+							msg.ExecMsgId, msg.ExecId, msg.McpToolName, toolCallId, decodedArgs)
 						pending := pendingMcpExec{
 							ExecMsgId:  msg.ExecMsgId,
 							ExecId:     msg.ExecId,
@@ -1226,6 +1246,9 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 // (turns + tool results) into the UserText field as plain text.
 // This is the fallback for cold resume when no checkpoint is available.
 // Cursor reliably reads UserText but ignores structured turns.
+//
+// When tool call markers are present in the turns, they are encoded as
+// <|tool_calls_begin|>...<|tool_calls_end|> blocks for Cursor to parse.
 func flattenConversationIntoUserText(parsed *parsedOpenAIRequest) {
 	var buf strings.Builder
 
@@ -1272,6 +1295,24 @@ func flattenConversationIntoUserText(parsed *parsedOpenAIRequest) {
 	// Clear turns and tool results since they're now in UserText
 	parsed.Turns = nil
 	parsed.ToolResults = nil
+}
+
+// encodeCursorChatRequest encodes tool call markers as <|tool_calls_begin|> blocks
+// in the user text for Cursor to parse. This follows composer-api's format:
+// "<|tool_calls_begin|>[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp\\\"}\"}}]<|tool_calls_end|>"
+//
+// The encoded block is prepended to the user text so the next Cursor request
+// sees the full tool call context as structured markers.
+func encodeCursorChatRequest(userText string, toolCalls []cursorToolCall) string {
+	if len(toolCalls) == 0 {
+		return userText
+	}
+	// Encode tool calls as JSON array inside <|tool_calls_begin|>...<|tool_calls_end|> markers
+	jsonBytes, err := json.Marshal(toolCalls)
+	if err != nil {
+		return userText
+	}
+	return "<|tool_calls_begin|>" + string(jsonBytes) + "<|tool_calls_end|>" + userText
 }
 
 func extractTextContent(content gjson.Result) string {
@@ -1538,9 +1579,59 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 // format. exec.Args is expected to already be a JSON object string produced by
 // decodeMcpArgsToJSON, so it is inserted directly without re-encoding.
 func buildToolCallDelta(toolCallIndex int, exec pendingMcpExec) string {
-	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
+	// Note: %q ensures arguments is a JSON-encoded string, not a raw object.
+	// OpenAI schema requires arguments to be a JSON string containing the
+	// serialized arguments object.
+	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%q}}]}`,
 		toolCallIndex, exec.ToolCallId, exec.ToolName, exec.Args)
 }
+
+// parseComposerToolCalls parses <|tool_calls_begin|>...<|tool_calls_end|> markers
+// from Cursor's plain-text response into structured tool call descriptors.
+// Cursor encodes tool call history as these markers when responding in
+// non-agent mode (e.g., a "continue without tools" fallback). They use the
+// same format as composer-api's encodeCursorChatRequest.
+//
+// Returns nil when no tool call block is found in the text.
+func parseComposerToolCalls(text string) []cursorToolCall {
+	const (
+		beginMarker = "<|tool_calls_begin|>"
+		endMarker   = "<|tool_calls_end|>"
+	)
+
+	beginIdx := strings.Index(text, beginMarker)
+	if beginIdx < 0 {
+		return nil
+	}
+	// Seek past begin marker
+	contentStart := beginIdx + len(beginMarker)
+	endIdx := strings.Index(text[contentStart:], endMarker)
+	if endIdx < 0 {
+		return nil
+	}
+	// Also handle <|tool_calls_begin|>...<|tool_calls_end|>
+	// The marker may appear with alternate separators | or ｜
+	content := text[contentStart : contentStart+endIdx]
+
+	// Parse JSON array of tool call objects
+	var result []cursorToolCall
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil
+	}
+	return result
+}
+
+type cursorToolCall struct {
+	Id       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// cursorToolCallList is a convenience alias for clarity in function signatures.
+type cursorToolCallList = []cursorToolCall
 
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)

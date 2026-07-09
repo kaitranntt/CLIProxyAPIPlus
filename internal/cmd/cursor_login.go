@@ -33,5 +33,8 @@ func DoCursorLogin(cfg *config.Config, options *LoginOptions) {
 	if record != nil && record.Label != "" {
 		log.Infof("Authenticated as %s", record.Label)
 	}
-	log.Info("Cursor authentication successful!")
+	// The SDK already prints "Cursor authentication successful!" to stdout;
+	// this log line would double the output for users with default log levels.
+	// Downgraded to Debug so it appears only in verbose/trace mode.
+	log.Debug("Cursor authentication successful!")
 }
