@@ -335,7 +335,6 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			fullText.WriteString(text)
 		},
 		nil, // onMcpExec - non-streaming doesn't need MCP exec
-		nil, // onToolCall - non-streaming doesn't need tool call detection
 		nil, // toolResultCh - non-streaming doesn't wait for tool results
 		nil, // tokenUsage - non-streaming
 		nil, // onCheckpoint - non-streaming doesn't persist
@@ -609,6 +608,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		usage := &cursorTokenUsage{}
 		usage.setInputEstimate(len(payload))
 
+		streamFinished := false
+
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
 				if isThinking {
@@ -643,6 +644,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					sendChunkSwitchable(map[string]interface{}{"tool_calls": extractFirstToolCall(argsDelta)}, "")
 				}
 				sendChunkSwitchable(map[string]interface{}{}, "tool_calls")
+
+				// Mark the stream as finished — this is a single-round tool call.
+				// When toolResultCh is nil, processH2SessionFrames returns immediately
+				// and the outer loop should not emit a second stop chunk.
+				if toolResultCh == nil {
+					streamFinished = true
+				}
 
 				// Only end the response and save the session if we're in multi-round mode
 				// (toolResultCh is non-nil — we have tool results to inject from a previous round).
@@ -692,7 +700,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					// while continuing to handle KV messages
 				}
 			},
-			nil, // onToolCall - will be wired later
 			toolResultCh,
 			usage,
 			func(cpData []byte) {
@@ -755,6 +762,19 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		if thinkingActive {
 			sendChunkSwitchable(map[string]interface{}{"content": "</think>"}, "")
+		}
+		if streamFinished {
+			// The stream already ended with a finish_reason (e.g. tool_calls).
+			// Do not emit a second stop chunk / [DONE].
+			outMu.Lock()
+			if currentOut != nil {
+				close(currentOut)
+				currentOut = nil
+			}
+			outMu.Unlock()
+			sessionCancel()
+			stream.Close()
+			return
 		}
 		// Include token usage in the final stop chunk
 		inputTok, outputTok := usage.get()
@@ -914,7 +934,6 @@ func processH2SessionFrames(
 	mcpTools []cursorproto.McpToolDef,
 	onText func(text string, isThinking bool),
 	onMcpExec func(exec pendingMcpExec),
-	onToolCall func(calls []cursorToolCall), // called when tool call markers are found in the text response
 	toolResultCh <-chan []toolResultInfo, // nil for no tool result injection; non-nil to wait for results
 	tokenUsage *cursorTokenUsage, // tracks accumulated token usage (may be nil)
 	onCheckpoint func(data []byte), // called when server sends conversation_checkpoint_update
@@ -1044,11 +1063,11 @@ func processH2SessionFrames(
 						log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
 						var toolResults []toolResultInfo
 						timeout := time.NewTimer(cursorToolResultTimeout)
-						defer timeout.Stop()
 					waitLoop:
 						for {
 							select {
 							case <-ctx.Done():
+								timeout.Stop()
 								return ctx.Err()
 							case <-timeout.C:
 								log.Warnf("cursor: timed out waiting for tool results after %v", cursorToolResultTimeout)
@@ -1060,9 +1079,11 @@ func processH2SessionFrames(
 								return fmt.Errorf("cursor: timed out waiting for tool results after %v", cursorToolResultTimeout)
 							case results, ok := <-toolResultCh:
 								if !ok {
+									timeout.Stop()
 									return nil
 								}
 								toolResults = results
+								timeout.Stop()
 								break waitLoop
 							case waitData, ok := <-stream.Data():
 								if !ok {
@@ -1104,6 +1125,7 @@ func processH2SessionFrames(
 									}
 								}
 							case <-stream.Done():
+								timeout.Stop()
 								return stream.Err()
 							}
 						}
@@ -1307,24 +1329,6 @@ func flattenConversationIntoUserText(parsed *parsedOpenAIRequest) {
 	// Clear turns and tool results since they're now in UserText
 	parsed.Turns = nil
 	parsed.ToolResults = nil
-}
-
-// encodeCursorChatRequest encodes tool call markers as <|tool_calls_begin|> blocks
-// in the user text for Cursor to parse. This follows composer-api's format:
-// "<|tool_calls_begin|>[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp\\\"}\"}}]<|tool_calls_end|>"
-//
-// The encoded block is prepended to the user text so the next Cursor request
-// sees the full tool call context as structured markers.
-func encodeCursorChatRequest(userText string, toolCalls []cursorToolCall) string {
-	if len(toolCalls) == 0 {
-		return userText
-	}
-	// Encode tool calls as JSON array inside <|tool_calls_begin|>...<|tool_calls_end|> markers
-	jsonBytes, err := json.Marshal(toolCalls)
-	if err != nil {
-		return userText
-	}
-	return "<|tool_calls_begin|>" + string(jsonBytes) + "<|tool_calls_end|>" + userText
 }
 
 func extractTextContent(content gjson.Result) string {
@@ -1573,42 +1577,6 @@ func deriveSessionKey(clientKey string, model string, messages []gjson.Result) s
 	return hex.EncodeToString(h[:])[:16]
 }
 
-func sseChunk(id string, created int64, model string, delta map[string]interface{}, finishReason string) cliproxyexecutor.StreamChunk {
-	// Note: the framework's WriteChunk adds "data: " prefix and "\n\n" suffix,
-	// so we only output the raw JSON here.
-	data, err := helps.BuildChatCompletionChunk(id, created, model, delta, finishReason, nil)
-	if err != nil {
-		log.Errorf("cursor: failed to build sse chunk: %v", err)
-		return cliproxyexecutor.StreamChunk{Payload: []byte("{}")}
-	}
-	return cliproxyexecutor.StreamChunk{
-		Payload: data,
-	}
-}
-
-// buildToolCallDelta formats a single tool_call delta in OpenAI streaming
-// format. exec.Args is expected to already be a JSON object string produced by
-// decodeMcpArgsToJSON, so it is inserted directly without re-encoding.
-func buildToolCallDelta(toolCallIndex int, exec pendingMcpExec) string {
-	// Note: json.Marshal encodes arguments as a JSON string, not a raw object.
-	// OpenAI schema requires arguments to be a JSON string containing the
-	// serialized arguments object.
-	delta, _ := json.Marshal(map[string]interface{}{
-		"tool_calls": []map[string]interface{}{
-			{
-				"index": toolCallIndex,
-				"id":    exec.ToolCallId,
-				"type":  "function",
-				"function": map[string]interface{}{
-					"name":      exec.ToolName,
-					"arguments": exec.Args,
-				},
-			},
-		},
-	})
-	return string(delta)
-}
-
 // extractFirstToolCall parses a JSON delta object and returns the entire
 // "tool_calls" array (not a single call object). OpenAI streaming schema
 // expects tool_calls at delta to be an array of tool call objects.
@@ -1632,46 +1600,6 @@ func extractFirstToolCall(deltaJSON []byte) []interface{} {
 // same format as composer-api's encodeCursorChatRequest.
 //
 // Returns nil when no tool call block is found in the text.
-func parseComposerToolCalls(text string) []cursorToolCall {
-	const (
-		beginMarker = "<|tool_calls_begin|>"
-		endMarker   = "<|tool_calls_end|>"
-	)
-
-	beginIdx := strings.Index(text, beginMarker)
-	if beginIdx < 0 {
-		return nil
-	}
-	// Seek past begin marker
-	contentStart := beginIdx + len(beginMarker)
-	endIdx := strings.Index(text[contentStart:], endMarker)
-	if endIdx < 0 {
-		return nil
-	}
-	// Also handle <|tool_calls_begin|>...<|tool_calls_end|>
-	// The marker may appear with alternate separators | or ｜
-	content := text[contentStart : contentStart+endIdx]
-
-	// Parse JSON array of tool call objects
-	var result []cursorToolCall
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return nil
-	}
-	return result
-}
-
-type cursorToolCall struct {
-	Id       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
-// cursorToolCallList is a convenience alias for clarity in function signatures.
-type cursorToolCallList = []cursorToolCall
-
 func decodeMcpArgsToJSON(args map[string][]byte) string {
 	if len(args) == 0 {
 		return "{}"
