@@ -50,6 +50,7 @@ type claudeResponsesUsageTokens struct {
 	OutputTokens             int64
 	CacheCreationInputTokens int64
 	CacheReadInputTokens     int64
+	Credits                  float64
 	HasUsage                 bool
 }
 
@@ -71,6 +72,9 @@ func (u *claudeResponsesUsageTokens) Merge(usage gjson.Result) {
 	}
 	if cacheReadInputTokens := usage.Get("cache_read_input_tokens"); cacheReadInputTokens.Exists() {
 		u.CacheReadInputTokens = cacheReadInputTokens.Int()
+	}
+	if credits := usage.Get("credits"); credits.Exists() {
+		u.Credits = credits.Float()
 	}
 }
 
@@ -600,6 +604,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			if totalTokens > 0 || st.Usage.HasUsage {
 				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", totalTokens)
 			}
+			if st.Usage.Credits != 0 {
+				completed, _ = sjson.SetBytes(completed, "response.usage.credits", st.Usage.Credits)
+			}
 		}
 		out = append(out, emitEvent("response.completed", completed))
 	}
@@ -872,6 +879,9 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	out, _ = sjson.SetBytes(out, "usage.input_tokens_details.cached_tokens", cachedTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 	out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
+	if usageTokens.Credits != 0 {
+		out, _ = sjson.SetBytes(out, "usage.credits", usageTokens.Credits)
+	}
 	if reasoningBuf.Len() > 0 {
 		// Rough estimate similar to chat completions
 		reasoningTokens := int64(len(reasoningBuf.String()) / 4)
