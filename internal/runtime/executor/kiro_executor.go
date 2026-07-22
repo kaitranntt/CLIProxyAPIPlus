@@ -2052,9 +2052,9 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				if u, ok := metering["usage"].(float64); ok {
 					usageVal = u
 				}
+				usageInfo.Credits = usageVal
 				log.Infof("kiro: parseEventStream received meteringEvent: usage=%.2f %s", usageVal, unit)
-				// Store metering info for potential billing/statistics purposes
-				// Note: This is separate from token counts - it's AWS billing units
+				// Note: credits are separate from token counts - it's AWS billing units
 			} else {
 				// Try direct fields
 				unit := ""
@@ -2066,6 +2066,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 					usageVal = u
 				}
 				if unit != "" || usageVal > 0 {
+					usageInfo.Credits = usageVal
 					log.Infof("kiro: parseEventStream received meteringEvent (direct): usage=%.2f %s", usageVal, unit)
 				}
 			}
@@ -3503,6 +3504,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	finalizeKiroUsageTotal(&totalUsage)
+
+	// Surface upstream billing credits in the usage output.
+	totalUsage.Credits = upstreamCreditUsage
 
 	// Log upstream usage information if received
 	if hasUpstreamUsage {

@@ -123,6 +123,9 @@ func buildClaudeUsage(usageInfo usage.Detail) map[string]interface{} {
 	if usageInfo.CacheCreationTokens != 0 {
 		payload["cache_creation_input_tokens"] = usageInfo.CacheCreationTokens
 	}
+	if usageInfo.Credits != 0 {
+		payload["credits"] = usageInfo.Credits
+	}
 	return payload
 }
 
