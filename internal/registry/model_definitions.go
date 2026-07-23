@@ -802,6 +802,21 @@ func GetKiroModels() []*ModelInfo {
 			displayName: "Claude Fable 5",
 			description: "Claude Fable 5 via Kiro",
 		},
+		{
+			id:          "kiro-gpt-5-6-terra",
+			displayName: "GPT-5.6 Terra",
+			description: "GPT-5.6 Terra via Kiro",
+		},
+		{
+			id:          "kiro-gpt-5-6-luna",
+			displayName: "GPT-5.6 Luna",
+			description: "GPT-5.6 Luna via Kiro",
+		},
+		{
+			id:          "kiro-gpt-5-6-sol",
+			displayName: "GPT-5.6 Sol",
+			description: "GPT-5.6 Sol via Kiro",
+		},
 	}
 
 	models := make([]*ModelInfo, 0, len(entries))
