@@ -30,6 +30,10 @@ func defaultKiroAliases() []OAuthModelAlias {
 		{Name: "kiro-claude-haiku-4-5", Alias: "claude-haiku-4-5", Fork: true},
 		// Fable 5
 		{Name: "kiro-claude-fable-5", Alias: "claude-fable-5", Fork: true},
+		// GPT-5.6 (terra / luna / sol)
+		{Name: "kiro-gpt-5-6-terra", Alias: "gpt-5.6-terra", Fork: true},
+		{Name: "kiro-gpt-5-6-luna", Alias: "gpt-5.6-luna", Fork: true},
+		{Name: "kiro-gpt-5-6-sol", Alias: "gpt-5.6-sol", Fork: true},
 	}
 }
 
