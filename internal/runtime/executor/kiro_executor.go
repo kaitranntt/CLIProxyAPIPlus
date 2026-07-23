@@ -52,6 +52,11 @@ const (
 	// kiroIDEAgentMode is the agent mode header value for Kiro IDE requests
 	kiroIDEAgentMode = "vibe"
 
+	// kiroUsageMetaCredits is the Record.Metadata key under which Kiro surfaces
+	// upstream billing credits (meteringEvent usage) to usage sinks. The key is
+	// owned here rather than in the shared usage package.
+	kiroUsageMetaCredits = "credits"
+
 	// Socket retry configuration constants
 	// Maximum number of retry attempts for socket/network errors
 	kiroSocketMaxRetries = 3
@@ -64,6 +69,19 @@ const (
 	// Streaming read timeout (how long to wait between chunks)
 	kiroStreamingReadTimeout = 300 * time.Second
 )
+
+// publishKiroUsage emits a usage record, surfacing Kiro-specific billing credits
+// through Record.Metadata. Centralizing it keeps the credits key and its
+// zero-value guard in one place instead of at every publish site.
+func publishKiroUsage(ctx context.Context, reporter *usageReporter, detail usage.Detail) {
+	if reporter == nil {
+		return
+	}
+	if reporter.reporter != nil && detail.Credits != 0 {
+		reporter.reporter.Metadata[kiroUsageMetaCredits] = detail.Credits
+	}
+	reporter.publish(ctx, detail)
+}
 
 // retryableHTTPStatusCodes defines HTTP status codes that are considered retryable.
 // Based on kiro2Api reference: 502 (Bad Gateway), 503 (Service Unavailable), 504 (Gateway Timeout)
@@ -1009,7 +1027,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			finalizeKiroUsageTotal(&usageInfo)
 
 			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
-			reporter.publish(ctx, usageInfo)
+			publishKiroUsage(ctx, reporter, usageInfo)
 
 			// Record success for rate limiting
 			rateLimiter.MarkTokenSuccess(tokenKey)
@@ -2509,7 +2527,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Ensure usage is published even on early return
 	defer func() {
-		reporter.publish(ctx, totalUsage)
+		publishKiroUsage(ctx, reporter, totalUsage)
 	}()
 
 	for {
@@ -4326,7 +4344,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 			if accumulatedOutputLen > 0 && totalUsage.OutputTokens == 0 {
 				totalUsage.OutputTokens = 1
 			}
-			reporter.publish(ctx, totalUsage)
+			publishKiroUsage(ctx, reporter, totalUsage)
 		}()
 
 		// Send message_start event to client (aligned with streamToChannel pattern)

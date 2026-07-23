@@ -49,6 +49,7 @@ type Record struct {
 	Failed      bool
 	Fail        Failure
 	Detail      Detail
+	Metadata    map[string]any
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }

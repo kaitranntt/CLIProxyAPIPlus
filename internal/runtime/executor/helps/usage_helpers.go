@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"reflect"
 	"strings"
@@ -40,6 +41,7 @@ type UsageReporter struct {
 	ttftStart    time.Time
 	ttftSet      bool
 	once         sync.Once
+	Metadata     map[string]any
 }
 
 type usageExecutor interface {
@@ -73,6 +75,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
 		serviceTier: usage.ServiceTierFromContext(ctx),
 		generate:    usage.GenerateFromContext(ctx),
+		Metadata:    make(map[string]any),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -280,6 +283,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Failed:              failed,
 		Fail:                fail,
 		Detail:              detail,
+		Metadata:            maps.Clone(r.Metadata),
 	}
 }
 
