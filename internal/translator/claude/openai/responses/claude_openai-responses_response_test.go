@@ -605,3 +605,193 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresNamespaceFuncti
 		t.Fatalf("non-stream output namespace = %q, want mcp__node_repl", got)
 	}
 }
+
+func TestConvertClaudeResponseToOpenAIResponses_NormalizesResponseAndItemIDs(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_abc-123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...)
+	}
+
+	var created, msgAdded, completed gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		switch event {
+		case "response.created":
+			created = data
+		case "response.output_item.added":
+			if data.Get("item.type").String() == "message" {
+				msgAdded = data
+			}
+		case "response.completed":
+			completed = data
+		}
+	}
+
+	if got := created.Get("response.id").String(); got != "resp_abc-123" {
+		t.Fatalf("created response.id = %q, want resp_abc-123", got)
+	}
+	if got := msgAdded.Get("item.id").String(); got != "msg_abc-123" {
+		t.Fatalf("message item id = %q, want msg_abc-123 (no stacked prefixes)", got)
+	}
+	if got := completed.Get("response.id").String(); got != "resp_abc-123" {
+		t.Fatalf("completed response.id = %q, want resp_abc-123", got)
+	}
+	if got := completed.Get("response.output.0.id").String(); got != "msg_abc-123" {
+		t.Fatalf("completed output id = %q, want msg_abc-123", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_EchoesRequestFieldsInCreatedEvents(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"claude-test",
+		"instructions":"Be helpful.",
+		"store":false,
+		"reasoning":{"effort":"medium","summary":"auto"}
+	}`)
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", originalRequest, nil, chunk, &param)...)
+	}
+
+	var created, inProgress gjson.Result
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		switch event {
+		case "response.created":
+			created = data
+		case "response.in_progress":
+			inProgress = data
+		}
+	}
+
+	for label, evt := range map[string]gjson.Result{"created": created, "in_progress": inProgress} {
+		if !evt.Exists() {
+			t.Fatalf("expected response.%s event", label)
+		}
+		if got := evt.Get("response.model").String(); got != "claude-test" {
+			t.Fatalf("%s response.model = %q, want claude-test", label, got)
+		}
+		if got := evt.Get("response.instructions").String(); got != "Be helpful." {
+			t.Fatalf("%s response.instructions = %q, want Be helpful.", label, got)
+		}
+		if got := evt.Get("response.store").Bool(); got != false {
+			t.Fatalf("%s response.store = %v, want false", label, got)
+		}
+		if got := evt.Get("response.reasoning.effort").String(); got != "medium" {
+			t.Fatalf("%s response.reasoning.effort = %q, want medium", label, got)
+		}
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_EmitsCustomToolCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"claude-test",
+		"tools":[{"type":"custom","name":"apply_patch","description":"Edit files.","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]
+	}`)
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_patch","name":"apply_patch","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"*** Begin Patch\\n*** Update File: a.txt\\n@@\\n-old\\n+new\\n*** End Patch\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", originalRequest, nil, chunk, &param)...)
+	}
+
+	wantInput := "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+	var added, inputDone, itemDone, completed gjson.Result
+	functionEventCount := 0
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		switch event {
+		case "response.output_item.added":
+			if data.Get("item.type").String() == "custom_tool_call" {
+				added = data
+			}
+		case "response.custom_tool_call_input.done":
+			inputDone = data
+		case "response.output_item.done":
+			if data.Get("item.type").String() == "custom_tool_call" {
+				itemDone = data
+			}
+		case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+			functionEventCount++
+		case "response.completed":
+			completed = data
+		}
+	}
+
+	if !added.Exists() {
+		t.Fatal("expected custom_tool_call output_item.added event")
+	}
+	if got := added.Get("item.call_id").String(); got != "call_patch" {
+		t.Fatalf("added item.call_id = %q, want call_patch", got)
+	}
+	if got := added.Get("item.name").String(); got != "apply_patch" {
+		t.Fatalf("added item.name = %q, want apply_patch", got)
+	}
+	if got := inputDone.Get("input").String(); got != wantInput {
+		t.Fatalf("custom_tool_call_input.done input = %q, want %q", got, wantInput)
+	}
+	if got := itemDone.Get("item.input").String(); got != wantInput {
+		t.Fatalf("done item.input = %q, want %q", got, wantInput)
+	}
+	if functionEventCount != 0 {
+		t.Fatalf("custom tool call leaked %d function_call_arguments events, want 0", functionEventCount)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("completed output type = %q, want custom_tool_call", got)
+	}
+	if got := completed.Get("response.output.0.input").String(); got != wantInput {
+		t.Fatalf("completed output input = %q, want %q", got, wantInput)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_EmitsCustomToolCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"claude-test",
+		"tools":[{"type":"custom","name":"apply_patch","description":"Edit files.","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]
+	}`)
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_patch","name":"apply_patch","input":{}}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", originalRequest, nil, raw, nil)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("non-stream output type = %q, want custom_tool_call", got)
+	}
+	if got := root.Get("output.0.call_id").String(); got != "call_patch" {
+		t.Fatalf("non-stream output call_id = %q, want call_patch", got)
+	}
+	if got := root.Get("output.0.input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("non-stream output input = %q", got)
+	}
+	if root.Get("output.0.arguments").Exists() {
+		t.Fatalf("custom_tool_call item must not carry function arguments. Output: %s", string(out))
+	}
+}

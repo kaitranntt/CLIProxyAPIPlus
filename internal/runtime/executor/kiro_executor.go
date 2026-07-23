@@ -989,11 +989,15 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				}
 			}()
 
-			content, toolUses, usageInfo, stopReason, err := e.parseEventStream(httpResp.Body)
+			parsed, err := e.parseEventStream(httpResp.Body)
 			if err != nil {
 				recordAPIResponseError(ctx, e.cfg, err)
 				return resp, err
 			}
+			content := parsed.Content
+			toolUses := parsed.ToolUses
+			usageInfo := parsed.Usage
+			stopReason := parsed.StopReason
 
 			// Fallback for usage if missing from upstream
 
@@ -1036,7 +1040,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// Build response in Claude format for Kiro translator
 			// stopReason is extracted from upstream response by parseEventStream
 			requestedModel := payloadRequestedModel(opts, req.Model)
-			kiroResponse := kiroclaude.BuildClaudeResponse(content, toolUses, requestedModel, usageInfo, stopReason)
+			kiroResponse := kiroclaude.BuildClaudeResponseWithThinking(content, toolUses, requestedModel, usageInfo, stopReason, parsed.ThinkingContent, parsed.ThinkingSignature)
 			out := sdktranslator.TranslateNonStream(ctx, to, from, requestedModel, bytes.Clone(opts.OriginalRequest), body, kiroResponse, nil)
 			resp = cliproxyexecutor.Response{Payload: []byte(out)}
 			return resp, nil
@@ -1793,11 +1797,25 @@ func kiroTokenUsageFloat64(tokenUsage map[string]interface{}, key string) (float
 // Extracts text content, tool uses, and stop_reason from the response.
 // Supports embedded [Called ...] tool calls and input buffering for toolUseEvent.
 // Returns: content, toolUses, usageInfo, stopReason, error
-func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.KiroToolUse, usage.Detail, string, error) {
+// kiroParsedStream holds the aggregated result of a non-streaming Kiro event
+// stream: visible content, tool uses, usage, stop reason and the reasoning
+// channel (thinking text with its upstream signature).
+type kiroParsedStream struct {
+	Content           string
+	ToolUses          []kiroclaude.KiroToolUse
+	Usage             usage.Detail
+	StopReason        string
+	ThinkingContent   string
+	ThinkingSignature string
+}
+
+func (e *KiroExecutor) parseEventStream(body io.Reader) (*kiroParsedStream, error) {
 	var content strings.Builder
 	var toolUses []kiroclaude.KiroToolUse
 	var usageInfo usage.Detail
 	var stopReason string // Extracted from upstream response
+	var thinkingContent strings.Builder
+	var thinkingSignature string
 	reader := bufio.NewReader(body)
 
 	// Tool use state tracking for input buffering and deduplication
@@ -1812,7 +1830,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		msg, eventErr := e.readEventStreamMessage(reader)
 		if eventErr != nil {
 			log.Errorf("kiro: parseEventStream error: %v", eventErr)
-			return content.String(), toolUses, usageInfo, stopReason, eventErr
+			return nil, eventErr
 		}
 		if msg == nil {
 			// Normal end of stream (EOF)
@@ -1840,7 +1858,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				errMsg = msg
 			}
 			log.Errorf("kiro: received AWS error in event stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
+			return nil, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
 		}
 		if errType, hasErrType := event["type"].(string); hasErrType && (errType == "error" || errType == "exception") {
 			// Generic error event
@@ -1853,7 +1871,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				}
 			}
 			log.Errorf("kiro: received error event in stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s", errMsg)
+			return nil, fmt.Errorf("kiro API error: %s", errMsg)
 		}
 
 		// Extract stop_reason from various event formats
@@ -1945,6 +1963,25 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			completedToolUses, newState := kiroclaude.ProcessToolUseEvent(event, currentToolUse, processedIDs)
 			currentToolUse = newState
 			toolUses = append(toolUses, completedToolUses...)
+
+		case "reasoningContentEvent":
+			// Aggregate the reasoning channel so non-streaming responses can
+			// surface it as a Claude thinking block (with upstream signature).
+			if re, ok := event["reasoningContentEvent"].(map[string]interface{}); ok {
+				if text, ok := re["text"].(string); ok {
+					thinkingContent.WriteString(text)
+				}
+				if sig, ok := re["signature"].(string); ok && sig != "" {
+					thinkingSignature = sig
+				}
+			} else {
+				if text, ok := event["text"].(string); ok {
+					thinkingContent.WriteString(text)
+				}
+				if sig, ok := event["signature"].(string); ok && sig != "" {
+					thinkingSignature = sig
+				}
+			}
 
 		case "supplementaryWebLinksEvent":
 			if inputTokens, ok := event["inputTokens"].(float64); ok {
@@ -2143,7 +2180,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 			// For other errors, return the error
 			if errMsg != "" {
-				return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
+				return nil, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
 			}
 
 		default:
@@ -2253,7 +2290,14 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			upstreamContextPercentage, calculatedInputTokens, localEstimate)
 	}
 
-	return cleanedContent, toolUses, usageInfo, stopReason, nil
+	return &kiroParsedStream{
+		Content:           cleanedContent,
+		ToolUses:          toolUses,
+		Usage:             usageInfo,
+		StopReason:        stopReason,
+		ThinkingContent:   thinkingContent.String(),
+		ThinkingSignature: thinkingSignature,
+	}, nil
 }
 
 // readEventStreamMessage reads and validates a single AWS Event Stream message.
@@ -2498,6 +2542,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// Thinking mode state tracking — thinking blocks arrive via reasoningContentEvent
 	isThinkingBlockOpen := false                   // Track if thinking content block SSE event is open
 	thinkingBlockIndex := -1                       // Index of the thinking content block
+	thinkingSignatureSent := ""                    // Last reasoning signature forwarded downstream
 	var accumulatedThinkingContent strings.Builder // Accumulate thinking content for token counting
 
 	// Tag-based <thinking> parsing state (opt-in via kiro-extract-thinking-tag-enable).
@@ -3244,7 +3289,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 			}
 
-			if thinkingText != "" {
+			if thinkingText != "" || signature != "" {
 				// An official reasoning event arrived — disable tag-based parsing
 				// for the rest of this stream. The two channels must not interleave.
 				hasOfficialReasoningEvent = true
@@ -3258,33 +3303,47 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					isTextBlockOpen = false
 				}
 
-				// Start thinking block if not already open
+				// Start thinking block if not already open. The signature rides
+				// along when it arrives with the first reasoning event.
 				if !isThinkingBlockOpen {
 					contentBlockIndex++
 					thinkingBlockIndex = contentBlockIndex
 					isThinkingBlockOpen = true
-					blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
+					blockStart := kiroclaude.BuildClaudeContentBlockStartEventWithSignature(thinkingBlockIndex, "thinking", "", "", signature)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 					for _, chunk := range sseData {
 						enqueueTranslatedSSE(out, chunk)
 					}
+					thinkingSignatureSent = signature
 				}
 
 				// Send thinking content
-				thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(thinkingText, thinkingBlockIndex)
-				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
-				for _, chunk := range sseData {
-					enqueueTranslatedSSE(out, chunk)
+				if thinkingText != "" {
+					thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(thinkingText, thinkingBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+					for _, chunk := range sseData {
+						enqueueTranslatedSSE(out, chunk)
+					}
+
+					// Accumulate for token counting
+					accumulatedThinkingContent.WriteString(thinkingText)
+					log.Debugf("kiro: received reasoningContentEvent, text length: %d, has signature: %v", len(thinkingText), signature != "")
 				}
 
-				// Accumulate for token counting
-				accumulatedThinkingContent.WriteString(thinkingText)
-				log.Debugf("kiro: received reasoningContentEvent, text length: %d, has signature: %v", len(thinkingText), signature != "")
+				// The signature commonly arrives on the final reasoning event,
+				// after the thinking block started — forward it as a delta.
+				if signature != "" && signature != thinkingSignatureSent {
+					sigEvent := kiroclaude.BuildClaudeSignatureDeltaEvent(signature, thinkingBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, sigEvent, &translatorParam)
+					for _, chunk := range sseData {
+						enqueueTranslatedSSE(out, chunk)
+					}
+					thinkingSignatureSent = signature
+				}
 			}
 
 			// Note: We don't close the thinking block here - it will be closed when we see
 			// the next assistantResponseEvent or at the end of the stream
-			_ = signature // Signature can be used for verification if needed
 
 		case "toolUseEvent":
 			// Handle dedicated tool use events with input buffering
@@ -3550,7 +3609,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 	}
 
-	// Close thinking block if still open at stream end
+	// Close thinking block if still open at stream end. Kiro always emits the
+	// reasoning channel last, so this close runs on every thinking request —
+	// keep it at debug level to avoid log noise.
 	if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
 		blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
 		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
@@ -3558,7 +3619,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			enqueueTranslatedSSE(out, chunk)
 		}
 		isThinkingBlockOpen = false
-		log.Warnf("kiro: closed unclosed thinking block at stream end")
+		log.Debugf("kiro: closed unclosed thinking block at stream end")
 	}
 
 	// Close text content block if open

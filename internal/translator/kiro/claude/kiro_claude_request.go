@@ -209,15 +209,14 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
 	// rather than inline <thinking> tags in assistantResponseEvent.
 	// We cap max_thinking_length to reserve space for tool outputs and prevent truncation.
+	// NOTE: the hint is prepended to the user content directly, independent of the
+	// system prompt inject switch — reasoning configuration must not be silently
+	// dropped when system prompt injection is disabled.
+	thinkingHint := ""
 	if thinkingEnabled {
-		thinkingHint := `<thinking_mode>enabled</thinking_mode>
+		thinkingHint = `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>16000</max_thinking_length>`
-		if systemPrompt != "" {
-			systemPrompt = thinkingHint + "\n\n" + systemPrompt
-		} else {
-			systemPrompt = thinkingHint
-		}
-		log.Infof("kiro: injected thinking prompt (official mode), has_tools: %v", len(kiroTools) > 0)
+		log.Infof("kiro: thinking mode enabled (official mode), has_tools: %v", len(kiroTools) > 0)
 	}
 
 	// Process messages and build history
@@ -228,6 +227,9 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// continue to emit reasoning events.
 	if currentUserMsg != nil {
 		currentUserMsg.Content = buildFinalContent(currentUserMsg.Content, systemPrompt, currentToolResults)
+		if thinkingHint != "" {
+			currentUserMsg.Content = thinkingHint + "\n\n" + currentUserMsg.Content
+		}
 
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
@@ -279,6 +281,9 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		if strings.TrimSpace(fallbackContent) == "" {
 			fallbackContent = kirocommon.DefaultUserContent
 			log.Debugf("kiro: fallback user message content was empty, using default: %s", fallbackContent)
+		}
+		if thinkingHint != "" {
+			fallbackContent = thinkingHint + "\n\n" + fallbackContent
 		}
 		currentMessage = KiroCurrentMessage{UserInputMessage: KiroUserInputMessage{
 			Content: fallbackContent,
