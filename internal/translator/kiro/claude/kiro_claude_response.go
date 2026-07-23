@@ -42,6 +42,14 @@ var (
 // reasoningContentEvent independently.
 // stopReason is passed from upstream; fallback logic applied if empty.
 func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
+	return BuildClaudeResponseWithThinking(content, toolUses, model, usageInfo, stopReason, "", "")
+}
+
+// BuildClaudeResponseWithThinking is BuildClaudeResponse plus an explicit
+// reasoning channel: thinkingContent is appended as a trailing thinking block
+// (Kiro emits reasoning after the text), carrying the upstream signature so
+// downstream converters can expose it (e.g. as Responses encrypted_content).
+func BuildClaudeResponseWithThinking(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason, thinkingContent, thinkingSignature string) []byte {
 	var contentBlocks []map[string]interface{}
 
 	if content != "" {
@@ -50,7 +58,6 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 			contentBlocks = append(contentBlocks, blocks...)
 			for _, block := range blocks {
 				if block["type"] == "thinking" {
-					thinkingContent := block["thinking"].(string)
 					log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
 				}
 			}
@@ -60,6 +67,18 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 				"text": content,
 			})
 		}
+	}
+
+	// Append the official reasoning channel after the text block.
+	if thinkingContent != "" {
+		thinkingBlock := map[string]interface{}{
+			"type":     "thinking",
+			"thinking": thinkingContent,
+		}
+		if thinkingSignature != "" {
+			thinkingBlock["signature"] = thinkingSignature
+		}
+		contentBlocks = append(contentBlocks, thinkingBlock)
 	}
 
 	// Add tool_use blocks — skip truncated tools when detector is enabled
@@ -100,7 +119,7 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 	}
 
 	response := map[string]interface{}{
-		"id":          "msg_" + uuid.New().String()[:24],
+		"id":          "msg_" + uuid.NewString(),
 		"type":        "message",
 		"role":        "assistant",
 		"model":       model,

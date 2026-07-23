@@ -154,6 +154,77 @@ func TestKiroResponsesStreamFinalizesMessageBeforeFunctionCall(t *testing.T) {
 	}
 }
 
+func TestKiroResponsesStreamFinalizesMessageBeforeReasoning(t *testing.T) {
+	// Kiro emits the reasoning channel AFTER the text block (unlike Claude).
+	// The assistant message lifecycle must close before the reasoning item
+	// starts, otherwise clients see message done events trailing the reasoning
+	// item (observed as interleaved sequences on /v1/responses).
+	chunks := [][]byte{
+		kiroclaude.BuildClaudeMessageStartEvent("kiro-gpt-5-6-sol", 1),
+		kiroclaude.BuildClaudeContentBlockStartEvent(0, "text", "", ""),
+		kiroclaude.BuildClaudeStreamEvent("Hello there.", 0),
+		kiroclaude.BuildClaudeContentBlockStopEvent(0),
+		kiroclaude.BuildClaudeContentBlockStartEventWithSignature(1, "thinking", "", "", "sig_kiro_1"),
+		kiroclaude.BuildClaudeThinkingDeltaEvent("...", 1),
+		kiroclaude.BuildClaudeThinkingBlockStopEvent(1),
+		kiroclaude.BuildClaudeMessageDeltaEvent("end_turn", usage.Detail{InputTokens: 1, OutputTokens: 3}),
+		kiroclaude.BuildClaudeMessageStopOnlyEvent(),
+	}
+
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, sdktranslator.TranslateStream(
+			context.Background(),
+			sdktranslator.FromString("kiro"),
+			sdktranslator.FormatOpenAIResponse,
+			"kiro-gpt-5-6-sol",
+			nil,
+			nil,
+			chunk,
+			&param,
+		)...)
+	}
+
+	messageDonePosition := -1
+	reasoningAddedPosition := -1
+	var reasoningDone, completed gjson.Result
+	for position, output := range outputs {
+		event, data := parseKiroResponsesSSEEvent(t, output)
+		itemType := data.Get("item.type").String()
+		switch {
+		case event == "response.output_item.done" && itemType == "message":
+			if messageDonePosition < 0 {
+				messageDonePosition = position
+			}
+		case event == "response.output_item.added" && itemType == "reasoning":
+			if reasoningAddedPosition < 0 {
+				reasoningAddedPosition = position
+			}
+		case event == "response.output_item.done" && itemType == "reasoning":
+			reasoningDone = data
+		case event == "response.completed":
+			completed = data
+		}
+	}
+
+	if messageDonePosition < 0 || reasoningAddedPosition < 0 {
+		t.Fatalf("missing lifecycle event: message done=%d, reasoning added=%d", messageDonePosition, reasoningAddedPosition)
+	}
+	if messageDonePosition >= reasoningAddedPosition {
+		t.Fatalf("message done position = %d, want before reasoning added position %d", messageDonePosition, reasoningAddedPosition)
+	}
+	if got := reasoningDone.Get("item.encrypted_content").String(); got != "sig_kiro_1" {
+		t.Fatalf("reasoning encrypted_content = %q, want sig_kiro_1", got)
+	}
+	if got := reasoningDone.Get("item.status").String(); got != "completed" {
+		t.Fatalf("reasoning status = %q, want completed", got)
+	}
+	if got := completed.Get("response.output.1.encrypted_content").String(); got != "sig_kiro_1" {
+		t.Fatalf("completed reasoning encrypted_content = %q, want sig_kiro_1", got)
+	}
+}
+
 func TestKiroResponsesNonStreamAcceptsExecutorClaudeResponse(t *testing.T) {
 	claudeResponse := kiroclaude.BuildClaudeResponse(
 		"Checking the workspace.",
@@ -185,8 +256,9 @@ func TestKiroResponsesNonStreamAcceptsExecutorClaudeResponse(t *testing.T) {
 	)
 	root := gjson.ParseBytes(out)
 
-	if got, want := root.Get("id").String(), claudeRoot.Get("id").String(); got != want {
-		t.Fatalf("response id = %q, want executor id %q. Output: %s", got, want, string(out))
+	wantID := "resp_" + strings.TrimPrefix(claudeRoot.Get("id").String(), "msg_")
+	if got := root.Get("id").String(); got != wantID {
+		t.Fatalf("response id = %q, want %q (derived from executor id %q). Output: %s", got, wantID, claudeRoot.Get("id").String(), string(out))
 	}
 	if got := root.Get("output.#").Int(); got != 2 {
 		t.Fatalf("output count = %d, want 2. Output: %s", got, string(out))

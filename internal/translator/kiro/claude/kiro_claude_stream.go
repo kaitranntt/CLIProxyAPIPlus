@@ -15,7 +15,7 @@ func BuildClaudeMessageStartEvent(model string, inputTokens int64) []byte {
 	event := map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
-			"id":            "msg_" + uuid.New().String()[:24],
+			"id":            "msg_" + uuid.NewString(),
 			"type":          "message",
 			"role":          "assistant",
 			"content":       []interface{}{},
@@ -31,6 +31,13 @@ func BuildClaudeMessageStartEvent(model string, inputTokens int64) []byte {
 
 // BuildClaudeContentBlockStartEvent creates a content_block_start SSE event
 func BuildClaudeContentBlockStartEvent(index int, blockType, toolUseID, toolName string) []byte {
+	return BuildClaudeContentBlockStartEventWithSignature(index, blockType, toolUseID, toolName, "")
+}
+
+// BuildClaudeContentBlockStartEventWithSignature creates a content_block_start
+// SSE event, attaching the upstream reasoning signature to thinking blocks so
+// downstream converters can surface it (e.g. as encrypted_content).
+func BuildClaudeContentBlockStartEventWithSignature(index int, blockType, toolUseID, toolName, signature string) []byte {
 	var contentBlock map[string]interface{}
 	switch blockType {
 	case "tool_use":
@@ -44,6 +51,9 @@ func BuildClaudeContentBlockStartEvent(index int, blockType, toolUseID, toolName
 		contentBlock = map[string]interface{}{
 			"type":     "thinking",
 			"thinking": "",
+		}
+		if signature != "" {
+			contentBlock["signature"] = signature
 		}
 	default:
 		contentBlock = map[string]interface{}{
@@ -59,6 +69,23 @@ func BuildClaudeContentBlockStartEvent(index int, blockType, toolUseID, toolName
 	}
 	result, _ := json.Marshal(event)
 	return []byte("event: content_block_start\ndata: " + string(result))
+}
+
+// BuildClaudeSignatureDeltaEvent creates a signature_delta content_block_delta
+// SSE event. Kiro delivers the reasoning signature on the final
+// reasoningContentEvent, typically after the thinking block has started, so the
+// signature arrives via delta rather than the block start.
+func BuildClaudeSignatureDeltaEvent(signature string, index int) []byte {
+	event := map[string]interface{}{
+		"type":  "content_block_delta",
+		"index": index,
+		"delta": map[string]interface{}{
+			"type":      "signature_delta",
+			"signature": signature,
+		},
+	}
+	result, _ := json.Marshal(event)
+	return []byte("event: content_block_delta\ndata: " + string(result))
 }
 
 // BuildClaudeStreamEvent creates a text_delta content_block_delta SSE event
