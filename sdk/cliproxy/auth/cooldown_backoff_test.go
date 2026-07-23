@@ -152,6 +152,94 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 }
 
+func paymentResult(authID, model string) Result {
+	return Result{
+		AuthID:   authID,
+		Provider: "codex",
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			Code:       "payment_required",
+			Message:    "monthly limit reached",
+			Retryable:  true,
+			HTTPStatus: http.StatusPaymentRequired,
+		},
+	}
+}
+
+func TestMarkResultPaymentRequiredSetsLongCooldown(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-payment-long",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), paymentResult(auth.ID, "gpt-5"))
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if !state.Unavailable {
+		t.Fatalf("expected model to be marked unavailable after 402")
+	}
+	if got := time.Until(state.NextRetryAfter); got > 24*time.Hour || got < 23*time.Hour {
+		t.Fatalf("expected 402 cooldown to be 24h, got %v", got)
+	}
+}
+
+func TestMarkResultForbiddenKeepsFixedCooldown(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-forbidden-fixed",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	result := paymentResult(auth.ID, "gpt-5")
+	result.Error.HTTPStatus = http.StatusForbidden
+	manager.MarkResult(context.Background(), result)
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if got := time.Until(state.NextRetryAfter); got > 30*time.Minute || got < 29*time.Minute {
+		t.Fatalf("expected 403 cooldown to stay 30m, got %v", got)
+	}
+}
+
+func TestApplyAuthFailureStatePaymentRequired(t *testing.T) {
+	now := time.Now()
+	paymentErr := &Error{Code: "payment_required", Message: "monthly limit reached", HTTPStatus: http.StatusPaymentRequired}
+	auth := &Auth{ID: "auth-level-payment"}
+
+	applyAuthFailureState(auth, paymentErr, nil, now, false)
+	if auth.StatusMessage != "payment_required" {
+		t.Fatalf("expected status message payment_required, got %q", auth.StatusMessage)
+	}
+	if !auth.NextRetryAfter.Equal(now.Add(24 * time.Hour)) {
+		t.Fatalf("expected auth-level 402 cooldown of 24h, got %v", auth.NextRetryAfter.Sub(now))
+	}
+
+	disabled := &Auth{ID: "auth-level-payment-disabled"}
+	applyAuthFailureState(disabled, paymentErr, nil, now, true)
+	if !disabled.NextRetryAfter.IsZero() {
+		t.Fatalf("expected no cooldown when cooling is disabled, got %v", disabled.NextRetryAfter)
+	}
+}
+
 func TestJitteredCooldownWaitBounds(t *testing.T) {
 	cases := []struct {
 		wait      time.Duration

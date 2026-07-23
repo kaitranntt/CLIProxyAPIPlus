@@ -3799,7 +3799,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "unauthorized"
 								shouldSuspendModel = true
 							}
-						case 402, 403:
+						case 402:
+							// Payment-required errors (e.g. monthly quota exhausted) recover on a
+							// daily/monthly scale, so cool down for a day instead of minutes.
+							if disableCooling {
+								state.NextRetryAfter = time.Time{}
+							} else {
+								next := now.Add(24 * time.Hour)
+								state.NextRetryAfter = next
+								suspendReason = "payment_required"
+								shouldSuspendModel = true
+							}
+						case 403:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -4385,7 +4396,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		} else {
 			auth.NextRetryAfter = now.Add(30 * time.Minute)
 		}
-	case 402, 403:
+	case 402:
+		auth.StatusMessage = "payment_required"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(24 * time.Hour)
+		}
+	case 403:
 		auth.StatusMessage = "payment_required"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
