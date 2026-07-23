@@ -288,3 +288,44 @@ func TestKiroResponsesNonStreamAcceptsExecutorClaudeResponse(t *testing.T) {
 		t.Fatalf("usage.total_tokens = %d, want 26. Output: %s", got, string(out))
 	}
 }
+
+func TestKiroResponsesNonStreamOrdersReasoningBeforeMessage(t *testing.T) {
+	// The executor normalizes the fully-buffered Claude response to the
+	// Anthropic convention (thinking first), so the Responses output must lead
+	// with the reasoning item and carry the upstream signature as
+	// encrypted_content.
+	claudeResponse := kiroclaude.BuildClaudeResponseWithThinking(
+		"Done.",
+		nil,
+		"kiro-gpt-5-6-sol",
+		usage.Detail{InputTokens: 3, OutputTokens: 2},
+		"end_turn",
+		"...",
+		"sig_kiro_ns",
+	)
+
+	out := sdktranslator.TranslateNonStream(
+		context.Background(),
+		sdktranslator.FromString("kiro"),
+		sdktranslator.FormatOpenAIResponse,
+		"kiro-gpt-5-6-sol",
+		nil,
+		nil,
+		claudeResponse,
+		nil,
+	)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("output.0.type").String(); got != "reasoning" {
+		t.Fatalf("output[0].type = %q, want reasoning. Output: %s", got, string(out))
+	}
+	if got := root.Get("output.0.encrypted_content").String(); got != "sig_kiro_ns" {
+		t.Fatalf("reasoning encrypted_content = %q, want sig_kiro_ns. Output: %s", got, string(out))
+	}
+	if got := root.Get("output.1.type").String(); got != "message" {
+		t.Fatalf("output[1].type = %q, want message. Output: %s", got, string(out))
+	}
+	if got := root.Get("output.1.content.0.text").String(); got != "Done." {
+		t.Fatalf("message text = %q. Output: %s", got, string(out))
+	}
+}

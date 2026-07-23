@@ -46,11 +46,25 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 }
 
 // BuildClaudeResponseWithThinking is BuildClaudeResponse plus an explicit
-// reasoning channel: thinkingContent is appended as a trailing thinking block
-// (Kiro emits reasoning after the text), carrying the upstream signature so
-// downstream converters can expose it (e.g. as Responses encrypted_content).
+// reasoning channel: thinkingContent is prepended as a leading thinking block
+// (the Anthropic convention orders thinking ahead of text; Kiro streams
+// reasoning after the text, but the non-stream response is fully buffered, so
+// the order is normalized here), carrying the upstream signature so downstream
+// converters can expose it (e.g. as Responses encrypted_content).
 func BuildClaudeResponseWithThinking(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason, thinkingContent, thinkingSignature string) []byte {
 	var contentBlocks []map[string]interface{}
+
+	// Prepend the official reasoning channel ahead of the text block.
+	if thinkingContent != "" {
+		thinkingBlock := map[string]interface{}{
+			"type":     "thinking",
+			"thinking": thinkingContent,
+		}
+		if thinkingSignature != "" {
+			thinkingBlock["signature"] = thinkingSignature
+		}
+		contentBlocks = append(contentBlocks, thinkingBlock)
+	}
 
 	if content != "" {
 		if kirocommon.IsExtractThinkingTagEnabled() {
@@ -67,18 +81,6 @@ func BuildClaudeResponseWithThinking(content string, toolUses []KiroToolUse, mod
 				"text": content,
 			})
 		}
-	}
-
-	// Append the official reasoning channel after the text block.
-	if thinkingContent != "" {
-		thinkingBlock := map[string]interface{}{
-			"type":     "thinking",
-			"thinking": thinkingContent,
-		}
-		if thinkingSignature != "" {
-			thinkingBlock["signature"] = thinkingSignature
-		}
-		contentBlocks = append(contentBlocks, thinkingBlock)
 	}
 
 	// Add tool_use blocks — skip truncated tools when detector is enabled

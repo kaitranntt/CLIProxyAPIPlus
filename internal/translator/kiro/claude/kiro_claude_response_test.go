@@ -72,6 +72,50 @@ func TestBuildClaudeResponseOmitsZeroCredits(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeResponseWithThinkingLeadsWithThinkingBlock(t *testing.T) {
+	// Kiro streams the reasoning channel after the text, but the non-stream
+	// response is fully buffered, so the thinking block must be normalized to
+	// the Anthropic convention: thinking first, then text.
+	response := BuildClaudeResponseWithThinking(
+		"final answer",
+		nil,
+		"kiro-gpt-5-6-sol",
+		usage.Detail{InputTokens: 3, OutputTokens: 7},
+		"end_turn",
+		"...",
+		"sig_upstream_1",
+	)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(response, &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	content, ok := payload["content"].([]interface{})
+	if !ok || len(content) != 2 {
+		t.Fatalf("content blocks = %#v, want 2 blocks", payload["content"])
+	}
+	first, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("content[0] wrong type: %#v", content[0])
+	}
+	if got := first["type"]; got != "thinking" {
+		t.Fatalf("content[0].type = %v, want thinking", got)
+	}
+	if got := first["thinking"]; got != "..." {
+		t.Fatalf("content[0].thinking = %v, want ...", got)
+	}
+	if got := first["signature"]; got != "sig_upstream_1" {
+		t.Fatalf("content[0].signature = %v, want sig_upstream_1", got)
+	}
+	second, ok := content[1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("content[1] wrong type: %#v", content[1])
+	}
+	if got := second["type"]; got != "text" {
+		t.Fatalf("content[1].type = %v, want text", got)
+	}
+}
+
 func assertJSONNumber(t *testing.T, payload map[string]interface{}, key string, want int64) {
 	t.Helper()
 	got, ok := payload[key].(float64)

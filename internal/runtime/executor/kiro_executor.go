@@ -3609,7 +3609,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 	}
 
-	// Close thinking block if still open at stream end
+	// Close thinking block if still open at stream end. Kiro always emits the
+	// reasoning channel last, so this close runs on every thinking request —
+	// keep it at debug level to avoid log noise.
 	if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
 		blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
 		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
@@ -3617,7 +3619,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			enqueueTranslatedSSE(out, chunk)
 		}
 		isThinkingBlockOpen = false
-		log.Warnf("kiro: closed unclosed thinking block at stream end")
+		log.Debugf("kiro: closed unclosed thinking block at stream end")
 	}
 
 	// Close text content block if open
