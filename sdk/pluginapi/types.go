@@ -1291,6 +1291,9 @@ type UsageRecord struct {
 	Failure UsageFailure
 	// Detail contains token usage counters.
 	Detail UsageDetail
+	// Metadata carries provider-specific usage extensions (e.g. billing units)
+	// that do not belong in the token accounting Detail.
+	Metadata map[string]any
 	// ResponseHeaders contains selected upstream response headers.
 	ResponseHeaders http.Header
 }

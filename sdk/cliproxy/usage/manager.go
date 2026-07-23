@@ -49,6 +49,7 @@ type Record struct {
 	Failed      bool
 	Fail        Failure
 	Detail      Detail
+	Metadata    map[string]any
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
@@ -69,6 +70,8 @@ type Detail struct {
 	CacheCreationTokens int64
 	TotalTokens         int64
 	ResponseServiceTier string
+	// Credits holds upstream billing credits (e.g. Kiro meteringEvent usage).
+	Credits float64
 }
 
 type requestedModelAliasContextKey struct{}

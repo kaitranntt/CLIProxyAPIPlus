@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -1847,6 +1848,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			CacheCreationTokens: record.Detail.CacheCreationTokens,
 			TotalTokens:         record.Detail.TotalTokens,
 		},
+		Metadata:        maps.Clone(record.Metadata),
 		ResponseHeaders: cloneHeader(record.ResponseHeaders),
 	})
 }

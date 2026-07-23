@@ -422,7 +422,7 @@ func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutp
 func TestConvertClaudeResponseToOpenAIResponses_ReportsCacheTokens(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":7}}}`),
-		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":4,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}`),
+		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":4,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31,"credits":0.1847}}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
 
@@ -452,6 +452,9 @@ func TestConvertClaudeResponseToOpenAIResponses_ReportsCacheTokens(t *testing.T)
 	if got := completed.Get("response.usage.total_tokens").Int(); got != 22048 {
 		t.Fatalf("response usage total_tokens = %d, want %d", got, 22048)
 	}
+	if got := completed.Get("response.usage.credits").Float(); got != 0.1847 {
+		t.Fatalf("response usage credits = %v, want %v", got, 0.1847)
+	}
 }
 
 func TestConvertClaudeResponseToOpenAIResponsesNonStream_ThinkingIncludesSignature(t *testing.T) {
@@ -479,7 +482,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ThinkingIncludesSignatu
 func TestConvertClaudeResponseToOpenAIResponsesNonStream_ReportsCacheTokens(t *testing.T) {
 	raw := []byte(strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}}`,
-		`data: {"type":"message_delta","usage":{"output_tokens":4}}`,
+		`data: {"type":"message_delta","usage":{"output_tokens":4,"credits":0.1847}}`,
 		`data: {"type":"message_stop"}`,
 	}, "\n"))
 
@@ -497,6 +500,9 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ReportsCacheTokens(t *t
 	}
 	if got := root.Get("usage.total_tokens").Int(); got != 22048 {
 		t.Fatalf("non-stream usage total_tokens = %d, want %d", got, 22048)
+	}
+	if got := root.Get("usage.credits").Float(); got != 0.1847 {
+		t.Fatalf("non-stream usage credits = %v, want %v", got, 0.1847)
 	}
 }
 
