@@ -211,6 +211,17 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		flushPendingToolUses()
 	}
 
+	// The Responses API also accepts a plain string input as shorthand for a
+	// single user message. Without this branch the input would be dropped
+	// silently, leaving downstream providers with an empty conversation.
+	if input := root.Get("input"); input.Exists() && input.Type == gjson.String {
+		if text := input.String(); text != "" {
+			msg := []byte(`{"role":"user","content":""}`)
+			msg, _ = sjson.SetBytes(msg, "content", text)
+			appendMessage(msg)
+		}
+	}
+
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			if extractedFromSystem && strings.EqualFold(item.Get("role").String(), "system") {
@@ -404,9 +415,38 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					raw:    asst,
 				})
 
-			case "function_call_output":
+			case "custom_tool_call":
+				// Freeform custom tool calls carry raw text input. Wrap it in the
+				// {"input": ...} envelope produced by convertResponsesCustomToolToClaude
+				// so the pair round-trips through JSON-only providers.
+				callID := item.Get("call_id").String()
+				if callID == "" {
+					callID = genToolCallID()
+				}
+				callID = util.SanitizeClaudeToolID(callID)
+				name := item.Get("name").String()
+
+				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
+				toolUse, _ = sjson.SetBytes(toolUse, "name", name)
+				toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
+
+				asst := []byte(`{"role":"assistant","content":[]}`)
+				for _, partJSON := range pendingReasoningParts {
+					asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+				}
+				pendingReasoningParts = nil
+				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
+				pendingToolUseMessages = append(pendingToolUseMessages, pendingToolUseMessage{
+					callID: callID,
+					raw:    asst,
+				})
+
+			case "function_call_output", "custom_tool_call_output":
 				flushPendingReasoning()
-				// Map to user tool_result
+				// Map to user tool_result. Both output item kinds share the
+				// call_id/output shape; custom_tool_call_output is emitted for
+				// freeform custom tools.
 				callID := item.Get("call_id").String()
 				callID = util.SanitizeClaudeToolID(callID)
 				flushPendingToolUseFor(callID)
@@ -429,9 +469,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	toolNameMap := map[string]string{}
 
 	// tools mapping: parameters -> input_schema
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
+	// Tool declarations come from both the top-level tools array and codex's
+	// responses-lite input[].type==additional_tools items — skipping the latter
+	// leaves the model with no tools at all.
+	{
 		toolsJSON := []byte("[]")
-		tools.ForEach(func(_, tool gjson.Result) bool {
+		toolCount := 0
+		forEachResponsesTool(rawJSON, func(tool gjson.Result) bool {
+			toolCount++
 			convertedTools := convertResponsesToolToClaudeTools(tool, toolNameMap)
 			for _, tJSON := range convertedTools {
 				toolName := gjson.GetBytes(tJSON, "name").String()
@@ -442,8 +487,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 			return true
 		})
-		if parsedTools := gjson.ParseBytes(toolsJSON); parsedTools.IsArray() && len(parsedTools.Array()) > 0 {
-			out, _ = sjson.SetRawBytes(out, "tools", toolsJSON)
+		if toolCount > 0 {
+			if parsedTools := gjson.ParseBytes(toolsJSON); parsedTools.IsArray() && len(parsedTools.Array()) > 0 {
+				out, _ = sjson.SetRawBytes(out, "tools", toolsJSON)
+			}
 		}
 	}
 
@@ -633,10 +680,11 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 			}
 			return [][]byte{tJSON}
 		}
-	default:
-		if isOpenAIResponsesApplyPatchCustomTool(toolType, tool) {
-			return nil
+	case "custom":
+		if tJSON, ok := convertResponsesCustomToolToClaude(tool); ok {
+			return [][]byte{tJSON}
 		}
+	default:
 		if isUnsupportedOpenAIBuiltinToolType(toolType) {
 			return nil
 		}
@@ -647,8 +695,31 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 	return nil
 }
 
-func isOpenAIResponsesApplyPatchCustomTool(toolType string, tool gjson.Result) bool {
-	return toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
+// convertResponsesCustomToolToClaude maps an OpenAI Responses freeform custom
+// tool (e.g. codex's apply_patch) to a Claude tool. Claude tool inputs must be
+// JSON objects, so the freeform payload is wrapped in an {"input": "..."}
+// envelope; any grammar definition is preserved in the description so the
+// model still knows the required textual format. The response converter
+// unwraps the envelope back into a custom_tool_call item.
+func convertResponsesCustomToolToClaude(tool gjson.Result) ([]byte, bool) {
+	name := responsesToolName(tool)
+	if name == "" {
+		return nil, false
+	}
+
+	description := responsesToolDescription(tool)
+	if definition := strings.TrimSpace(tool.Get("format.definition").String()); definition != "" {
+		if description != "" {
+			description += "\n\n"
+		}
+		description += "The `input` string MUST follow this grammar:\n" + definition
+	}
+
+	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string","description":"Freeform tool input payload."}},"required":["input"],"additionalProperties":false}}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON, _ = sjson.SetBytes(tJSON, "description", description)
+	tJSON = common.AttachCacheControl(tJSON, tool)
+	return tJSON, true
 }
 
 func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[string]string) [][]byte {
@@ -789,14 +860,9 @@ func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, quali
 		return "", ""
 	}
 
-	tools := gjson.GetBytes(requestRawJSON, "tools")
-	if !tools.Exists() || !tools.IsArray() {
-		return qualifiedName, ""
-	}
-
 	var bestNamespace string
 	var bestChild string
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	forEachResponsesTool(requestRawJSON, func(tool gjson.Result) bool {
 		if strings.TrimSpace(tool.Get("type").String()) != "namespace" {
 			return true
 		}
@@ -826,6 +892,39 @@ func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, quali
 		return qualifiedName, ""
 	}
 	return bestChild, bestNamespace
+}
+
+// forEachResponsesTool iterates every tool declaration in a Responses request.
+// Besides the top-level tools array, codex's responses-lite mode carries tool
+// declarations inside input items ({"type":"additional_tools","tools":[...]});
+// both locations are authoritative and must be honored.
+func forEachResponsesTool(requestRawJSON []byte, fn func(tool gjson.Result) bool) {
+	if len(requestRawJSON) == 0 || fn == nil {
+		return
+	}
+	if tools := gjson.GetBytes(requestRawJSON, "tools"); tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if !fn(tool) {
+				return
+			}
+		}
+	}
+	if input := gjson.GetBytes(requestRawJSON, "input"); input.IsArray() {
+		for _, item := range input.Array() {
+			if item.Get("type").String() != "additional_tools" {
+				continue
+			}
+			tools := item.Get("tools")
+			if !tools.IsArray() {
+				continue
+			}
+			for _, tool := range tools.Array() {
+				if !fn(tool) {
+					return
+				}
+			}
+		}
+	}
 }
 
 func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {

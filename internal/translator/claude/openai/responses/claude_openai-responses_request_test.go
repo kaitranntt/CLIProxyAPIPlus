@@ -250,7 +250,134 @@ func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToClaude_AcceptsPlainStringInput(t *testing.T) {
+	raw := []byte(`{"model":"claude-test","input":"Hi","stream":true}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, true)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.#").Int(); got != 1 {
+		t.Fatalf("messages count = %d, want 1. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.content").String(); got != "Hi" {
+		t.Fatalf("messages.0.content = %q, want Hi. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MapsCustomToolCallOutputItem(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"custom_tool_call","call_id":"call_exec","name":"exec","input":"const r = await tools.exec_command({cmd:\"ls\"})"},
+			{"type":"custom_tool_call_output","call_id":"call_exec","output":[
+				{"type":"input_text","text":"Script completed"},
+				{"type":"input_text","text":"file1.txt"}
+			]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.0.role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want assistant. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.role").String(); got != "user" {
+		t.Fatalf("messages.1.role = %q, want user. Output: %s", got, string(out))
+	}
+	toolResult := root.Get("messages.1.content.0")
+	if got := toolResult.Get("type").String(); got != "tool_result" {
+		t.Fatalf("content.0.type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := toolResult.Get("tool_use_id").String(); got != "call_exec" {
+		t.Fatalf("tool_result.tool_use_id = %q, want call_exec. Output: %s", got, string(out))
+	}
+	if got := toolResult.Get("content.0.text").String(); got != "Script completed" {
+		t.Fatalf("tool_result content.0.text = %q. Output: %s", got, string(out))
+	}
+	if got := toolResult.Get("content.1.text").String(); got != "file1.txt" {
+		t.Fatalf("tool_result content.1.text = %q. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MapsCustomToolCallInputItem(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},
+			{"type":"function_call_output","call_id":"call_patch","output":"patch applied"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.0.role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want assistant. Output: %s", got, string(out))
+	}
+	toolUse := root.Get("messages.0.content.0")
+	if got := toolUse.Get("type").String(); got != "tool_use" {
+		t.Fatalf("content.0.type = %q, want tool_use. Output: %s", got, string(out))
+	}
+	if got := toolUse.Get("id").String(); got != "call_patch" {
+		t.Fatalf("tool_use.id = %q, want call_patch. Output: %s", got, string(out))
+	}
+	if got := toolUse.Get("name").String(); got != "apply_patch" {
+		t.Fatalf("tool_use.name = %q, want apply_patch. Output: %s", got, string(out))
+	}
+	if got := toolUse.Get("input.input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("tool_use input.input = %q, want wrapped freeform payload. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.role").String(); got != "user" {
+		t.Fatalf("messages.1.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages.1.content.0.type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.content.0.tool_use_id").String(); got != "call_patch" {
+		t.Fatalf("tool_result.tool_use_id = %q, want call_patch. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_AdditionalToolsItem(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"custom","name":"exec","description":"Run JS code.","format":{"type":"grammar","syntax":"lark","definition":"start: js"}},
+				{"type":"function","name":"wait","description":"Waits on a cell.","parameters":{"type":"object","properties":{"id":{"type":"string"}}}},
+				{"type":"namespace","name":"collaboration","description":"Sub-agents.","tools":[
+					{"type":"function","name":"followup_task","description":"Send task.","parameters":{"type":"object","properties":{"message":{"type":"string"}}}}
+				]}
+			]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+		],
+		"tool_choice":"auto"
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("tools.#").Int(); got != 3 {
+		t.Fatalf("tools count = %d, want 3. Output: %s", got, string(out))
+	}
+	for _, name := range []string{"exec", "wait", "collaboration__followup_task"} {
+		if !root.Get(`tools.#(name=="` + name + `")`).Exists() {
+			t.Fatalf("missing tool %q from additional_tools. Output: %s", name, string(out))
+		}
+	}
+	if got := root.Get(`tools.#(name=="exec").input_schema.properties.input.type`).String(); got != "string" {
+		t.Fatalf("exec input_schema.properties.input.type = %q, want string", got)
+	}
+	if desc := root.Get(`tools.#(name=="exec").description`).String(); !strings.Contains(desc, "start: js") {
+		t.Fatalf("exec description should carry grammar definition, got %q", desc)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MapsApplyPatchCustomTool(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",
 		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
@@ -273,14 +400,22 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *test
 	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	root := gjson.ParseBytes(out)
 
-	if got := root.Get("tools.#").Int(); got != 1 {
-		t.Fatalf("tools count = %d, want 1. Output: %s", got, string(out))
+	if got := root.Get("tools.#").Int(); got != 2 {
+		t.Fatalf("tools count = %d, want 2. Output: %s", got, string(out))
 	}
-	if got := root.Get("tools.0.name").String(); got != "exec_command" {
-		t.Fatalf("tools.0.name = %q, want exec_command. Output: %s", got, string(out))
+	customTool := root.Get("tools.#(name==\"apply_patch\")")
+	if !customTool.Exists() {
+		t.Fatalf("apply_patch custom tool should be preserved. Output: %s", string(out))
 	}
-	if got := root.Get("tools.#(name==\"apply_patch\")").Raw; got != "" {
-		t.Fatalf("apply_patch custom tool should be dropped. Output: %s", string(out))
+	if got := customTool.Get("input_schema.properties.input.type").String(); got != "string" {
+		t.Fatalf("apply_patch input_schema.properties.input.type = %q, want string. Output: %s", got, string(out))
+	}
+	if got := customTool.Get("input_schema.required.0").String(); got != "input" {
+		t.Fatalf("apply_patch input_schema.required = %q, want [input]. Output: %s", got, string(out))
+	}
+	desc := customTool.Get("description").String()
+	if !strings.Contains(desc, "Use the apply_patch tool to edit files.") || !strings.Contains(desc, "start: patch") {
+		t.Fatalf("apply_patch description should keep the original text and grammar definition, got %q", desc)
 	}
 }
 
