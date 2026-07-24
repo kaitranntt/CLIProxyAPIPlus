@@ -1811,6 +1811,18 @@ type kiroParsedStream struct {
 	ThinkingSignature string
 }
 
+// normalizeKiroWebSearchToolName maps Kiro's remote_web_search tool name back to
+// the client-facing web_search name. Requests rename web_search → remote_web_search
+// for Kiro API compatibility (see convertClaudeToolsToKiro in the kiro/claude
+// translator); responses must undo this so clients like Claude Code recognize the
+// tool. Any other tool name passes through unchanged.
+func normalizeKiroWebSearchToolName(name string) string {
+	if name == "remote_web_search" {
+		return "web_search"
+	}
+	return name
+}
+
 func (e *KiroExecutor) parseEventStream(body io.Reader) (*kiroParsedStream, error) {
 	var content strings.Builder
 	var toolUses []kiroclaude.KiroToolUse
@@ -2261,6 +2273,13 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (*kiroParsedStream, erro
 	// Deduplicate all tool uses
 	toolUses = kiroclaude.DeduplicateToolUses(toolUses)
 
+	// Map remote_web_search back to the client-facing web_search name so clients
+	// (e.g. Claude Code) recognize the tool. The request path renames it for Kiro
+	// API compatibility; the response path must undo that rename.
+	for i := range toolUses {
+		toolUses[i].Name = normalizeKiroWebSearchToolName(toolUses[i].Name)
+	}
+
 	// Apply fallback logic for stop_reason if not provided by upstream
 	// Priority: upstream stopReason > tool_use detection > end_turn default
 	if stopReason == "" {
@@ -2603,7 +2622,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		hasToolUses = true
 		contentBlockIndex++
-		blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
+		// Map remote_web_search back to the client-facing web_search name.
+		blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, normalizeKiroWebSearchToolName(tu.Name))
 		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 		for _, chunk := range sseData {
 			enqueueTranslatedSSE(out, chunk)
@@ -2666,7 +2686,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				contentBlockIndex++
 
 				// Send tool_use content block
-				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", currentToolUse.ToolUseID, currentToolUse.Name)
+				// Map remote_web_search back to the client-facing web_search name.
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", currentToolUse.ToolUseID, normalizeKiroWebSearchToolName(currentToolUse.Name))
 				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 				for _, chunk := range sseData {
 					enqueueTranslatedSSE(out, chunk)
@@ -3210,7 +3231,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			// Handle tool uses in response (with deduplication)
 			for _, tu := range toolUses {
 				toolUseID := kirocommon.GetString(tu, "toolUseId")
-				toolName := kirocommon.GetString(tu, "name")
+				// Map remote_web_search back to the client-facing web_search name.
+				toolName := normalizeKiroWebSearchToolName(kirocommon.GetString(tu, "name"))
 
 				// Check for duplicate
 				if processedIDs[toolUseID] {
@@ -3374,7 +3396,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 				contentBlockIndex++
 
-				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
+				// Map remote_web_search back to the client-facing web_search name.
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, normalizeKiroWebSearchToolName(tu.Name))
 				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 				for _, chunk := range sseData {
 					enqueueTranslatedSSE(out, chunk)
