@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
@@ -606,13 +607,14 @@ func TestKiroContextUsageFallbackAppliesWhenPreciseTokenUsageMissing(t *testing.
 	if !applied {
 		t.Fatal("applyKiroContextUsageFallback() applied = false, want true")
 	}
-	if calculated != 100000 {
-		t.Fatalf("calculated input tokens = %d, want 100000", calculated)
+	wantInput := int64(50 * registry.DefaultKiroContextLength / 100)
+	if calculated != wantInput {
+		t.Fatalf("calculated input tokens = %d, want %d", calculated, wantInput)
 	}
-	if detail.InputTokens != 100000 {
-		t.Fatalf("InputTokens = %d, want 100000", detail.InputTokens)
+	if detail.InputTokens != wantInput {
+		t.Fatalf("InputTokens = %d, want %d", detail.InputTokens, wantInput)
 	}
-	if detail.TotalTokens != 100003 {
-		t.Fatalf("TotalTokens = %d, want 100003", detail.TotalTokens)
+	if detail.TotalTokens != wantInput+3 {
+		t.Fatalf("TotalTokens = %d, want %d", detail.TotalTokens, wantInput+3)
 	}
 }

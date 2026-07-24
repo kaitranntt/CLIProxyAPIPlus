@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
@@ -1706,7 +1707,7 @@ func applyKiroContextUsageFallback(detail *usage.Detail, contextUsagePercentage 
 	if detail == nil || contextUsagePercentage <= 0 || hasPreciseTokenUsage {
 		return 0, false
 	}
-	calculatedInputTokens := int64(contextUsagePercentage * 200000 / 100)
+	calculatedInputTokens := int64(contextUsagePercentage * registry.DefaultKiroContextLength / 100)
 	if calculatedInputTokens <= 0 {
 		return 0, false
 	}
@@ -2282,8 +2283,8 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (*kiroParsedStream, erro
 	}
 
 	// Use contextUsagePercentage to calculate more accurate input tokens
-	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
-	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
+	// contextUsagePercentage represents the percentage of the Kiro context window used
+	// Formula: input_tokens = contextUsagePercentage * registry.DefaultKiroContextLength / 100
 	localEstimate := usageInfo.InputTokens
 	if calculatedInputTokens, ok := applyKiroContextUsageFallback(&usageInfo, upstreamContextPercentage, hasPreciseTokenUsage); ok {
 		log.Infof("kiro: parseEventStream using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
@@ -3664,9 +3665,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	// Use contextUsagePercentage to calculate more accurate input tokens
-	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
-	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
-	// Note: The effective input context is ~170k (200k - 30k reserved for output)
+	// contextUsagePercentage represents the percentage of the Kiro context window used
+	// Formula: input_tokens = contextUsagePercentage * registry.DefaultKiroContextLength / 100
+	// Note: part of the context window is reserved for output
 	localEstimate := totalUsage.InputTokens
 	if calculatedInputTokens, ok := applyKiroContextUsageFallback(&totalUsage, upstreamContextPercentage, hasPreciseTokenUsage); ok {
 		log.Debugf("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
