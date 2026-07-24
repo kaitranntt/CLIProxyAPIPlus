@@ -150,15 +150,6 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	// Extract system prompt from messages
 	systemPrompt := extractSystemPromptFromOpenAI(messages)
 
-	// Early exit: if system prompt injection is disabled, drop the client system prompt
-	// immediately to avoid unnecessary string building (timestamp, agentic, thinking tags, etc.)
-	if !kirocommon.IsSystemPromptInjectEnabled() {
-		if systemPrompt != "" {
-			log.Debugf("kiro-openai: system prompt injection disabled, dropping system prompt (len=%d)", len(systemPrompt))
-		}
-		systemPrompt = ""
-	}
-
 	// Inject timestamp context
 	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
 	timestampContext := fmt.Sprintf("[Context: Current time is %s]", timestamp)
@@ -260,11 +251,14 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		currentMessage = KiroCurrentMessage{UserInputMessage: *currentUserMsg}
 	} else {
 		fallbackContent := ""
-		if systemPrompt != "" && kirocommon.IsSystemPromptInjectEnabled() {
-			fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
-			log.Debugf("kiro-openai: system prompt injected into fallback user message (len=%d)", len(systemPrompt))
-		} else if systemPrompt != "" {
-			log.Debugf("kiro-openai: system prompt dropped (inject disabled, len=%d)", len(systemPrompt))
+		if systemPrompt != "" {
+			if kirocommon.IsSystemPromptInjectEnabled() {
+				fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
+				log.Debugf("kiro-openai: system prompt injected into fallback user message with legacy markers (len=%d)", len(systemPrompt))
+			} else {
+				fallbackContent = kirocommon.WrapSystemPromptForInject(systemPrompt)
+				log.Debugf("kiro-openai: system prompt injected into fallback user message via <system-reminder> (len=%d)", len(systemPrompt))
+			}
 		} else {
 			log.Debugf("kiro-openai: no system prompt present in fallback user message")
 		}
@@ -914,13 +908,16 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResult) string {
 	var contentBuilder strings.Builder
 
-	if systemPrompt != "" && kirocommon.IsSystemPromptInjectEnabled() {
-		contentBuilder.WriteString("--- SYSTEM PROMPT ---\n")
-		contentBuilder.WriteString(systemPrompt)
-		contentBuilder.WriteString("\n--- END SYSTEM PROMPT ---\n\n")
-		log.Debugf("kiro-openai: system prompt injected into user message content (len=%d)", len(systemPrompt))
-	} else if systemPrompt != "" {
-		log.Debugf("kiro-openai: system prompt dropped (inject disabled, len=%d)", len(systemPrompt))
+	if systemPrompt != "" {
+		if kirocommon.IsSystemPromptInjectEnabled() {
+			contentBuilder.WriteString("--- SYSTEM PROMPT ---\n")
+			contentBuilder.WriteString(systemPrompt)
+			contentBuilder.WriteString("\n--- END SYSTEM PROMPT ---\n\n")
+			log.Debugf("kiro-openai: system prompt injected into user message content with legacy markers (len=%d)", len(systemPrompt))
+		} else {
+			contentBuilder.WriteString(kirocommon.WrapSystemPromptForInject(systemPrompt))
+			log.Debugf("kiro-openai: system prompt injected into user message content via <system-reminder> (len=%d)", len(systemPrompt))
+		}
 	} else {
 		log.Debugf("kiro-openai: no system prompt present")
 	}

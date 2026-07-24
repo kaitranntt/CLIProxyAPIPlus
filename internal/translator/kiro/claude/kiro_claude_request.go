@@ -155,15 +155,6 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Extract system prompt
 	systemPrompt := extractSystemPrompt(claudeBody)
 
-	// Early exit: if system prompt injection is disabled, drop the client system prompt
-	// immediately to avoid unnecessary string building (timestamp, agentic, thinking tags, etc.)
-	if !kirocommon.IsSystemPromptInjectEnabled() {
-		if systemPrompt != "" {
-			log.Debugf("kiro: system prompt injection disabled, dropping system prompt (len=%d)", len(systemPrompt))
-		}
-		systemPrompt = ""
-	}
-
 	// Check for thinking mode using the comprehensive IsThinkingEnabledWithHeaders function
 	// This supports Claude API format, OpenAI reasoning_effort, AMP/Cursor format, and Anthropic-Beta header
 	thinkingEnabled := IsThinkingEnabledWithHeaders(claudeBody, headers)
@@ -267,11 +258,14 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		currentMessage = KiroCurrentMessage{UserInputMessage: *currentUserMsg}
 	} else {
 		fallbackContent := ""
-		if systemPrompt != "" && kirocommon.IsSystemPromptInjectEnabled() {
-			fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
-			log.Debugf("kiro: system prompt injected into fallback user message (len=%d)", len(systemPrompt))
-		} else if systemPrompt != "" {
-			log.Debugf("kiro: system prompt dropped (inject disabled, len=%d)", len(systemPrompt))
+		if systemPrompt != "" {
+			if kirocommon.IsSystemPromptInjectEnabled() {
+				fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
+				log.Debugf("kiro: system prompt injected into fallback user message with legacy markers (len=%d)", len(systemPrompt))
+			} else {
+				fallbackContent = kirocommon.WrapSystemPromptForInject(systemPrompt)
+				log.Debugf("kiro: system prompt injected into fallback user message via <system-reminder> (len=%d)", len(systemPrompt))
+			}
 		} else {
 			log.Debugf("kiro: no system prompt present in fallback user message")
 		}
@@ -819,13 +813,16 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResult) string {
 	var contentBuilder strings.Builder
 
-	if systemPrompt != "" && kirocommon.IsSystemPromptInjectEnabled() {
-		contentBuilder.WriteString("--- SYSTEM PROMPT ---\n")
-		contentBuilder.WriteString(systemPrompt)
-		contentBuilder.WriteString("\n--- END SYSTEM PROMPT ---\n\n")
-		log.Debugf("kiro: system prompt injected into user message content (len=%d)", len(systemPrompt))
-	} else if systemPrompt != "" {
-		log.Debugf("kiro: system prompt dropped (inject disabled, len=%d)", len(systemPrompt))
+	if systemPrompt != "" {
+		if kirocommon.IsSystemPromptInjectEnabled() {
+			contentBuilder.WriteString("--- SYSTEM PROMPT ---\n")
+			contentBuilder.WriteString(systemPrompt)
+			contentBuilder.WriteString("\n--- END SYSTEM PROMPT ---\n\n")
+			log.Debugf("kiro: system prompt injected into user message content with legacy markers (len=%d)", len(systemPrompt))
+		} else {
+			contentBuilder.WriteString(kirocommon.WrapSystemPromptForInject(systemPrompt))
+			log.Debugf("kiro: system prompt injected into user message content via <system-reminder> (len=%d)", len(systemPrompt))
+		}
 	} else {
 		log.Debugf("kiro: no system prompt present")
 	}

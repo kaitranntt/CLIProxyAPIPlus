@@ -3,6 +3,8 @@ package responses
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"strings"
 
 	clauderesponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
@@ -10,8 +12,90 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// ConvertOpenAIResponsesRequestToKiro converts an OpenAI Responses request into
+// the Claude request format consumed by the Kiro payload builders. The shared
+// Responses→Claude converter downgrades system-level content (the top-level
+// "instructions" field and role:"system" input items) into plain user
+// messages. Kiro translators, however, only extract and wrap the Claude
+// top-level "system" field, so downgraded instructions would bypass system
+// prompt wrapping entirely. Extract all system-level content up front and
+// re-attach it as the top-level "system" field after conversion.
 func ConvertOpenAIResponsesRequestToKiro(modelName string, inputRawJSON []byte, stream bool) []byte {
-	return clauderesponses.ConvertOpenAIResponsesRequestToClaude(modelName, inputRawJSON, stream)
+	systemPrompt, stripped := extractResponsesSystemContent(inputRawJSON)
+	out := clauderesponses.ConvertOpenAIResponsesRequestToClaude(modelName, stripped, stream)
+	if systemPrompt != "" {
+		out, _ = sjson.SetBytes(out, "system", systemPrompt)
+	}
+	return out
+}
+
+// extractResponsesSystemContent removes system-level content from an OpenAI
+// Responses request — the top-level "instructions" field and every
+// role:"system" item in the input array — returning it as a single text block
+// (instructions first, then system items in input order) along with the
+// stripped request JSON.
+func extractResponsesSystemContent(inputRawJSON []byte) (string, []byte) {
+	var sb strings.Builder
+	out := inputRawJSON
+
+	if instr := gjson.GetBytes(out, "instructions"); instr.Exists() && instr.Type == gjson.String {
+		if text := instr.String(); text != "" {
+			sb.WriteString(text)
+		}
+		out, _ = sjson.DeleteBytes(out, "instructions")
+	}
+
+	input := gjson.GetBytes(out, "input")
+	if !input.Exists() || !input.IsArray() {
+		return sb.String(), out
+	}
+
+	items := input.Array()
+	kept := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		if !strings.EqualFold(item.Get("role").String(), "system") {
+			kept = append(kept, json.RawMessage(item.Raw))
+			continue
+		}
+		if text := responsesSystemItemText(item); text != "" {
+			if sb.Len() > 0 {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString(text)
+		}
+	}
+
+	if len(kept) == len(items) {
+		return sb.String(), out
+	}
+	arr, err := json.Marshal(kept)
+	if err != nil {
+		return sb.String(), out
+	}
+	out, _ = sjson.SetRawBytes(out, "input", arr)
+	return sb.String(), out
+}
+
+// responsesSystemItemText flattens the text of a role:"system" input item,
+// mirroring the shared converter's extraction (content part texts joined by
+// newlines, or the raw string content).
+func responsesSystemItemText(item gjson.Result) string {
+	content := item.Get("content")
+	if content.Exists() && content.IsArray() {
+		var sb strings.Builder
+		for _, part := range content.Array() {
+			text := part.Get("text").String()
+			if sb.Len() > 0 && text != "" {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(text)
+		}
+		return sb.String()
+	}
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	return ""
 }
 
 func ConvertKiroStreamToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {

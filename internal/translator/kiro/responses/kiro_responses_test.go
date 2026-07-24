@@ -329,3 +329,68 @@ func TestKiroResponsesNonStreamOrdersReasoningBeforeMessage(t *testing.T) {
 		t.Fatalf("message text = %q. Output: %s", got, string(out))
 	}
 }
+
+// TestKiroResponsesRequestHoistsSystemContent verifies that system-level
+// content (top-level "instructions" and role:"system" input items) is carried
+// as the Claude top-level "system" field instead of being downgraded to plain
+// user messages, so Kiro's system prompt wrapping applies to it.
+func TestKiroResponsesRequestHoistsSystemContent(t *testing.T) {
+	kiroFormat := sdktranslator.FromString("kiro")
+
+	t.Run("instructions and system input items merge into system field", func(t *testing.T) {
+		raw := []byte(`{
+			"model":"client-model",
+			"instructions":"You are a helpful coding assistant.",
+			"input":[
+				{
+					"type":"message",
+					"role":"system",
+					"content":[{"type":"input_text","text":"Always answer in Chinese."}]
+				},
+				{
+					"type":"message",
+					"role":"user",
+					"content":[{"type":"input_text","text":"Run pwd"}]
+				}
+			]
+		}`)
+		out := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, kiroFormat, "kiro-claude-sonnet-4-6", raw, true)
+		root := gjson.ParseBytes(out)
+
+		wantSystem := "You are a helpful coding assistant.\n\nAlways answer in Chinese."
+		if got := root.Get("system").String(); got != wantSystem {
+			t.Fatalf("system = %q, want %q. Output: %s", got, wantSystem, string(out))
+		}
+		if got := root.Get("messages.#").Int(); got != 1 {
+			t.Fatalf("messages count = %d, want 1 (system item must not leak into messages). Output: %s", got, string(out))
+		}
+		if got := root.Get("messages.0.role").String(); got != "user" {
+			t.Fatalf("messages.0.role = %q, want user. Output: %s", got, string(out))
+		}
+		if got := root.Get("messages.0.content").String(); got != "Run pwd" {
+			t.Fatalf("messages.0.content = %q, want Run pwd. Output: %s", got, string(out))
+		}
+	})
+
+	t.Run("no system content leaves request unchanged", func(t *testing.T) {
+		raw := []byte(`{
+			"model":"client-model",
+			"input":[
+				{
+					"type":"message",
+					"role":"user",
+					"content":[{"type":"input_text","text":"Hello"}]
+				}
+			]
+		}`)
+		out := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, kiroFormat, "kiro-claude-sonnet-4-6", raw, true)
+		root := gjson.ParseBytes(out)
+
+		if root.Get("system").Exists() {
+			t.Fatalf("system field must not be set. Output: %s", string(out))
+		}
+		if got := root.Get("messages.0.content").String(); got != "Hello" {
+			t.Fatalf("messages.0.content = %q, want Hello. Output: %s", got, string(out))
+		}
+	})
+}

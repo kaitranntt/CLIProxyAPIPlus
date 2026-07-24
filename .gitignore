@@ -2,6 +2,7 @@
 cli-proxy-api
 /cliproxy
 /server
+cmd/server/server
 *.exe
 
 
