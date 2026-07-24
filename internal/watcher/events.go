@@ -14,6 +14,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -43,9 +44,85 @@ func (w *Watcher) start(ctx context.Context) error {
 	w.watchKiroIDETokenFile()
 
 	go w.processEvents(ctx)
+	w.startAuthPoll(ctx)
 
 	w.reloadClients(true, nil, false)
 	return nil
+}
+
+// authPollInterval is the fixed interval for polling the auth directory for
+// changes made by other processes/hosts. fsnotify does not deliver events for
+// remote changes (e.g. NFS-shared auth directories), so polling is the
+// fallback that keeps multi-instance deployments converging.
+const authPollInterval = 10 * time.Second
+
+// startAuthPoll launches a ticker that periodically reconciles the auth
+// directory using the same incremental per-file paths as fsnotify events.
+func (w *Watcher) startAuthPoll(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(authPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if w.stopped.Load() {
+					return
+				}
+				w.pollAuthDirOnce()
+			}
+		}
+	}()
+}
+
+// pollAuthDirOnce walks the auth directory and applies per-file incremental
+// updates for added/modified files and removals for vanished ones. Unchanged
+// files are skipped by the hash check inside addOrUpdateClientLocked, so an
+// idle directory costs one directory walk plus one read per file per tick.
+func (w *Watcher) pollAuthDirOnce() {
+	w.clientsMutex.RLock()
+	cfg := w.config
+	w.clientsMutex.RUnlock()
+	if cfg == nil {
+		return
+	}
+	authDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir)
+	if errResolveAuthDir != nil || authDir == "" {
+		return
+	}
+	entries, errReadDir := os.ReadDir(authDir)
+	if errReadDir != nil {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(entries))
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+	for _, entry := range entries {
+		if entry == nil || entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".json") {
+			continue
+		}
+		fullPath := filepath.Join(authDir, name)
+		seen[w.normalizeAuthPath(fullPath)] = struct{}{}
+		w.addOrUpdateClientLocked(fullPath)
+	}
+
+	w.clientsMutex.RLock()
+	known := make([]string, 0, len(w.lastAuthHashes))
+	for path := range w.lastAuthHashes {
+		known = append(known, path)
+	}
+	w.clientsMutex.RUnlock()
+	for _, path := range known {
+		if _, ok := seen[path]; !ok {
+			w.removeClientLocked(path)
+		}
+	}
 }
 
 func (w *Watcher) watchKiroIDETokenFile() {
