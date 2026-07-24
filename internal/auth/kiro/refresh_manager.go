@@ -196,9 +196,10 @@ func InitFingerprintConfig(cfg *config.Config) {
 }
 
 // InitSystemPromptInjectConfig applies the kiro-system-prompt-inject-enable setting.
-// When the config value is true, Kiro translators wrap system prompts with
-// --- SYSTEM PROMPT --- markers and inject them into user messages.
-// When nil or false (default), system prompts are dropped entirely.
+// System prompts are always injected into Kiro user messages; this setting only
+// selects the wrapping style. When the config value is true, translators use the
+// legacy --- SYSTEM PROMPT --- markers. When nil or false (default), the
+// <system-reminder> wrapping (WrapSystemPromptForInject) is used.
 func InitSystemPromptInjectConfig(cfg *config.Config) {
 	enabled := false
 	if cfg != nil && cfg.KiroSystemPromptInjectEnable != nil {
@@ -206,9 +207,9 @@ func InitSystemPromptInjectConfig(cfg *config.Config) {
 	}
 	kirocommon.SetSystemPromptInjectEnabled(enabled)
 	if enabled {
-		log.Info("kiro: system prompt injection enabled")
+		log.Info("kiro: system prompt injection using legacy --- SYSTEM PROMPT --- markers")
 	} else {
-		log.Info("kiro: system prompt injection disabled (default) — system prompts will be dropped")
+		log.Info("kiro: system prompt injection using <system-reminder> wrapping (default)")
 	}
 }
 

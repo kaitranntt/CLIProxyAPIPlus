@@ -1359,7 +1359,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				_ = httpResp.Body.Close()
 				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-				log.Warnf("kiro: stream received 402 (monthly limit). Upstream body: %s", string(respBody))
+				log.Warnf("kiro: stream received 402 (monthly limit). account=%s label=%s model=%s. Upstream body: %s", auth.ID, auth.Label, kiroModelID, string(respBody))
 
 				// Return upstream error body directly
 				return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
