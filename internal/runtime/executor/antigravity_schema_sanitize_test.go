@@ -274,7 +274,47 @@ func TestSanitizeAntigravityRequestSchemasKeepsResponseSchemasPlaceholderFree(t 
 	}
 }
 
-func TestAntigravityBuildRequestKeepsJSONObjectSchemaPlaceholderFree(t *testing.T) {
+func TestSanitizeAntigravityRequestSchemasPreservesResponseUnionAndEnumType(t *testing.T) {
+	payload := `{"request":{
+		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{
+			"choice":{"anyOf":[{"type":"string"},{"type":"null"}]},
+			"level":{"type":"number","enum":[1,2]}
+		}}}]}],
+		"generationConfig":{"responseSchema":{"type":"object","properties":{
+			"action":{"anyOf":[
+				{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
+				{"type":"null"}
+			]},
+			"conviction":{"type":"number","enum":[0.25,0.5,1]}
+		}}}
+	}}`
+
+	got := sanitizeAntigravityRequestSchemas(payload, true)
+	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+	union := responseSchema.Get("properties.action.anyOf")
+	if !union.IsArray() || len(union.Array()) != 2 || union.Get("1.type").String() != "null" {
+		t.Errorf("response anyOf union was flattened: %s", responseSchema.Raw)
+	}
+	conviction := responseSchema.Get("properties.conviction")
+	if gotType := conviction.Get("type").String(); gotType != "number" {
+		t.Errorf("response enum type = %q, want number: %s", gotType, responseSchema.Raw)
+	}
+	for _, enumValue := range conviction.Get("enum").Array() {
+		if enumValue.Type != gjson.String {
+			t.Errorf("response enum value is not a string: %s", conviction.Raw)
+		}
+	}
+
+	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+	if toolSchema.Get("properties.choice.anyOf").Exists() {
+		t.Errorf("tool anyOf union was not flattened: %s", toolSchema.Raw)
+	}
+	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "string" {
+		t.Errorf("tool enum type = %q, want string: %s", gotType, toolSchema.Raw)
+	}
+}
+
+func TestAntigravityBuildRequestKeepsJSONObjectMimeOnly(t *testing.T) {
 	input := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`)
 	translated := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", input, false)
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-pro-low", translated)
@@ -283,12 +323,12 @@ func TestAntigravityBuildRequestKeepsJSONObjectSchemaPlaceholderFree(t *testing.
 		t.Fatal(errMarshal)
 	}
 
-	schema := gjson.GetBytes(encoded, "request.generationConfig.responseSchema")
-	if got := schema.Get("type").String(); got != "object" {
-		t.Fatalf("responseSchema.type = %q, want object: %s", got, encoded)
+	generationConfig := gjson.GetBytes(encoded, "request.generationConfig")
+	if got := generationConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json: %s", got, encoded)
 	}
-	if schema.Get("properties.reason").Exists() || schema.Get("required").Exists() {
-		t.Fatalf("json_object schema gained tool placeholders: %s", schema.Raw)
+	if generationConfig.Get("responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set for json_object: %s", encoded)
 	}
 }
 
