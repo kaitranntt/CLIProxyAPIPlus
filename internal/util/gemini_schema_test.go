@@ -764,6 +764,76 @@ func TestCleanJSONSchemaForAntigravityResponseDoesNotAddToolPlaceholders(t *test
 	}
 }
 
+func TestCleanJSONSchemaForAntigravityResponsePreservesUnions(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{
+			"action":{"anyOf":[
+				{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
+				{"type":"null"}
+			]},
+			"label":{"oneOf":[{"type":"string"},{"type":"null"}]}
+		}
+	}`
+
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	for _, testCase := range []struct {
+		path      string
+		wantTypes []string
+	}{
+		{path: "properties.action.anyOf", wantTypes: []string{"object", "null"}},
+		{path: "properties.label.oneOf", wantTypes: []string{"string", "null"}},
+	} {
+		union := result.Get(testCase.path)
+		if !union.IsArray() {
+			t.Errorf("response union %s was flattened: %s", testCase.path, result.Raw)
+			continue
+		}
+		var gotTypes []string
+		for _, branch := range union.Array() {
+			gotTypes = append(gotTypes, branch.Get("type").String())
+		}
+		if !reflect.DeepEqual(gotTypes, testCase.wantTypes) {
+			t.Errorf("response union %s types = %v, want %v: %s", testCase.path, gotTypes, testCase.wantTypes, result.Raw)
+		}
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponsePreservesEnumType(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{
+			"conviction":{"type":"number","enum":[0.25,0.5,1]},
+			"count":{"type":"integer","enum":[1,2]}
+		}
+	}`
+
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	for _, testCase := range []struct {
+		path       string
+		wantType   string
+		wantValues []string
+	}{
+		{path: "properties.conviction", wantType: "number", wantValues: []string{"0.25", "0.5", "1"}},
+		{path: "properties.count", wantType: "integer", wantValues: []string{"1", "2"}},
+	} {
+		schema := result.Get(testCase.path)
+		if gotType := schema.Get("type").String(); gotType != testCase.wantType {
+			t.Errorf("%s type = %q, want %q: %s", testCase.path, gotType, testCase.wantType, result.Raw)
+		}
+		var gotValues []string
+		for _, enumValue := range schema.Get("enum").Array() {
+			if enumValue.Type != gjson.String {
+				t.Errorf("%s enum value is not a string: %s", testCase.path, enumValue.Raw)
+			}
+			gotValues = append(gotValues, enumValue.String())
+		}
+		if !reflect.DeepEqual(gotValues, testCase.wantValues) {
+			t.Errorf("%s enum values = %v, want %v: %s", testCase.path, gotValues, testCase.wantValues, result.Raw)
+		}
+	}
+}
+
 // ============================================================================
 // Format field handling (ad-hoc patch removal)
 // ============================================================================
@@ -862,6 +932,14 @@ func TestCleanJSONSchemaForAntigravity_NumericEnumToString(t *testing.T) {
 	}`
 
 	result := CleanJSONSchemaForAntigravity(input)
+	parsed := gjson.Parse(result)
+
+	// Tool enum schemas require both string values and a string type.
+	for _, path := range []string{"properties.priority", "properties.level"} {
+		if gotType := parsed.Get(path + ".type").String(); gotType != "string" {
+			t.Errorf("Tool enum type at %s = %q, want string: %s", path, gotType, result)
+		}
+	}
 
 	// Numeric enum values should be converted to strings
 	if strings.Contains(result, `"enum":[0,1,2]`) {
