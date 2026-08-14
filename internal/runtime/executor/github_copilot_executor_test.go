@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -67,24 +68,24 @@ func TestGitHubCopilotNormalizeModel_StripsSuffix(t *testing.T) {
 
 func TestUseGitHubCopilotResponsesEndpoint_OpenAIResponseSource(t *testing.T) {
 	t.Parallel()
-	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai-response"), "claude-3-5-sonnet") {
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai-response"), "claude-3-5-sonnet", "") {
 		t.Fatal("expected openai-response source to use /responses")
 	}
 }
 
 func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
 	t.Parallel()
-	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5-codex") {
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5-codex", "") {
 		t.Fatal("expected codex model to use /responses")
 	}
 }
 
 func TestUseGitHubCopilotResponsesEndpoint_RegistryResponsesOnlyModel(t *testing.T) {
 	// Not parallel: shares global model registry with DynamicRegistryWinsOverStatic.
-	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4", "") {
 		t.Fatal("expected responses-only registry model to use /responses")
 	}
-	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4-mini") {
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4-mini", "") {
 		t.Fatal("expected responses-only registry model to use /responses")
 	}
 }
@@ -106,19 +107,81 @@ func TestUseGitHubCopilotResponsesEndpoint_DynamicRegistryWinsOverStatic(t *test
 	})
 	defer reg.UnregisterClient(clientID)
 
-	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
+	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4", "") {
 		t.Fatal("expected dynamic registry definition to take precedence over static fallback")
 	}
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("claude"), "gpt-5.4", "") {
+		t.Fatal("expected Claude source to prefer /responses when the dynamic model supports it")
+	}
 
-	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4-mini") {
+	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4-mini", "") {
 		t.Fatal("expected dynamic registry definition to take precedence over static fallback")
+	}
+}
+
+func TestUseGitHubCopilotResponsesEndpoint_RequestedAliasMetadata(t *testing.T) {
+	// Not parallel: mutates the global model registry.
+
+	reg := registry.GetGlobalRegistry()
+	clientID := "github-copilot-alias-endpoint-test"
+	reg.RegisterClient(clientID, githubCopilotAuthType, []*registry.ModelInfo{{
+		ID:                 "copilot/gpt-5.6-sol",
+		SupportedEndpoints: []string{"/responses", "ws:/responses"},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	if !useGitHubCopilotResponsesEndpoint(
+		sdktranslator.FromString("claude"),
+		"gpt-5.6-sol",
+		"copilot/gpt-5.6-sol",
+	) {
+		t.Fatal("expected requested alias metadata to select /responses")
 	}
 }
 
 func TestUseGitHubCopilotResponsesEndpoint_DefaultChat(t *testing.T) {
 	t.Parallel()
-	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "claude-3-5-sonnet") {
+	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "claude-3-5-sonnet", "") {
 		t.Fatal("expected default openai source with non-codex model to use /chat/completions")
+	}
+}
+
+func TestFetchGitHubCopilotModels_PreservesDynamicSupportedEndpoints(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch {
+		case req.URL.Host == "api.github.com" && req.URL.Path == "/copilot_internal/v2/token":
+			body = `{"token":"copilot-api-token","expires_at":4102444800,"endpoints":{"api":"https://api.githubcopilot.com"}}`
+		case req.URL.Host == "api.githubcopilot.com" && req.URL.Path == "/models":
+			body = `{"object":"list","data":[{"id":"gpt-5.6-sol","object":"model","supported_endpoints":["/responses","ws:/responses"],"capabilities":{"limits":{"max_prompt_tokens":272000,"max_output_tokens":128000}}}]}`
+		default:
+			t.Fatalf("unexpected request URL: %s", req.URL)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	models := FetchGitHubCopilotModels(context.Background(), &cliproxyauth.Auth{
+		Metadata: map[string]any{"access_token": "github-access-token"},
+	}, &config.Config{})
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	if got, want := models[0].SupportedEndpoints, []string{"/responses", "ws:/responses"}; !slices.Equal(got, want) {
+		t.Fatalf("supported endpoints = %v, want %v", got, want)
+	}
+
+	clientID := "github-copilot-dynamic-endpoint-test"
+	registry.GetGlobalRegistry().RegisterClient(clientID, githubCopilotAuthType, models)
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(clientID) })
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("claude"), "gpt-5.6-sol", "") {
+		t.Fatal("expected dynamic responses-only model to use /responses")
 	}
 }
 
@@ -633,6 +696,7 @@ func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
 	var gotEditorVersion string
 	var gotIntent string
 	var gotInitiator string
+	var gotBetas string
 	var gotBody []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -643,6 +707,7 @@ func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
 		gotEditorVersion = r.Header.Get("Editor-Version")
 		gotIntent = r.Header.Get("Openai-Intent")
 		gotInitiator = r.Header.Get("X-Initiator")
+		gotBetas = r.Header.Get("Anthropic-Beta")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
@@ -656,7 +721,7 @@ func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
 		expiresAt:   time.Now().Add(time.Hour),
 	}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access-token"}}
-	payload := []byte(`{"model":"claude-sonnet-4.6","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"model":"claude-sonnet-4.6","max_tokens":256,"system":"system prompt","messages":[{"role":"user","content":"hello"}]}`)
 
 	resp, err := e.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-sonnet-4.6",
@@ -689,6 +754,14 @@ func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
 	}
 	if gotInitiator != "user" {
 		t.Fatalf("X-Initiator = %q, want %q", gotInitiator, "user")
+	}
+	if strings.Contains(gotBetas, claudeMidConvSystemBeta) {
+		t.Fatalf("Anthropic-Beta = %q, must not contain %q", gotBetas, claudeMidConvSystemBeta)
+	}
+	for _, message := range gjson.GetBytes(gotBody, "messages").Array() {
+		if message.Get("role").String() == "system" {
+			t.Fatalf("upstream body contains unsupported system-role message: %s", gotBody)
+		}
 	}
 	if gjson.GetBytes(gotBody, "model").String() != "claude-sonnet-4.6" {
 		t.Fatalf("upstream model = %q, want %q", gjson.GetBytes(gotBody, "model").String(), "claude-sonnet-4.6")

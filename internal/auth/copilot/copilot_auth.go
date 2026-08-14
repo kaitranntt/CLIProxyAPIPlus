@@ -226,13 +226,14 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 
 // CopilotModelEntry represents a single model entry returned by the Copilot /models API.
 type CopilotModelEntry struct {
-	ID           string         `json:"id"`
-	Object       string         `json:"object"`
-	Created      int64          `json:"created"`
-	OwnedBy      string         `json:"owned_by"`
-	Name         string         `json:"name,omitempty"`
-	Version      string         `json:"version,omitempty"`
-	Capabilities map[string]any `json:"capabilities,omitempty"`
+	ID                 string         `json:"id"`
+	Object             string         `json:"object"`
+	Created            int64          `json:"created"`
+	OwnedBy            string         `json:"owned_by"`
+	Name               string         `json:"name,omitempty"`
+	Version            string         `json:"version,omitempty"`
+	SupportedEndpoints []string       `json:"supported_endpoints,omitempty"`
+	Capabilities       map[string]any `json:"capabilities,omitempty"`
 }
 
 // CopilotModelLimits holds the token limits returned by the Copilot /models API

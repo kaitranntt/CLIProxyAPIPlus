@@ -306,6 +306,11 @@ func claudeUsesLegacySystemReminder(payload []byte) bool {
 		model = model[slash+1:]
 	}
 	_, legacy := claudeLegacySystemReminderModels[model]
+	if !legacy {
+		// GitHub Copilot uses dotted Claude version aliases (for example,
+		// claude-sonnet-4.6), while Anthropic uses hyphenated model IDs.
+		_, legacy = claudeLegacySystemReminderModels[strings.ReplaceAll(model, ".", "-")]
+	}
 	return legacy
 }
 

@@ -121,7 +121,8 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
-	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model, requestedModel)
 	to := sdktranslator.FromString("openai")
 	if useResponses {
 		to = sdktranslator.FromString("openai-response")
@@ -155,7 +156,6 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	} else {
 		body = normalizeGitHubCopilotChatTools(body)
 	}
-	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "stream", false)
 
@@ -260,7 +260,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
-	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model, requestedModel)
 	to := sdktranslator.FromString("openai")
 	if useResponses {
 		to = sdktranslator.FromString("openai-response")
@@ -294,7 +295,6 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	} else {
 		body = normalizeGitHubCopilotChatTools(body)
 	}
-	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	// Enable stream options for usage stats in stream
@@ -853,18 +853,38 @@ func normalizeGitHubCopilotReasoningField(data []byte) []byte {
 	return data
 }
 
-func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model string) bool {
+func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model, requestedModel string) bool {
 	if sourceFormat.String() == "openai-response" {
 		return true
 	}
-	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
-	if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, githubCopilotAuthType); info != nil {
-		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
+	models := make([]string, 0, 2)
+	for _, candidate := range []string{requestedModel, model} {
+		baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(candidate).ModelName))
+		if baseModel == "" || slices.Contains(models, baseModel) {
+			continue
+		}
+		models = append(models, baseModel)
 	}
-	if info := lookupGitHubCopilotStaticModelInfo(baseModel); info != nil {
-		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
+	for _, candidate := range models {
+		if info := registry.GetGlobalRegistry().GetModelInfo(candidate, githubCopilotAuthType); info != nil {
+			return shouldUseGitHubCopilotResponsesEndpoint(sourceFormat, info.SupportedEndpoints)
+		}
 	}
-	return strings.Contains(baseModel, "codex")
+	for _, candidate := range models {
+		if info := lookupGitHubCopilotStaticModelInfo(candidate); info != nil {
+			return shouldUseGitHubCopilotResponsesEndpoint(sourceFormat, info.SupportedEndpoints)
+		}
+	}
+	return slices.ContainsFunc(models, func(candidate string) bool {
+		return strings.Contains(candidate, "codex")
+	})
+}
+
+func shouldUseGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, endpoints []string) bool {
+	if !containsEndpoint(endpoints, githubCopilotResponsesPath) {
+		return false
+	}
+	return sourceFormat.String() == "claude" || !containsEndpoint(endpoints, githubCopilotChatPath)
 }
 
 func lookupGitHubCopilotStaticModelInfo(model string) *registry.ModelInfo {
@@ -1706,6 +1726,9 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.Description = entry.ID + " via GitHub Copilot"
 			m.ContextLength = defaultCopilotContextLength
 			m.MaxCompletionTokens = defaultCopilotMaxCompletionTokens
+		}
+		if len(entry.SupportedEndpoints) > 0 {
+			m.SupportedEndpoints = append([]string(nil), entry.SupportedEndpoints...)
 		}
 
 		// Override with real limits from the Copilot API when available.
