@@ -125,7 +125,7 @@ func TestUseGitHubCopilotResponsesEndpoint_RequestedAliasMetadata(t *testing.T) 
 	reg := registry.GetGlobalRegistry()
 	clientID := "github-copilot-alias-endpoint-test"
 	reg.RegisterClient(clientID, githubCopilotAuthType, []*registry.ModelInfo{{
-		ID:                 "copilot/gpt-5.6-sol",
+		ID:                 "gpt-5.6-sol-public",
 		SupportedEndpoints: []string{"/responses", "ws:/responses"},
 	}})
 	defer reg.UnregisterClient(clientID)
@@ -133,7 +133,7 @@ func TestUseGitHubCopilotResponsesEndpoint_RequestedAliasMetadata(t *testing.T) 
 	if !useGitHubCopilotResponsesEndpoint(
 		sdktranslator.FromString("claude"),
 		"gpt-5.6-sol",
-		"copilot/gpt-5.6-sol",
+		"gpt-5.6-sol-public",
 	) {
 		t.Fatal("expected requested alias metadata to select /responses")
 	}

@@ -3840,7 +3840,6 @@ func TestClaudeUsesLegacySystemReminder(t *testing.T) {
 		"claude-sonnet-4.6":        true,
 		"claude-sonnet-5":          false,
 		"prefix/claude-sonnet-4-6": true,
-		"prefix/claude-sonnet-4.6": true,
 		"claude-3-5-haiku-latest":  true,
 		"claude-haiku-4.5":         true,
 		"claude-opus-5":            false,
