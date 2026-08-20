@@ -124,6 +124,14 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
 
 			if hasThoughtSignature && (!partTextResult.Exists() || partTextResult.String() == "") && !functionCallResult.Exists() {
+				if (*param).(*Params).ResponseType == 2 && (*param).(*Params).CurrentThinkingSigned {
+					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
+					(*param).(*Params).ResponseIndex++
+					appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, (*param).(*Params).ResponseIndex))
+					(*param).(*Params).ResponseType = 2
+					(*param).(*Params).CurrentThinkingSigned = false
+					(*param).(*Params).HasContent = true
+				}
 				appendSignatureDelta(thoughtSignatureResult.String())
 				continue
 			}

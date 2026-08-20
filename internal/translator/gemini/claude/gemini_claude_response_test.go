@@ -507,3 +507,127 @@ func TestConvertGeminiResponseToClaude_MultipleSignedThoughtChunksSplitBlocks(t 
 		t.Fatalf("expected signature_delta sig2, got: %s", outputText)
 	}
 }
+
+func TestConvertGeminiResponseToClaude_MultipleStandaloneSignedThoughtChunksSplitBlocks(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	chunk1 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thinking 1", "thought": true}]
+			}
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+	chunk2 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"thought": true, "thoughtSignature": "sigA"}]
+			}
+		}]
+	}`)
+	chunk3 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"thought": true, "thoughtSignature": "sigB"}]
+			}
+		}]
+	}`)
+	chunk4 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thinking 2", "thought": true}]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk1, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk3, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk4, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, `"type":"content_block_start","index":0,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking content_block_start at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sigA"}`) {
+		t.Fatalf("expected signature_delta sigA on index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":0`) {
+		t.Fatalf("expected thinking content_block_stop at index 0 before second standalone signature, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_start","index":1,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking content_block_start at index 1 for second signed block, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sigB"}`) {
+		t.Fatalf("expected signature_delta sigB on index 1, got: %s", outputText)
+	}
+}
+
+func TestConvertGeminiResponseToClaude_ThinkingContinuationsAfterSignedAndVisibleText(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	chunk1 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thought 1", "thought": true, "thoughtSignature": "sig1"}]
+			}
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+	chunk2 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "visible text"}]
+			}
+		}]
+	}`)
+	chunk3 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thought 2 part A", "thought": true}]
+			}
+		}]
+	}`)
+	chunk4 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thought 2 part B", "thought": true}]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk1, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk3, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk4, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, `"type":"content_block_start","index":0,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking block 0 start, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_start","index":1,"content_block":{"type":"text"`) {
+		t.Fatalf("expected text block 1 start, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_start","index":2,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking block 2 start, got: %s", outputText)
+	}
+	if strings.Contains(outputText, `"type":"content_block_start","index":3`) {
+		t.Fatalf("unexpected content_block_start at index 3: thought 2 continuation was improperly split into separate blocks, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"thought 2 part B"}`) {
+		t.Fatalf("expected thought 2 part B to be in block 2, got: %s", outputText)
+	}
+}
