@@ -32,6 +32,7 @@ var resumableCooldownReasons = []string{
 	"unauthorized",
 	"payment_required",
 	"not_found",
+	"model_not_supported",
 	"quota",
 }
 

@@ -319,6 +319,63 @@ func TestManager_ModelSpecificSuspensionSurvivesSiblingSuccess(t *testing.T) {
 	}
 }
 
+func TestManager_ModelNotSupportedSuspensionResumesOnOwnSuccess(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "model-not-supported-resume-auth"
+	model := "model-a"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai", []*registry.ModelInfo{
+		{ID: model},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	if _, errRegister := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {Status: StatusActive},
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Fail model with model_not_supported -> model should be suspended in registry
+	manager.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: "openai",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadRequest, Code: "model_not_supported", Message: "model not supported"},
+	})
+
+	if count := reg.GetModelCount(model); count != 0 {
+		t.Fatalf("registry model count for model after suspension = %d, want 0", count)
+	}
+	if reason := reg.GetClientModelSuspensionReason(authID, model); reason != "model_not_supported" {
+		t.Fatalf("suspension reason = %q, want model_not_supported", reason)
+	}
+
+	// Success on model -> should resume model in registry
+	manager.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: "openai",
+		Model:    model,
+		Success:  true,
+	})
+
+	if count := reg.GetModelCount(model); count != 1 {
+		t.Fatalf("registry model count for model after success = %d, want 1", count)
+	}
+	if reason := reg.GetClientModelSuspensionReason(authID, model); reason != "" {
+		t.Fatalf("suspension reason after success = %q, want empty", reason)
+	}
+}
+
 // TestManager_ModelSpecificResumableSiblingSuspensionSurvivesSiblingSuccess verifies that a
 // sibling model suspended for a resumable model-specific reason (not_found, quota,
 // payment_required) keeps its registry suspension when a different model of the same credential
