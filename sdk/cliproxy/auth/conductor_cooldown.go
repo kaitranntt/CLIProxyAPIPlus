@@ -24,6 +24,25 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
+// resumableCooldownReasons are the registry suspension reasons a successful result can clear for
+// the model that just succeeded (they include model-specific reasons like not_found and quota).
+var resumableCooldownReasons = []string{
+	"invalid_api_key",
+	"invalid_grant",
+	"unauthorized",
+	"payment_required",
+	"not_found",
+	"quota",
+}
+
+// credentialWideCooldownReasons are the suspension reasons that span every model of a credential
+// and may therefore be cleared on sibling models when a different model of the same credential
+// succeeds. Only invalid_api_key is propagated credential-wide by SuspendClientModel; invalid_grant,
+// unauthorized, and model-specific reasons are recorded per-model and must not resume siblings.
+var credentialWideCooldownReasons = []string{
+	"invalid_api_key",
+}
+
 // SetQuotaCooldownDisabled toggles auth/model cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -963,13 +982,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, modelKey)
 	}
 	if shouldResumeModel {
+		// Sibling models resume only for credential-wide reasons (invalid_api_key); model-specific
+		// suspensions (not_found, quota, payment_required, ...) must survive until that sibling
+		// succeeds on its own.
 		for _, m := range modelsForRegisteredAuth(result.AuthID) {
-			if registry.GetGlobalRegistry().GetClientModelSuspensionReason(result.AuthID, m) == "invalid_api_key" {
-				registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, m)
-			}
+			registry.GetGlobalRegistry().ResumeClientModelIfReason(result.AuthID, m, credentialWideCooldownReasons...)
 		}
 		if modelKey != "" {
-			registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, modelKey)
+			registry.GetGlobalRegistry().ResumeClientModelIfReason(result.AuthID, modelKey, resumableCooldownReasons...)
 		}
 	} else if shouldSuspendModel {
 		if suspendReason == "invalid_api_key" {
@@ -980,7 +1000,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, modelKey, suspendReason)
 			}
 		} else {
-			registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, modelKey, suspendReason)
+			// A model-specific reason must overwrite a stale credential-wide one, otherwise the
+			// sibling-resume loop above would clear this suspension when another model succeeds.
+			registry.GetGlobalRegistry().SuspendClientModelReplacingReasons(result.AuthID, modelKey, suspendReason, credentialWideCooldownReasons...)
 		}
 	}
 
