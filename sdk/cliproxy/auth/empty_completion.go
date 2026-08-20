@@ -271,9 +271,6 @@ func isMeaningfulToolCall(raw json.RawMessage) bool {
 		}
 		return false
 	}
-	if strings.TrimSpace(call.ID) != "" {
-		return true
-	}
 	if strings.TrimSpace(call.Function.Name) != "" || hasMeaningfulJSONArguments(call.Function.Arguments) {
 		return true
 	}
@@ -774,9 +771,7 @@ func (a *emptyCompletionAccum) evalOpenAIResponseRawOutput(raw json.RawMessage) 
 }
 
 func hasMeaningfulResponsesCallItem(item openAIResponseOutputItem) bool {
-	return strings.TrimSpace(item.ID) != "" ||
-		strings.TrimSpace(item.CallID) != "" ||
-		strings.TrimSpace(item.Name) != "" ||
+	return strings.TrimSpace(item.Name) != "" ||
 		hasMeaningfulJSONArguments(item.Arguments) ||
 		strings.TrimSpace(item.Input) != "" ||
 		strings.TrimSpace(item.Result) != ""
