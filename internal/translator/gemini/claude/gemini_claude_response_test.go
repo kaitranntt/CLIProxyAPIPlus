@@ -200,7 +200,7 @@ func TestConvertGeminiResponseToClaudeNonStream_ThinkingSignatureNotOverwrittenB
 	}
 }
 
-func TestConvertGeminiResponseToClaude_TextWithThoughtSignatureWithoutThoughtFlag(t *testing.T) {
+func TestConvertGeminiResponseToClaude_VisibleTextWithThoughtSignatureEmitsCarrierAndText(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	chunk := []byte(`{
 		"candidates": [{
@@ -209,6 +209,10 @@ func TestConvertGeminiResponseToClaude_TextWithThoughtSignatureWithoutThoughtFla
 			},
 			"finishReason": "STOP"
 		}],
+		"usageMetadata": {
+			"promptTokenCount": 10,
+			"candidatesTokenCount": 5
+		},
 		"modelVersion": "gemini-test",
 		"responseId": "resp-test"
 	}`)
@@ -219,18 +223,30 @@ func TestConvertGeminiResponseToClaude_TextWithThoughtSignatureWithoutThoughtFla
 	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
 	outputText := string(output)
 
-	if strings.Contains(outputText, `"content_block":{"type":"thinking"`) {
-		t.Fatalf("text with thoughtSignature without thought flag must not start a thinking block in stream: %s", outputText)
+	if !strings.Contains(outputText, `"type":"content_block_start","index":0,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected carrier thinking block at index 0, got: %s", outputText)
 	}
-	if !strings.Contains(outputText, `"content_block":{"type":"text"`) {
-		t.Fatalf("expected text content block in stream, got: %s", outputText)
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-carrier"}`) {
+		t.Fatalf("expected signature_delta sig-carrier at index 0, got: %s", outputText)
 	}
-	if !strings.Contains(outputText, `"text":"Tokyo: 20C"`) {
-		t.Fatalf("expected text delta Tokyo: 20C in stream, got: %s", outputText)
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":0`) {
+		t.Fatalf("expected content_block_stop at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_start","index":1,"content_block":{"type":"text"`) {
+		t.Fatalf("expected text content_block_start at index 1, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Tokyo: 20C"}`) {
+		t.Fatalf("expected text_delta Tokyo: 20C at index 1, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":1`) {
+		t.Fatalf("expected text content_block_stop at index 1, got: %s", outputText)
+	}
+	if sigCount := strings.Count(outputText, `"type":"signature_delta"`); sigCount != 1 {
+		t.Fatalf("expected exactly 1 signature_delta, got %d: %s", sigCount, outputText)
 	}
 }
 
-func TestConvertGeminiResponseToClaude_FunctionCallWithThoughtSignature(t *testing.T) {
+func TestConvertGeminiResponseToClaude_FunctionCallWithThoughtSignatureEmitsCarrierAndTool(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	chunk := []byte(`{
 		"candidates": [{
@@ -242,6 +258,10 @@ func TestConvertGeminiResponseToClaude_FunctionCallWithThoughtSignature(t *testi
 			},
 			"finishReason": "STOP"
 		}],
+		"usageMetadata": {
+			"promptTokenCount": 10,
+			"candidatesTokenCount": 5
+		},
 		"modelVersion": "gemini-test",
 		"responseId": "resp-test"
 	}`)
@@ -252,14 +272,26 @@ func TestConvertGeminiResponseToClaude_FunctionCallWithThoughtSignature(t *testi
 	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
 	outputText := string(output)
 
-	if strings.Contains(outputText, `"content_block":{"type":"thinking"`) {
-		t.Fatalf("functionCall with thoughtSignature must not start an empty thinking block in stream: %s", outputText)
+	if !strings.Contains(outputText, `"type":"content_block_start","index":0,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected carrier thinking block at index 0, got: %s", outputText)
 	}
-	if !strings.Contains(outputText, `"content_block":{"type":"tool_use"`) {
-		t.Fatalf("expected tool_use block in stream, got: %s", outputText)
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-fc"}`) {
+		t.Fatalf("expected signature_delta sig-fc at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":0`) {
+		t.Fatalf("expected carrier thinking stop at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_start","index":1,"content_block":{"type":"tool_use"`) {
+		t.Fatalf("expected tool_use block start at index 1, got: %s", outputText)
 	}
 	if !strings.Contains(outputText, `"name":"get_weather"`) {
-		t.Fatalf("expected tool name get_weather in stream, got: %s", outputText)
+		t.Fatalf("expected tool name get_weather at index 1, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":1`) {
+		t.Fatalf("expected tool_use block stop at index 1, got: %s", outputText)
+	}
+	if sigCount := strings.Count(outputText, `"type":"signature_delta"`); sigCount != 1 {
+		t.Fatalf("expected exactly 1 signature_delta, got %d: %s", sigCount, outputText)
 	}
 }
 
@@ -757,6 +789,114 @@ func TestConvertGeminiResponseToClaude_ThreeConsecutiveSignaturesSplitBlocks(t *
 	if !strings.Contains(outputText, `"type":"content_block_stop","index":2`) {
 		t.Fatalf("expected thinking content_block_stop at index 2, got: %s", outputText)
 	}
+	if sigCount := strings.Count(outputText, `"type":"signature_delta"`); sigCount != 3 {
+		t.Fatalf("expected exactly 3 signature_deltas, got %d: %s", sigCount, outputText)
+	}
+}
+
+
+func TestConvertGeminiResponseToClaude_MultiPartMixedThoughtVisibleToolSignatures(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	chunk1 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thinking step 1", "thought": true, "thoughtSignature": "sig1"}]
+			}
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+	chunk2 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "intermediate explanation", "thoughtSignature": "sig2"}]
+			}
+		}]
+	}`)
+	chunk3 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{
+					"functionCall": {"name": "search", "args": {"q": "go"}},
+					"thoughtSignature": "sig3"
+				}]
+			},
+			"finishReason": "STOP"
+		}],
+		"usageMetadata": {
+			"promptTokenCount": 10,
+			"candidatesTokenCount": 5
+		},
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk1, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk3, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	// Block 0: thinking step 1 + sig1
+	if !strings.Contains(outputText, `"type":"content_block_start","index":0,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking start at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking step 1"}`) {
+		t.Fatalf("expected thinking_delta at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig1"}`) {
+		t.Fatalf("expected signature_delta sig1 at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":0`) {
+		t.Fatalf("expected stop at index 0, got: %s", outputText)
+	}
+
+	// Block 1: carrier thinking + sig2
+	if !strings.Contains(outputText, `"type":"content_block_start","index":1,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected carrier thinking start at index 1, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig2"}`) {
+		t.Fatalf("expected signature_delta sig2 at index 1, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":1`) {
+		t.Fatalf("expected stop at index 1, got: %s", outputText)
+	}
+
+	// Block 2: text intermediate explanation
+	if !strings.Contains(outputText, `"type":"content_block_start","index":2,"content_block":{"type":"text"`) {
+		t.Fatalf("expected text start at index 2, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"intermediate explanation"}`) {
+		t.Fatalf("expected text_delta at index 2, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":2`) {
+		t.Fatalf("expected stop at index 2, got: %s", outputText)
+	}
+
+	// Block 3: carrier thinking + sig3
+	if !strings.Contains(outputText, `"type":"content_block_start","index":3,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected carrier thinking start at index 3, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_delta","index":3,"delta":{"type":"signature_delta","signature":"sig3"}`) {
+		t.Fatalf("expected signature_delta sig3 at index 3, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":3`) {
+		t.Fatalf("expected stop at index 3, got: %s", outputText)
+	}
+
+	// Block 4: tool_use search
+	if !strings.Contains(outputText, `"type":"content_block_start","index":4,"content_block":{"type":"tool_use"`) {
+		t.Fatalf("expected tool_use start at index 4, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"name":"search"`) {
+		t.Fatalf("expected tool_use name search at index 4, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":4`) {
+		t.Fatalf("expected stop at index 4, got: %s", outputText)
+	}
+
 	if sigCount := strings.Count(outputText, `"type":"signature_delta"`); sigCount != 3 {
 		t.Fatalf("expected exactly 3 signature_deltas, got %d: %s", sigCount, outputText)
 	}
