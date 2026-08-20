@@ -121,7 +121,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			}
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
 
-			if hasThoughtSignature && !partTextResult.Exists() && !functionCallResult.Exists() {
+			if hasThoughtSignature && (!partTextResult.Exists() || partTextResult.String() == "") && !functionCallResult.Exists() {
 				appendSignatureDelta(thoughtSignatureResult.String())
 				continue
 			}
@@ -129,7 +129,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() || hasThoughtSignature {
+				if partResult.Get("thought").Bool() {
 					if hasThoughtSignature && partTextResult.String() == "" {
 						appendSignatureDelta(thoughtSignatureResult.String())
 						continue
@@ -320,7 +320,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	var thinkingSignature string
 	flushThinking := func() {
-		if thinkingBuilder.Len() == 0 && thinkingSignature == "" {
+		if thinkingBuilder.Len() == 0 {
 			return
 		}
 		block := []byte(`{"type":"thinking","thinking":""}`)
@@ -340,12 +340,13 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				thoughtSignatureResult = part.Get("thought_signature")
 			}
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-			if hasThoughtSignature {
+			isThought := part.Get("thought").Bool()
+			if isThought && hasThoughtSignature {
 				thinkingSignature = thoughtSignatureResult.String()
 			}
 
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
-				if part.Get("thought").Bool() || hasThoughtSignature {
+				if isThought {
 					flushText()
 					thinkingBuilder.WriteString(text.String())
 					continue

@@ -100,14 +100,13 @@ func TestConvertGeminiResponseToClaudeNonStream_ThoughtSignature(t *testing.T) {
 	}
 }
 
-func TestConvertGeminiResponseToClaudeNonStream_ThoughtSignatureWithoutThoughtFlag(t *testing.T) {
+func TestConvertGeminiResponseToClaudeNonStream_TextWithThoughtSignatureWithoutThoughtFlag(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	rawResponse := []byte(`{
 		"candidates": [{
 			"content": {
 				"parts": [
-					{"text": "internal reasoning", "thought": false, "thoughtSignature": "sig-no-flag"},
-					{"text": "final answer"}
+					{"text": "Tokyo: 20C", "thoughtSignature": "sig-carrier"}
 				]
 			},
 			"finishReason": "STOP"
@@ -120,20 +119,187 @@ func TestConvertGeminiResponseToClaudeNonStream_ThoughtSignatureWithoutThoughtFl
 	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
 	parsed := gjson.ParseBytes(output)
 
+	if parsed.Get("content.#").Int() != 1 {
+		t.Fatalf("expected exactly 1 content block, got: %s", output)
+	}
+	if parsed.Get("content.0.type").String() != "text" {
+		t.Fatalf("text part with thoughtSignature without thought flag must remain text, got: %s", output)
+	}
+	if parsed.Get("content.0.text").String() != "Tokyo: 20C" {
+		t.Fatalf("expected text 'Tokyo: 20C', got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_FunctionCallWithThoughtSignature(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{
+						"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}},
+						"thoughtSignature": "sig-fc"
+					}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.#").Int() != 1 {
+		t.Fatalf("expected exactly 1 block without empty thinking block, got: %s", output)
+	}
+	if parsed.Get("content.0.type").String() != "tool_use" {
+		t.Fatalf("expected tool_use block, got: %s", output)
+	}
+	if parsed.Get("content.0.name").String() != "get_weather" {
+		t.Fatalf("expected tool name get_weather, got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_ThinkingSignatureNotOverwrittenByFunctionCall(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "thinking reasoning", "thought": true, "thoughtSignature": "sig-thinking"},
+					{
+						"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}},
+						"thoughtSignature": "sig-function-call"
+					}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.#").Int() != 2 {
+		t.Fatalf("expected 2 blocks (thinking and tool_use), got: %s", output)
+	}
 	if parsed.Get("content.0.type").String() != "thinking" {
-		t.Fatalf("part with thoughtSignature must be classified as thinking, got: %s", output)
+		t.Fatalf("expected first block to be thinking, got: %s", output)
 	}
-	if parsed.Get("content.0.thinking").String() != "internal reasoning" {
-		t.Fatalf("expected internal reasoning in thinking block, got: %s", output)
+	if parsed.Get("content.0.signature").String() != "sig-thinking" {
+		t.Fatalf("expected thinking signature to be sig-thinking, not overwritten by functionCall, got: %s", output)
 	}
-	if parsed.Get("content.0.signature").String() != "sig-no-flag" {
-		t.Fatalf("expected signature in thinking block, got: %s", output)
+	if parsed.Get("content.1.type").String() != "tool_use" {
+		t.Fatalf("expected second block to be tool_use, got: %s", output)
 	}
-	if parsed.Get("content.1.type").String() != "text" {
-		t.Fatalf("expected text block, got: %s", output)
+}
+
+func TestConvertGeminiResponseToClaude_TextWithThoughtSignatureWithoutThoughtFlag(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	chunk := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "Tokyo: 20C", "thoughtSignature": "sig-carrier"}]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if strings.Contains(outputText, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("text with thoughtSignature without thought flag must not start a thinking block in stream: %s", outputText)
 	}
-	if parsed.Get("content.1.text").String() != "final answer" {
-		t.Fatalf("expected final answer in text block, got: %s", output)
+	if !strings.Contains(outputText, `"content_block":{"type":"text"`) {
+		t.Fatalf("expected text content block in stream, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"text":"Tokyo: 20C"`) {
+		t.Fatalf("expected text delta Tokyo: 20C in stream, got: %s", outputText)
+	}
+}
+
+func TestConvertGeminiResponseToClaude_FunctionCallWithThoughtSignature(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	chunk := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{
+					"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}},
+					"thoughtSignature": "sig-fc"
+				}]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if strings.Contains(outputText, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("functionCall with thoughtSignature must not start an empty thinking block in stream: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"content_block":{"type":"tool_use"`) {
+		t.Fatalf("expected tool_use block in stream, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"name":"get_weather"`) {
+		t.Fatalf("expected tool name get_weather in stream, got: %s", outputText)
+	}
+}
+
+func TestConvertGeminiResponseToClaude_ThinkingSignatureNotOverwrittenByFunctionCall(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	thinkingChunk := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thinking reasoning", "thought": true, "thoughtSignature": "sig-thinking"}]
+			}
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+	toolChunk := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{
+					"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}},
+					"thoughtSignature": "sig-fc"
+				}]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, thinkingChunk, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, toolChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, `"signature":"sig-thinking"`) {
+		t.Fatalf("expected thinking signature to be sig-thinking, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"content_block":{"type":"tool_use"`) {
+		t.Fatalf("expected tool_use block, got: %s", outputText)
 	}
 }
 
