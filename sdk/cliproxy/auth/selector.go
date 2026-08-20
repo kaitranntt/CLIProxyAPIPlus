@@ -627,10 +627,9 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback   Selector
-	cache      *SessionCache
-	quarantine *SessionCache
-	bindMu     sync.Mutex
+	fallback      Selector
+	cache         *SessionCache
+	fallbackCache *SessionCache
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -656,9 +655,9 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback:   cfg.Fallback,
-		cache:      NewSessionCache(cfg.TTL),
-		quarantine: NewSessionCache(cfg.TTL),
+		fallback:      cfg.Fallback,
+		cache:         NewSessionCache(cfg.TTL),
+		fallbackCache: NewSessionCache(cfg.TTL),
 	}
 }
 
@@ -711,7 +710,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 	}
-	available = s.excludeSessionQuarantine(cacheKey, fallbackKey, available)
 	fallbackAuths := highestPriorityAuths(available)
 	bind := func(authID string) {
 		if fallbackKey != "" {
@@ -721,169 +719,115 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		s.cache.Set(cacheKey, authID)
 	}
 
-	// Fast path outside bindMu: reuse valid cached binding without holding bindMu.
+	collectTempFallbackKeys := func() []string {
+		keys := []string{cacheKey}
+		if fallbackKey != "" {
+			keys = append(keys, fallbackKey)
+		}
+		if aliases := s.cache.Aliases(cacheKey); len(aliases) > 0 {
+			for _, alias := range aliases {
+				if alias != "" {
+					keys = append(keys, alias)
+				}
+			}
+		}
+		if fallbackKey != "" {
+			if aliases := s.cache.Aliases(fallbackKey); len(aliases) > 0 {
+				for _, alias := range aliases {
+					if alias != "" {
+						keys = append(keys, alias)
+					}
+				}
+			}
+		}
+		return keys
+	}
+	bindTempFallback := func(authID string) {
+		if s.fallbackCache != nil {
+			s.fallbackCache.SetAliases(authID, collectTempFallbackKeys()...)
+		}
+	}
+	invalidateTempFallback := func() {
+		if s.fallbackCache != nil {
+			for _, key := range collectTempFallbackKeys() {
+				s.fallbackCache.Invalidate(key)
+			}
+		}
+	}
+	getTempFallbackAuth := func() (*Auth, bool) {
+		if s.fallbackCache == nil {
+			return nil, false
+		}
+		for _, key := range collectTempFallbackKeys() {
+			if tempAuthID, ok := s.fallbackCache.GetAndRefresh(key); ok {
+				for _, auth := range available {
+					if auth.ID == tempAuthID {
+						return auth, true
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				invalidateTempFallback()
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
 		}
-	} else if fallbackKey != "" {
-		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-			for _, auth := range available {
-				if auth.ID == cachedAuthID {
-					bind(auth.ID)
-					entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-					return auth, nil
-				}
-			}
+		// Primary cached auth is unavailable (cooling down).
+		// Check for an active sticky temporary fallback binding:
+		if fallbackAuth, ok := getTempFallbackAuth(); ok {
+			entry.Infof("session-affinity: sticky fallback cache hit | session=%s primary_cooling=%s fallback_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, fallbackAuth.ID, provider, model)
+			return fallbackAuth, nil
 		}
+		// Reselect fallback auth and record it as the sticky temporary fallback across aliases
+		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		if err != nil {
+			return nil, err
+		}
+		bindTempFallback(auth.ID)
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselected sticky fallback | session=%s primary_cooling=%s fallback_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
+		return auth, nil
 	}
 
-	s.bindMu.Lock()
-	defer s.bindMu.Unlock()
-
-	// Under bindMu, re-check if a concurrent request refreshed or rebound the session.
-	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
-		for _, auth := range available {
-			if auth.ID == cachedAuthID {
-				entry.Infof("session-affinity: concurrent cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				bind(auth.ID)
-				return auth, nil
-			}
-		}
-	} else if fallbackKey != "" {
-		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-			for _, auth := range available {
-				if auth.ID == cachedAuthID {
-					entry.Infof("session-affinity: concurrent cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-					bind(auth.ID)
-					return auth, nil
-				}
-			}
-		}
-	}
-
-	// Authoritative stale observation conducted under bindMu using non-refreshing token read.
-	// Observe both alias groups: they may be split across different auths, in
-	// which case failover must reconcile both, not just the first one found.
-	staleKey := cacheKey
-	staleAuthID, staleGen, staleAliases, hasStale := s.cache.GetWithGeneration(cacheKey)
-	splitAuthID := ""
-	var splitGen uint64
-	var splitAliases []string
-	hasSplit := false
 	if fallbackKey != "" {
-		splitAuthID, splitGen, splitAliases, hasSplit = s.cache.GetWithGeneration(fallbackKey)
-	}
-	splitGroups := hasStale && hasSplit && staleAuthID != splitAuthID
-	if !hasStale && hasSplit {
-		staleKey = fallbackKey
-		staleAuthID, staleGen, staleAliases, hasStale = splitAuthID, splitGen, splitAliases, true
+		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+			for _, auth := range available {
+				if auth.ID == cachedAuthID {
+					invalidateTempFallback()
+					bind(auth.ID)
+					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+					return auth, nil
+				}
+			}
+			if fallbackAuth, ok := getTempFallbackAuth(); ok {
+				entry.Infof("session-affinity: sticky secondary fallback cache hit | session=%s fallback=%s temp_auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), fallbackAuth.ID, provider, model)
+				return fallbackAuth, nil
+			}
+			auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+			if err != nil {
+				return nil, err
+			}
+			bindTempFallback(auth.ID)
+			entry.Infof("session-affinity: fallback cache hit but auth unavailable, reselected sticky fallback | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+			return auth, nil
+		}
 	}
 
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
 	}
-
-	if hasStale {
-		if splitGroups {
-			// Split alias groups (prompt-cache and conversation aliases bound to
-			// different auths): merge BOTH alias sets into a single group bound
-			// to the selected auth. Rebinding the groups separately would leave
-			// two groups on the same auth, and later housekeeping (OnResult)
-			// processes only the group holding the request's primary key — the
-			// surviving split group would keep selecting a failed auth.
-			if !s.mergeSplitAliasGroupsCAS(cacheKey, fallbackKey, auth.ID) {
-				entry.Infof("session-affinity: split-group merge lost to concurrent writer after retries | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-			}
-		} else {
-			additional := []string{cacheKey}
-			if fallbackKey != "" {
-				additional = append(additional, fallbackKey)
-			}
-			if s.rebindAliasGroupCAS(staleKey, staleAuthID, staleGen, staleAliases, auth.ID, additional) {
-				entry.Infof("session-affinity: rebound stale alias group | session=%s oldAuth=%s newAuth=%s gen=%d", truncateSessionID(primaryID), staleAuthID, auth.ID, staleGen)
-			} else {
-				entry.Infof("session-affinity: CAS rebind aborted due to concurrent mutation, serving selected auth statelessly | session=%s auth=%s", truncateSessionID(primaryID), auth.ID)
-			}
-		}
-		return auth, nil
-	}
-
 	bind(auth.ID)
 	entry.Infof("session-affinity: cache miss, bound candidate | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
 }
 
-// rebindAliasGroupCAS atomically rebinds a session alias group to newAuthID.
-// When the compare-and-swap loses to a concurrent writer, the group is
-// re-observed and the binding retried (bounded), so the auth selected for
-// this request is not silently dropped by a stale generation.
-func (s *SessionAffinitySelector) rebindAliasGroupCAS(sessionKey string, expectedAuthID string, expectedGen uint64, expectedAliases []string, newAuthID string, additionalAliases []string) bool {
-	for attempt := 0; attempt < 3; attempt++ {
-		if s.cache.CompareAndReplaceAliases(expectedAuthID, expectedGen, expectedAliases, newAuthID, additionalAliases...) {
-			return true
-		}
-		authID, gen, aliases, ok := s.cache.GetWithGeneration(sessionKey)
-		if !ok {
-			return false
-		}
-		expectedAuthID, expectedGen, expectedAliases = authID, gen, aliases
-	}
-	return false
-}
-
-// mergeSplitAliasGroupsCAS reconciles two split session alias groups (a
-// prompt-cache alias and a conversation alias previously bound to different
-// auths) into a single group bound to authID. Merging matters because later
-// housekeeping (OnResult) processes only the group holding the request's
-// primary key: two surviving groups would let the conversation-only alias
-// keep selecting a failed auth. The merge is retried with fresh observation
-// when a concurrent writer invalidates the expectations (bounded).
-func (s *SessionAffinitySelector) mergeSplitAliasGroupsCAS(cacheKey, fallbackKey string, authID string) bool {
-	// retainedF holds the fallback group's aliases once its delete has
-	// committed. A retry after a lost primary CAS would otherwise re-observe
-	// the (now deleted) fallback entry and rebuild merged from cacheKey and
-	// fallbackKey alone, permanently dropping the fallback group's
-	// historical aliases from the rebound group.
-	//
-	// Mirror of CLIProxyAPI e768fba9.
-	var retainedF []string
-	var deletedAuthF string
-	for attempt := 0; attempt < 3; attempt++ {
-		authP, genP, aliasesP, okP := s.cache.GetWithGeneration(cacheKey)
-		authF, genF, aliasesF, okF := s.cache.GetWithGeneration(fallbackKey)
-		if !okF {
-			aliasesF = retainedF
-		}
-		merged := mergeSessionAliases(aliasesP, aliasesF...)
-		merged = mergeSessionAliases(merged, cacheKey, fallbackKey)
-		if okF && authF != authID {
-			removed := s.cache.CompareAndDeleteGroup(fallbackKey, authF, genF, aliasesF)
-			if removed == nil {
-				continue
-			}
-			deletedAuthF = authF
-			retainedF = mergeSessionAliases(retainedF, removed...)
-		}
-		if okP {
-			if s.cache.CompareAndReplaceAliases(authP, genP, aliasesP, authID, merged...) {
-				return true
-			}
-			continue
-		}
-		s.cache.SetAliases(authID, merged...)
-		return true
-	}
-	if len(retainedF) > 0 && deletedAuthF != "" {
-		s.cache.RestoreAliasesIfAbsent(deletedAuthF, retainedF...)
-	}
-	return false
-}
 
 // OnResult handles session affinity binding or release based on execution outcome.
 func (s *SessionAffinitySelector) OnResult(res Result) {
@@ -916,79 +860,83 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
-
-	if res.Success {
+	collectResultTempFallbackKeys := func() []string {
+		keys := []string{cacheKey}
 		if fallbackKey != "" {
-			s.cache.SetAliases(res.AuthID, cacheKey, fallbackKey)
-		} else if current, ok := s.cache.Get(cacheKey); !ok || current == res.AuthID {
-			// Create or refresh in place; a delayed success from a stale auth
-			// must not steal back a binding that already rebound to another.
-			s.cache.Set(cacheKey, res.AuthID)
+			keys = append(keys, fallbackKey)
 		}
-		return
-	}
-
-	if res.Error != nil && shouldSkipCredentialCooldown(res.Error) {
-		return
-	}
-
-	var aliases []string
-	if authID, _, groupAliases, ok := s.cache.GetWithGeneration(cacheKey); ok && authID == res.AuthID {
-		aliases = groupAliases
-		s.cache.Invalidate(cacheKey)
-	} else if fallbackKey != "" {
-		if authID, _, groupAliases, ok := s.cache.GetWithGeneration(fallbackKey); ok && authID == res.AuthID {
-			aliases = groupAliases
-			s.cache.Invalidate(fallbackKey)
-		}
-	}
-	if len(aliases) == 0 {
-		aliases = []string{cacheKey, fallbackKey}
-	}
-	s.quarantineSessionAuth(aliases, res.AuthID, res.RetryAfter)
-}
-
-func (s *SessionAffinitySelector) excludeSessionQuarantine(cacheKey, fallbackKey string, auths []*Auth) []*Auth {
-	if s == nil || s.quarantine == nil || len(auths) == 0 {
-		return auths
-	}
-	filtered := make([]*Auth, 0, len(auths))
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		blocked := false
-		for _, key := range []string{cacheKey, fallbackKey} {
-			if key == "" {
-				continue
-			}
-			if _, ok := s.quarantine.Get(key + "::failed::" + auth.ID); ok {
-				blocked = true
-				break
+		if aliases := s.cache.Aliases(cacheKey); len(aliases) > 0 {
+			for _, alias := range aliases {
+				if alias != "" {
+					keys = append(keys, alias)
+				}
 			}
 		}
-		if !blocked {
-			filtered = append(filtered, auth)
+		if fallbackKey != "" {
+			if aliases := s.cache.Aliases(fallbackKey); len(aliases) > 0 {
+				for _, alias := range aliases {
+					if alias != "" {
+						keys = append(keys, alias)
+					}
+				}
+			}
 		}
+		return keys
 	}
-	return filtered
-}
-
-func (s *SessionAffinitySelector) quarantineSessionAuth(cacheKeys []string, authID string, retryAfter *time.Duration) {
-	if s == nil || s.quarantine == nil || authID == "" {
+	if res.Success {
+		s.cache.Touch(cacheKey, res.AuthID)
+		if fallbackKey != "" {
+			s.cache.Touch(fallbackKey, res.AuthID)
+		}
+		if s.fallbackCache != nil {
+			for _, tk := range collectResultTempFallbackKeys() {
+				s.fallbackCache.Touch(tk, res.AuthID)
+			}
+		}
 		return
 	}
-	delay := 5 * time.Second
-	if retryAfter != nil && *retryAfter > 0 {
-		delay = *retryAfter
-	}
-	expiresAt := time.Now().Add(delay)
-	for _, key := range cacheKeys {
-		if key == "" {
-			continue
+
+	if res.Error != nil && isTerminalSessionAffinityError(res.Error) {
+		s.cache.CompareAndDelete(cacheKey, res.AuthID)
+		if fallbackKey != "" {
+			s.cache.CompareAndDelete(fallbackKey, res.AuthID)
 		}
-		quarantineKey := key + "::failed::" + authID
-		s.quarantine.setAliasesUntil(authID, expiresAt, quarantineKey)
+		if s.fallbackCache != nil {
+			for _, tk := range collectResultTempFallbackKeys() {
+				s.fallbackCache.CompareAndDelete(tk, res.AuthID)
+			}
+		}
+	}
+}
+
+// isTerminalSessionAffinityError reports whether a failure represents a permanent
+// credential or authorization rejection (such as an invalid API key, revoked grant,
+// depleted balance, or unsupported model on the account) that warrants purging
+// the long-lived session binding from cache. Transient errors (5xx, 429, timeouts,
+// cloudflare challenge) retain affinity so the session returns to its warm prompt
+// cache once the cooldown or rate limit clears.
+func isTerminalSessionAffinityError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if shouldSkipCredentialCooldown(err) {
+		return false
+	}
+	if isInvalidGrantResultError(err) || isModelSupportResultError(err) {
+		return true
+	}
+	if isCloudflareChallengeResultError(err) {
+		return false
+	}
+	statusCode := statusCodeFromResult(err)
+	switch statusCode {
+	case http.StatusUnauthorized,   // 401: invalid API key / unauthorized
+		http.StatusPaymentRequired, // 402: insufficient balance / credits depleted
+		http.StatusForbidden,       // 403: account banned / forbidden
+		http.StatusNotFound:        // 404: model not found / unsupported for account
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1015,8 +963,8 @@ func (s *SessionAffinitySelector) Stop() {
 	if s.cache != nil {
 		s.cache.Stop()
 	}
-	if s.quarantine != nil {
-		s.quarantine.Stop()
+	if s.fallbackCache != nil {
+		s.fallbackCache.Stop()
 	}
 }
 
@@ -1026,8 +974,8 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	if s.cache != nil {
 		s.cache.InvalidateAuth(authID)
 	}
-	if s.quarantine != nil {
-		s.quarantine.InvalidateAuth(authID)
+	if s.fallbackCache != nil {
+		s.fallbackCache.InvalidateAuth(authID)
 	}
 }
 
