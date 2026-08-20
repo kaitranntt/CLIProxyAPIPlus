@@ -394,3 +394,116 @@ func TestConvertGeminiResponseToClaudeNonStream_SnakeCaseThoughtSignature(t *tes
 		t.Fatalf("expected snake_case thought_signature to be extracted, got: %s", output)
 	}
 }
+
+func TestConvertGeminiResponseToClaudeNonStream_EmptyThoughtSignatureNotBoundToLaterBlock(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"thought": true, "thoughtSignature": "sigA"},
+					{"text": "visible text"},
+					{"text": "reasoning", "thought": true}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.0.type").String() != "text" || parsed.Get("content.0.text").String() != "visible text" {
+		t.Fatalf("expected block 0 to be text 'visible text', got: %s", output)
+	}
+	if parsed.Get("content.1.type").String() != "thinking" || parsed.Get("content.1.thinking").String() != "reasoning" {
+		t.Fatalf("expected block 1 to be thinking 'reasoning', got: %s", output)
+	}
+	if parsed.Get("content.1.signature").Exists() {
+		t.Fatalf("later thinking block must NOT carry stale signature sigA, got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_MultipleSignedThoughtPartsSplitBlocks(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "thinking 1", "thought": true, "thoughtSignature": "sig1"},
+					{"text": "thinking 2", "thought": true, "thoughtSignature": "sig2"},
+					{"text": "final answer"}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.#").Int() != 3 {
+		t.Fatalf("expected 3 blocks (2 thinking + 1 text), got: %s", output)
+	}
+	if parsed.Get("content.0.type").String() != "thinking" || parsed.Get("content.0.thinking").String() != "thinking 1" || parsed.Get("content.0.signature").String() != "sig1" {
+		t.Fatalf("expected block 0 to be thinking 1 with sig1, got: %s", output)
+	}
+	if parsed.Get("content.1.type").String() != "thinking" || parsed.Get("content.1.thinking").String() != "thinking 2" || parsed.Get("content.1.signature").String() != "sig2" {
+		t.Fatalf("expected block 1 to be thinking 2 with sig2, got: %s", output)
+	}
+	if parsed.Get("content.2.type").String() != "text" || parsed.Get("content.2.text").String() != "final answer" {
+		t.Fatalf("expected block 2 to be text 'final answer', got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaude_MultipleSignedThoughtChunksSplitBlocks(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	chunk1 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thinking 1", "thought": true, "thoughtSignature": "sig1"}]
+			}
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+	chunk2 := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "thinking 2", "thought": true, "thoughtSignature": "sig2"}]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk1, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, `"type":"content_block_start","index":0,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking content_block_start at index 0, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_stop","index":0`) {
+		t.Fatalf("expected thinking content_block_stop at index 0 before second signed block, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"content_block_start","index":1,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking content_block_start at index 1 for second signed block, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"signature_delta","signature":"sig1"`) {
+		t.Fatalf("expected signature_delta sig1, got: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"signature_delta","signature":"sig2"`) {
+		t.Fatalf("expected signature_delta sig2, got: %s", outputText)
+	}
+}
