@@ -200,3 +200,133 @@ func TestConvertGeminiRequestToClaude_DropsHiddenThoughtParts(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertGeminiRequestToClaude_DeterministicToolIDsAcrossRepeatedTranslations(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "user",
+				"parts": [{"text": "check weather in Paris and Tokyo"}]
+			},
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}},
+					{"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "get_weather", "response": {"result": "Paris: 15C"}}},
+					{"functionResponse": {"name": "get_weather", "response": {"result": "Tokyo: 20C"}}}
+				]
+			},
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "get_forecast", "args": {"city": "Paris"}}}
+				]
+			}
+		]
+	}`)
+
+	out1 := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+	out2 := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+
+	id1_call0 := gjson.GetBytes(out1, "messages.1.content.0.id").String()
+	id1_call1 := gjson.GetBytes(out1, "messages.1.content.1.id").String()
+	id1_resp0 := gjson.GetBytes(out1, "messages.2.content.0.tool_use_id").String()
+	id1_resp1 := gjson.GetBytes(out1, "messages.2.content.1.tool_use_id").String()
+	id1_call2 := gjson.GetBytes(out1, "messages.3.content.0.id").String()
+
+	id2_call0 := gjson.GetBytes(out2, "messages.1.content.0.id").String()
+	id2_call1 := gjson.GetBytes(out2, "messages.1.content.1.id").String()
+	id2_resp0 := gjson.GetBytes(out2, "messages.2.content.0.tool_use_id").String()
+	id2_resp1 := gjson.GetBytes(out2, "messages.2.content.1.tool_use_id").String()
+	id2_call2 := gjson.GetBytes(out2, "messages.3.content.0.id").String()
+
+	if id1_call0 != id2_call0 || id1_call1 != id2_call1 || id1_call2 != id2_call2 {
+		t.Fatalf("tool_use IDs are not deterministic across calls:\nout1 calls: [%s, %s, %s]\nout2 calls: [%s, %s, %s]",
+			id1_call0, id1_call1, id1_call2, id2_call0, id2_call1, id2_call2)
+	}
+
+	if id1_resp0 != id2_resp0 || id1_resp1 != id2_resp1 {
+		t.Fatalf("tool_result IDs are not deterministic across calls:\nout1 resps: [%s, %s]\nout2 resps: [%s, %s]",
+			id1_resp0, id1_resp1, id2_resp0, id2_resp1)
+	}
+
+	if id1_call0 != id1_resp0 {
+		t.Fatalf("first call ID %q does not match first response ID %q", id1_call0, id1_resp0)
+	}
+	if id1_call1 != id1_resp1 {
+		t.Fatalf("second call ID %q does not match second response ID %q", id1_call1, id1_resp1)
+	}
+}
+
+func TestConvertGeminiRequestToClaude_ToolIDsUniqueWithinRequest(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "args": {}}},
+					{"functionCall": {"name": "func2", "args": {}}},
+					{"functionCall": {"name": "func3", "args": {}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+	id1 := gjson.GetBytes(out, "messages.0.content.0.id").String()
+	id2 := gjson.GetBytes(out, "messages.0.content.1.id").String()
+	id3 := gjson.GetBytes(out, "messages.0.content.2.id").String()
+
+	if id1 == "" || id2 == "" || id3 == "" {
+		t.Fatalf("expected non-empty IDs, got id1=%q, id2=%q, id3=%q", id1, id2, id3)
+	}
+	if id1 == id2 || id1 == id3 || id2 == id3 {
+		t.Fatalf("tool IDs must be unique within request: id1=%q, id2=%q, id3=%q", id1, id2, id3)
+	}
+}
+
+func TestConvertGeminiRequestToClaude_ExplicitIDWinsOverGenerated(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "id": "explicit_id_123", "args": {}}},
+					{"functionCall": {"name": "func2", "args": {}}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "func1", "id": "explicit_id_123", "response": {"result": "ok"}}},
+					{"functionResponse": {"name": "func2", "response": {"result": "ok"}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+	call0ID := gjson.GetBytes(out, "messages.0.content.0.id").String()
+	call1ID := gjson.GetBytes(out, "messages.0.content.1.id").String()
+	resp0ID := gjson.GetBytes(out, "messages.1.content.0.tool_use_id").String()
+	resp1ID := gjson.GetBytes(out, "messages.1.content.1.tool_use_id").String()
+
+	if call0ID != "explicit_id_123" {
+		t.Fatalf("expected explicit ID %q, got %q", "explicit_id_123", call0ID)
+	}
+	if resp0ID != "explicit_id_123" {
+		t.Fatalf("expected explicit response ID %q, got %q", "explicit_id_123", resp0ID)
+	}
+	if call1ID == "explicit_id_123" {
+		t.Fatalf("generated ID must not collide with explicit ID, got %q", call1ID)
+	}
+	if resp1ID != call1ID {
+		t.Fatalf("generated response ID %q must match generated call ID %q", resp1ID, call1ID)
+	}
+}
