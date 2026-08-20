@@ -318,20 +318,34 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		textBuilder.Reset()
 	}
 
+	var thinkingSignature string
 	flushThinking := func() {
-		if thinkingBuilder.Len() == 0 {
+		if thinkingBuilder.Len() == 0 && thinkingSignature == "" {
 			return
 		}
 		block := []byte(`{"type":"thinking","thinking":""}`)
 		block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+		if thinkingSignature != "" {
+			block, _ = sjson.SetBytes(block, "signature", thinkingSignature)
+		}
 		blocks = append(blocks, block)
 		thinkingBuilder.Reset()
+		thinkingSignature = ""
 	}
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			thoughtSignatureResult := part.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = part.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			if hasThoughtSignature {
+				thinkingSignature = thoughtSignatureResult.String()
+			}
+
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
-				if part.Get("thought").Bool() {
+				if part.Get("thought").Bool() || hasThoughtSignature {
 					flushText()
 					thinkingBuilder.WriteString(text.String())
 					continue

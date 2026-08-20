@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestConvertGeminiResponseToClaude_SignatureOnlyPartDoesNotOpenEmptyTextBlock(t *testing.T) {
@@ -58,5 +60,171 @@ func TestConvertGeminiResponseToClaude_SignatureOnlyPartDoesNotOpenEmptyTextBloc
 	}
 	if !strings.Contains(outputText, `"type":"message_stop"`) {
 		t.Fatalf("DONE chunk must still emit message_stop after final events: %s", outputText)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_ThoughtSignature(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "thinking text", "thought": true, "thoughtSignature": "sig-test"},
+					{"text": "hello world"}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.0.type").String() != "thinking" {
+		t.Fatalf("expected first block to be thinking, got: %s", output)
+	}
+	if parsed.Get("content.0.thinking").String() != "thinking text" {
+		t.Fatalf("expected thinking text, got: %s", output)
+	}
+	if parsed.Get("content.0.signature").String() != "sig-test" {
+		t.Fatalf("expected signature sig-test in thinking block, got: %s", output)
+	}
+	if parsed.Get("content.1.type").String() != "text" {
+		t.Fatalf("expected second block to be text, got: %s", output)
+	}
+	if parsed.Get("content.1.text").String() != "hello world" {
+		t.Fatalf("expected text hello world, got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_ThoughtSignatureWithoutThoughtFlag(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "internal reasoning", "thought": false, "thoughtSignature": "sig-no-flag"},
+					{"text": "final answer"}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.0.type").String() != "thinking" {
+		t.Fatalf("part with thoughtSignature must be classified as thinking, got: %s", output)
+	}
+	if parsed.Get("content.0.thinking").String() != "internal reasoning" {
+		t.Fatalf("expected internal reasoning in thinking block, got: %s", output)
+	}
+	if parsed.Get("content.0.signature").String() != "sig-no-flag" {
+		t.Fatalf("expected signature in thinking block, got: %s", output)
+	}
+	if parsed.Get("content.1.type").String() != "text" {
+		t.Fatalf("expected text block, got: %s", output)
+	}
+	if parsed.Get("content.1.text").String() != "final answer" {
+		t.Fatalf("expected final answer in text block, got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_ThinkingWithoutSignature(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "thinking without sig", "thought": true},
+					{"text": "response text"}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.0.type").String() != "thinking" {
+		t.Fatalf("expected thinking block, got: %s", output)
+	}
+	if parsed.Get("content.0.thinking").String() != "thinking without sig" {
+		t.Fatalf("expected thinking content, got: %s", output)
+	}
+	if parsed.Get("content.0.signature").Exists() {
+		t.Fatalf("expected no signature field when thoughtSignature absent, got: %s", output)
+	}
+	if parsed.Get("content.1.type").String() != "text" {
+		t.Fatalf("expected text block, got: %s", output)
+	}
+	if parsed.Get("content.1.text").String() != "response text" {
+		t.Fatalf("expected text content, got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_RegularTextOnly(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "plain response"}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.#").Int() != 1 {
+		t.Fatalf("expected exactly 1 content block, got: %s", output)
+	}
+	if parsed.Get("content.0.type").String() != "text" {
+		t.Fatalf("expected text block, got: %s", output)
+	}
+	if parsed.Get("content.0.text").String() != "plain response" {
+		t.Fatalf("expected text content, got: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_SnakeCaseThoughtSignature(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "thinking snake", "thought": true, "thought_signature": "sig-snake"},
+					{"text": "output"}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, rawResponse, nil)
+	parsed := gjson.ParseBytes(output)
+
+	if parsed.Get("content.0.signature").String() != "sig-snake" {
+		t.Fatalf("expected snake_case thought_signature to be extracted, got: %s", output)
 	}
 }
