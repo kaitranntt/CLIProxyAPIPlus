@@ -245,3 +245,76 @@ func TestConvertGeminiRequestToCodex_ExplicitIDWinsOverGenerated(t *testing.T) {
 		t.Fatalf("generated response ID %q must match generated call ID %q", resp1ID, call1ID)
 	}
 }
+
+func TestConvertGeminiRequestToCodex_ExplicitIDCollisionAvoided(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "id": "call_1", "args": {}}},
+					{"functionCall": {"name": "func2", "args": {}}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "func1", "id": "call_1", "response": {"result": "ok1"}}},
+					{"functionResponse": {"name": "func2", "response": {"result": "ok2"}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	call0ID := gjson.GetBytes(out, "input.0.call_id").String()
+	call1ID := gjson.GetBytes(out, "input.1.call_id").String()
+	resp0ID := gjson.GetBytes(out, "input.2.call_id").String()
+	resp1ID := gjson.GetBytes(out, "input.3.call_id").String()
+
+	if call0ID == call1ID {
+		t.Fatalf("duplicate call_id detected: call0=%q, call1=%q", call0ID, call1ID)
+	}
+	if call0ID != "call_1" {
+		t.Fatalf("expected call0 ID %q, got %q", "call_1", call0ID)
+	}
+	if resp0ID != call0ID {
+		t.Fatalf("response 0 ID %q does not match call 0 ID %q", resp0ID, call0ID)
+	}
+	if resp1ID != call1ID {
+		t.Fatalf("response 1 ID %q does not match call 1 ID %q", resp1ID, call1ID)
+	}
+	if call1ID != "call_2" {
+		t.Fatalf("expected call1 ID %q, got %q", "call_2", call1ID)
+	}
+}
+
+func TestConvertGeminiRequestToCodex_ExplicitIDAfterGeneratedCollisionAvoided(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "args": {}}},
+					{"functionCall": {"name": "func2", "id": "call_1", "args": {}}},
+					{"functionCall": {"name": "func3", "args": {}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	call0ID := gjson.GetBytes(out, "input.0.call_id").String()
+	call1ID := gjson.GetBytes(out, "input.1.call_id").String()
+	call2ID := gjson.GetBytes(out, "input.2.call_id").String()
+
+	if call0ID != "call_2" {
+		t.Fatalf("expected call0 ID %q (skipping explicit call_1), got %q", "call_2", call0ID)
+	}
+	if call1ID != "call_1" {
+		t.Fatalf("expected call1 ID %q (explicit), got %q", "call_1", call1ID)
+	}
+	if call2ID != "call_3" {
+		t.Fatalf("expected call2 ID %q, got %q", "call_3", call2ID)
+	}
+}

@@ -330,3 +330,76 @@ func TestConvertGeminiRequestToClaude_ExplicitIDWinsOverGenerated(t *testing.T) 
 		t.Fatalf("generated response ID %q must match generated call ID %q", resp1ID, call1ID)
 	}
 }
+
+func TestConvertGeminiRequestToClaude_ExplicitIDCollisionAvoided(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "id": "toolu_1", "args": {}}},
+					{"functionCall": {"name": "func2", "args": {}}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "func1", "id": "toolu_1", "response": {"result": "ok1"}}},
+					{"functionResponse": {"name": "func2", "response": {"result": "ok2"}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+	call0ID := gjson.GetBytes(out, "messages.0.content.0.id").String()
+	call1ID := gjson.GetBytes(out, "messages.0.content.1.id").String()
+	resp0ID := gjson.GetBytes(out, "messages.1.content.0.tool_use_id").String()
+	resp1ID := gjson.GetBytes(out, "messages.1.content.1.tool_use_id").String()
+
+	if call0ID == call1ID {
+		t.Fatalf("duplicate tool_use ID detected: call0=%q, call1=%q", call0ID, call1ID)
+	}
+	if call0ID != "toolu_1" {
+		t.Fatalf("expected call0 ID %q, got %q", "toolu_1", call0ID)
+	}
+	if resp0ID != call0ID {
+		t.Fatalf("response 0 ID %q does not match call 0 ID %q", resp0ID, call0ID)
+	}
+	if resp1ID != call1ID {
+		t.Fatalf("response 1 ID %q does not match call 1 ID %q", resp1ID, call1ID)
+	}
+	if call1ID != "toolu_2" {
+		t.Fatalf("expected call1 ID %q, got %q", "toolu_2", call1ID)
+	}
+}
+
+func TestConvertGeminiRequestToClaude_ExplicitIDAfterGeneratedCollisionAvoided(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "args": {}}},
+					{"functionCall": {"name": "func2", "id": "toolu_1", "args": {}}},
+					{"functionCall": {"name": "func3", "args": {}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+	call0ID := gjson.GetBytes(out, "messages.0.content.0.id").String()
+	call1ID := gjson.GetBytes(out, "messages.0.content.1.id").String()
+	call2ID := gjson.GetBytes(out, "messages.0.content.2.id").String()
+
+	if call0ID != "toolu_2" {
+		t.Fatalf("expected call0 ID %q (skipping explicit toolu_1), got %q", "toolu_2", call0ID)
+	}
+	if call1ID != "toolu_1" {
+		t.Fatalf("expected call1 ID %q (explicit), got %q", "toolu_1", call1ID)
+	}
+	if call2ID != "toolu_3" {
+		t.Fatalf("expected call2 ID %q, got %q", "toolu_3", call2ID)
+	}
+}

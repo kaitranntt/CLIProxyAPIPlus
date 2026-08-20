@@ -89,6 +89,35 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		return ids
 	}
 
+	usedCallIDs := make(map[string]bool)
+	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
+		contents.ForEach(func(_, content gjson.Result) bool {
+			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					if id := getGeminiCallID(part.Get("functionCall")); id != "" {
+						usedCallIDs[id] = true
+					}
+					if id := getGeminiCallID(part.Get("functionResponse")); id != "" {
+						usedCallIDs[id] = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
+	generateCallID := func() string {
+		for {
+			callIDCounter++
+			id := fmt.Sprintf("call_%d", callIDCounter)
+			if !usedCallIDs[id] {
+				usedCallIDs[id] = true
+				return id
+			}
+		}
+	}
+
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	if serviceTier := normalizeGeminiCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
@@ -185,8 +214,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 					id := getGeminiCallID(fc)
 					if id == "" {
-						callIDCounter++
-						id = fmt.Sprintf("call_%d", callIDCounter)
+						id = generateCallID()
 					}
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
 					pendingCallIDs = append(pendingCallIDs, id)
@@ -215,8 +243,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						// pop the first element
 						pendingCallIDs = pendingCallIDs[1:]
 					} else {
-						callIDCounter++
-						id = fmt.Sprintf("call_%d", callIDCounter)
+						id = generateCallID()
 					}
 					fno, _ = sjson.SetBytes(fno, "call_id", id)
 					inputItems = append(inputItems, fno)
