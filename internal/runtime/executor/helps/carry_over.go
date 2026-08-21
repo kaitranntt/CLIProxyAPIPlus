@@ -180,8 +180,9 @@ func mergeCarryOverIntoSystemMessage(msg []byte, carryOverText string) []byte {
 // carryOverClaudeSource extracts unsigned assistant thinking blocks from a
 // Claude request and rewrites them as a top-level system instruction. Signed
 // thinking with a compatible signature is left in place so the normal registry
-// path can map it to reasoning_content. This runs before registry translation
-// so plugin NormalizeRequest hooks still see a Claude-shaped payload.
+// path can map it to reasoning_content. This runs before native translation so
+// unsigned thinking is not dropped; plugin NormalizeRequest hooks then run on
+// the translated provider payload and own the final OpenAI-shaped request.
 func carryOverClaudeSource(payload []byte) []byte {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload

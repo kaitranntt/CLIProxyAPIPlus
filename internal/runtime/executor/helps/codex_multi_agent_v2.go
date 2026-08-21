@@ -72,10 +72,10 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 		if cfg != nil && cfg.Translator.CarryOverThinkingInSystem && to == sdktranslator.FormatOpenAI {
 			working := payload
 			if from == sdktranslator.FormatClaude {
-				// Extract unsigned assistant thinking into the top-level system
-				// field before registry translation so plugin NormalizeRequest
-				// hooks and summary-config logic still run. Signed thinking stays
-				// in place and maps to reasoning_content via the registry.
+				// Extract unsigned assistant thinking before native translation so
+				// it is not dropped. The registry then translates and runs plugin
+				// NormalizeRequest hooks on the final OpenAI-shaped payload.
+				// Signed thinking stays in place and maps to reasoning_content.
 				working = carryOverClaudeSource(working)
 			}
 			translated := TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, working, stream)
