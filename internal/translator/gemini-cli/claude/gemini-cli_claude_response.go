@@ -76,6 +76,14 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
+	appendSignatureDelta := func(signature string) {
+		if signature == "" || (*param).(*Params).ResponseType != 2 {
+			return
+		}
+		data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, (*param).(*Params).ResponseIndex)), "delta.signature", signature)
+		appendEvent("content_block_delta", string(data))
+		(*param).(*Params).HasContent = true
+	}
 
 	// Initialize the streaming session with a message_start event
 	// This is only sent for the very first response chunk to establish the streaming session
@@ -107,16 +115,32 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 			// Extract the different types of content from each part
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+
+			// Signature-only part is a carrier for a previous thinking block.
+			if hasThoughtSignature && !partTextResult.Exists() && !functionCallResult.Exists() {
+				appendSignatureDelta(thoughtSignatureResult.String())
+				continue
+			}
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() {
+				if partResult.Get("thought").Bool() || hasThoughtSignature {
+					if hasThoughtSignature && partTextResult.String() == "" {
+						appendSignatureDelta(thoughtSignatureResult.String())
+						continue
+					}
 					// Continue existing thinking block if already in thinking state
 					if (*param).(*Params).ResponseType == 2 {
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).HasContent = true
+						appendSignatureDelta(thoughtSignatureResult.String())
 					} else {
 						// Transition from another state to thinking
 						// First, close any existing content block
@@ -136,6 +160,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
 						(*param).(*Params).HasContent = true
+						appendSignatureDelta(thoughtSignatureResult.String())
 					}
 				} else {
 					// Process regular text content (user-visible output)
@@ -269,6 +294,7 @@ func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, orig
 	parts := root.Get("response.candidates.0.content.parts")
 	textBuilder := strings.Builder{}
 	thinkingBuilder := strings.Builder{}
+	var thinkingSignature string
 	toolIDCounter := 0
 	hasToolCall := false
 
@@ -283,21 +309,42 @@ func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, orig
 	}
 
 	flushThinking := func() {
-		if thinkingBuilder.Len() == 0 {
+		if thinkingBuilder.Len() == 0 && thinkingSignature == "" {
 			return
 		}
 		block := []byte(`{"type":"thinking","thinking":""}`)
-		block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+		if thinkingBuilder.Len() > 0 {
+			block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+		}
+		if thinkingSignature != "" {
+			block, _ = sjson.SetBytes(block, "signature", thinkingSignature)
+		}
 		out, _ = sjson.SetRawBytes(out, "content.-1", block)
 		thinkingBuilder.Reset()
+		thinkingSignature = ""
 	}
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			thoughtSignature := part.Get("thoughtSignature").String()
+			if thoughtSignature == "" {
+				thoughtSignature = part.Get("thought_signature").String()
+			}
+
+			if thoughtSignature != "" && !part.Get("text").Exists() && !part.Get("functionCall").Exists() {
+				flushText()
+				thinkingSignature = thoughtSignature
+				flushThinking()
+				continue
+			}
+
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
-				if part.Get("thought").Bool() {
+				if part.Get("thought").Bool() || thoughtSignature != "" {
 					flushText()
 					thinkingBuilder.WriteString(text.String())
+					if thoughtSignature != "" {
+						thinkingSignature = thoughtSignature
+					}
 					continue
 				}
 				flushThinking()
@@ -322,6 +369,14 @@ func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, orig
 				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(inputRaw))
 				out, _ = sjson.SetRawBytes(out, "content.-1", toolBlock)
 				continue
+			}
+
+			if thoughtSignature != "" {
+				// Signature-only part with no text: flush any previous thinking
+				// and emit it as its own block.
+				flushText()
+				thinkingSignature = thoughtSignature
+				flushThinking()
 			}
 		}
 	}
