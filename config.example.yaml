@@ -168,7 +168,22 @@ save-cooldown-status: false
 
 # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504).
 # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
+# After PR #205 (fix/auth-lower-transient-cooldown), 0 means 10 s.
 transient-error-cooldown-seconds: 0
+
+# Per-status overrides for transient error cooldowns.
+# Statuses not listed fall back to transient-error-cooldown-seconds.
+# Example:
+# transient-cooldown-by-status:
+#   - status: 408
+#     cooldown-seconds: 2
+#   - status: 503
+#     cooldown-seconds: 10
+
+# Minimum base in seconds for the quota cooldown ladder.
+# Sub-second Retry-After hints are never allowed below this floor. Default 1.
+# Stacks on PR #198 (fix/quota-backoff-hint-floor) / router-for-me/CLIProxyAPI#5130.
+quota-cooldown-floor-seconds: 1
 
 # When true, globally disable Claude request cloaking (the Claude Code CLI disguise and
 # system prompt replacement), so the original system prompt is passed through to Claude as-is.
