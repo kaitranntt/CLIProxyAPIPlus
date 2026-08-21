@@ -39,9 +39,13 @@ func SetTransientErrorCooldownSeconds(seconds int) {
 
 // SetQuotaCooldownFloorSeconds sets the minimum base for the quota cooldown ladder.
 // Sub-second Retry-After hints are never allowed below this floor. Default 1 second.
+// Values above 1800 (30 minutes) are clamped to 1800 because the ladder is capped at quotaBackoffMax.
 func SetQuotaCooldownFloorSeconds(seconds int) {
 	if seconds <= 0 {
 		seconds = 1
+	}
+	if maxSeconds := int(quotaBackoffMax / time.Second); seconds > maxSeconds {
+		seconds = maxSeconds
 	}
 	quotaCooldownFloorSeconds.Store(int64(seconds))
 }

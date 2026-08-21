@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
@@ -19,20 +20,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func transientCooldownByStatusEqual(a, b []config.TransientCooldownByStatusRule) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	m := make(map[int]int, len(a))
-	for _, r := range a {
+func transientCooldownByStatusMap(rules []config.TransientCooldownByStatusRule) map[int]int {
+	m := make(map[int]int, len(rules))
+	for _, r := range rules {
 		m[r.Status] = r.CooldownSeconds
 	}
-	for _, r := range b {
-		if m[r.Status] != r.CooldownSeconds {
-			return false
-		}
-	}
-	return true
+	return m
+}
+
+func transientCooldownByStatusEqual(a, b []config.TransientCooldownByStatusRule) bool {
+	return reflect.DeepEqual(transientCooldownByStatusMap(a), transientCooldownByStatusMap(b))
 }
 
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {

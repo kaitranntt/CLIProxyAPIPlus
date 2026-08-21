@@ -561,6 +561,33 @@ func TestQuotaCooldownFloorSecondsConfiguresLadderBase(t *testing.T) {
 	}
 }
 
+func TestSetQuotaCooldownFloorSecondsClampsAndDefaults(t *testing.T) {
+	prev := quotaCooldownFloorSeconds.Load()
+	defer quotaCooldownFloorSeconds.Store(prev)
+
+	maxSeconds := int(quotaBackoffMax / time.Second)
+
+	SetQuotaCooldownFloorSeconds(0)
+	if got := quotaCooldownFloorSeconds.Load(); got != 1 {
+		t.Fatalf("SetQuotaCooldownFloorSeconds(0) stored %d, want 1", got)
+	}
+
+	SetQuotaCooldownFloorSeconds(-5)
+	if got := quotaCooldownFloorSeconds.Load(); got != 1 {
+		t.Fatalf("SetQuotaCooldownFloorSeconds(-5) stored %d, want 1", got)
+	}
+
+	SetQuotaCooldownFloorSeconds(5)
+	if got := quotaCooldownFloorSeconds.Load(); got != 5 {
+		t.Fatalf("SetQuotaCooldownFloorSeconds(5) stored %d, want 5", got)
+	}
+
+	SetQuotaCooldownFloorSeconds(maxSeconds + 1)
+	if got := quotaCooldownFloorSeconds.Load(); got != int64(maxSeconds) {
+		t.Fatalf("SetQuotaCooldownFloorSeconds(%d) stored %d, want %d", maxSeconds+1, got, maxSeconds)
+	}
+}
+
 func TestNextTransientErrorRetryAfterRespectsPerStatusOverride(t *testing.T) {
 	prevGlobal := transientErrorCooldownSeconds.Load()
 	transientErrorCooldownSeconds.Store(10)
@@ -581,5 +608,21 @@ func TestNextTransientErrorRetryAfterRespectsPerStatusOverride(t *testing.T) {
 	}
 	if got := nextTransientErrorRetryAfter(now, 504); got.Sub(now) != 10*time.Second {
 		t.Fatalf("status 504 fallback cooldown = %v, want 10s", got.Sub(now))
+	}
+}
+
+func TestNextTransientErrorRetryAfterPerStatusZeroFallsBackToGlobal(t *testing.T) {
+	prevGlobal := transientErrorCooldownSeconds.Load()
+	transientErrorCooldownSeconds.Store(10)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevGlobal) })
+
+	SetTransientCooldownByStatus([]internalconfig.TransientCooldownByStatusRule{
+		{Status: 503, CooldownSeconds: 0},
+	})
+	t.Cleanup(func() { SetTransientCooldownByStatus(nil) })
+
+	now := time.Now()
+	if got := nextTransientErrorRetryAfter(now, 503); got.Sub(now) != 10*time.Second {
+		t.Fatalf("status 503 with per-status 0 cooldown = %v, want 10s global fallback", got.Sub(now))
 	}
 }
