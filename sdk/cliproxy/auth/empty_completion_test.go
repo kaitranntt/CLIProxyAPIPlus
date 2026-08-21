@@ -3376,4 +3376,178 @@ func TestToolCallIDOnlyRegression(t *testing.T) {
 			t.Fatal("IsEmptyCompletionPayload() = true for Responses function_call with name and empty object args, want false")
 		}
 	})
+func TestExecuteStreamInStreamGemini429ErrorRotatesAuth(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		streamPayloads: map[string][][]byte{},
+		streamCalls:    map[string]int{},
+		emptyStreamPayload: [][]byte{
+			[]byte("data: {\"error\":{\"code\":429,\"message\":\"Resource exhausted\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n"),
+		},
+		contentStreamPayload: [][]byte{
+			[]byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"gemini response\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":5}}\n\n"),
+		},
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() returned nil stream")
+	}
+	var got strings.Builder
+	for chunk := range stream.Chunks {
+		got.Write(chunk.Payload)
+	}
+	assertRotatesToContent(t, ids, executor.firstStream, got.String(), "gemini response", capture)
+
+	if auth, ok := manager.GetByID(executor.firstStream); ok && auth != nil {
+		if !auth.Unavailable && auth.NextRetryAfter.IsZero() && !auth.Quota.Exceeded {
+			t.Fatalf("auth %q was not marked unavailable or quota exceeded after in-stream 429 error", executor.firstStream)
+		}
+	}
+}
+
+func TestExecuteStreamInStreamClaudeOverloadedErrorRotatesAuth(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		streamPayloads: map[string][][]byte{},
+		streamCalls:    map[string]int{},
+		emptyStreamPayload: [][]byte{
+			[]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"),
+		},
+		contentStreamPayload: [][]byte{
+			[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"claude response\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+		},
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() returned nil stream")
+	}
+	var got strings.Builder
+	for chunk := range stream.Chunks {
+		got.Write(chunk.Payload)
+	}
+	assertRotatesToContent(t, ids, executor.firstStream, got.String(), "claude response", capture)
+}
+
+func TestExecuteStreamInStream400InvalidRequestNotRotated(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		streamPayloads: map[string][][]byte{},
+		streamCalls:    map[string]int{},
+		emptyStreamPayload: [][]byte{
+			[]byte("data: {\"error\":{\"code\":400,\"message\":\"Invalid request prompt\",\"type\":\"invalid_request_error\"}}\n\n"),
+		},
+		contentStreamPayload: [][]byte{
+			[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"should not reach\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+		},
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	_, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err == nil {
+		t.Fatal("ExecuteStream() want error for 400 invalid request, got nil")
+	}
+
+	other := ids[0]
+	if executor.firstStream == ids[0] {
+		other = ids[1]
+	}
+	if executor.streamCalls[other] > 0 {
+		t.Fatalf("second auth %q was called (%d times), want 0 calls (400 must not rotate)", other, executor.streamCalls[other])
+	}
+	_ = capture
+}
+
+func TestExecuteStreamInStreamUnknownJSONForwardedNotRotated(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		streamPayloads: map[string][][]byte{},
+		streamCalls:    map[string]int{},
+		emptyStreamPayload: [][]byte{
+			[]byte("data: {\"custom_future_protocol_field\":\"forward_me\"}\n\n"),
+			[]byte("data: [DONE]\n\n"),
+		},
+		contentStreamPayload: [][]byte{
+			[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"should not reach\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+		},
+	}
+	manager, ids, model, _ := newEmptyCompletionTestManager(t, executor)
+
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var got strings.Builder
+	for chunk := range stream.Chunks {
+		got.Write(chunk.Payload)
+	}
+	if !strings.Contains(got.String(), "custom_future_protocol_field") {
+		t.Fatalf("payload = %q, want unknown JSON forwarded directly", got.String())
+	}
+	other := ids[0]
+	if executor.firstStream == ids[0] {
+		other = ids[1]
+	}
+	if executor.streamCalls[other] > 0 {
+		t.Fatalf("second auth %q was called (%d times), want 0 calls for unknown valid JSON", other, executor.streamCalls[other])
+	}
+}
+
+func TestExecuteStreamMidStreamInStreamErrorMarksAuthFailed(t *testing.T) {
+	midStreamPayload := [][]byte{
+		[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"valid prefix content\"}}]}\n\n"),
+		[]byte("data: {\"error\":{\"code\":429,\"message\":\"Resource exhausted mid-stream\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n"),
+	}
+	executor := &emptyCompletionTestExecutor{
+		streamPayloads:       map[string][][]byte{},
+		streamCalls:          map[string]int{},
+		contentStreamPayload: midStreamPayload,
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() unexpected error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() returned nil stream")
+	}
+
+	var got strings.Builder
+	for chunk := range stream.Chunks {
+		got.Write(chunk.Payload)
+	}
+
+	payloadStr := got.String()
+	if !strings.Contains(payloadStr, "valid prefix content") {
+		t.Fatalf("stream payload missing prefix content, got: %q", payloadStr)
+	}
+	if !strings.Contains(payloadStr, "Resource exhausted mid-stream") {
+		t.Fatalf("stream payload missing mid-stream error, got: %q", payloadStr)
+	}
+
+	results := capture.Results()
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 execution result recorded, got 0")
+	}
+
+	hasFailed := false
+	for _, res := range results {
+		if res.Success {
+			t.Fatalf("recorded execution result with Success = true for mid-stream error: %+v", res)
+		}
+		if !res.Success {
+			hasFailed = true
+		}
+	}
+	if !hasFailed {
+		t.Fatal("expected execution result with Success = false, none found")
+	}
+
+	_ = ids
 }
