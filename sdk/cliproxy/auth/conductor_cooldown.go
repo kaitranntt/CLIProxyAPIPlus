@@ -734,6 +734,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	setModelQuota := false
 	var authSnapshot *Auth
 	cooldownStateChanged := false
+	var (
+		logFailure        bool
+		logStatusCode     int
+		logClassification string
+		logCooldownStr    string
+		logBackoffLevel   int
+		logDisableCooling bool
+	)
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -769,6 +777,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
+			logFailure = true
+			logStatusCode = statusCodeFromResult(result.Error)
+			logClassification = classifyFailureResult(result.Error, logStatusCode)
+			if result.CredentialScope && logClassification == "quota" {
+				logClassification = "credential_quota"
+			}
+			logDisableCooling = m.cooldownDisabledForAuth(auth)
+			if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
+				logDisableCooling = false
+			}
+
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
@@ -913,6 +932,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
+							} else {
+								_, backoffLevel = nextQuotaCooldown(state.Quota.BackoffLevel, false)
 							}
 							if transientCooldownOff && !state.Quota.Exceeded {
 								// Transient cooldowns are disabled for this auth: keep the model
@@ -983,12 +1004,30 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
+				if state := auth.ModelStates[modelKey]; state != nil {
+					logBackoffLevel = state.Quota.BackoffLevel
+					if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+						logCooldownStr = state.NextRetryAfter.Sub(now).Round(time.Second).String()
+					} else if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
+						logCooldownStr = state.Quota.NextRecoverAt.Sub(now).Round(time.Second).String()
+					} else {
+						logCooldownStr = "skipped"
+					}
+				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, result.TransientRateLimit)
+				logBackoffLevel = auth.Quota.BackoffLevel
+				if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+					logCooldownStr = auth.NextRetryAfter.Sub(now).Round(time.Second).String()
+				} else if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+					logCooldownStr = auth.Quota.NextRecoverAt.Sub(now).Round(time.Second).String()
+				} else {
+					logCooldownStr = "skipped"
+				}
 			}
 		}
 
@@ -1000,6 +1039,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 	}
 	m.mu.Unlock()
+	if logFailure {
+		entry := logEntryWithRequestID(ctx)
+		entry.Warnf("auth-cooldown: attempt failed | auth=%s status=%d class=%s cooldown=%s backoff=%d disable_cooling=%t", result.AuthID, logStatusCode, logClassification, logCooldownStr, logBackoffLevel, logDisableCooling)
+	}
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
@@ -1272,13 +1315,13 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		if !stateUnavailable {
 			allUnavailable = false
 		}
+		if state.Quota.BackoffLevel > maxBackoffLevel {
+			maxBackoffLevel = state.Quota.BackoffLevel
+		}
 		if state.Quota.Exceeded {
 			quotaExceeded = true
 			if quotaRecover.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.Before(quotaRecover)) {
 				quotaRecover = state.Quota.NextRecoverAt
-			}
-			if state.Quota.BackoffLevel > maxBackoffLevel {
-				maxBackoffLevel = state.Quota.BackoffLevel
 			}
 		}
 	}
@@ -1306,7 +1349,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.Exceeded = false
 		auth.Quota.Reason = ""
 		auth.Quota.NextRecoverAt = time.Time{}
-		auth.Quota.BackoffLevel = 0
+		auth.Quota.BackoffLevel = maxBackoffLevel
 	}
 }
 
@@ -1710,17 +1753,16 @@ func isCloudflareChallengeResultError(err *Error) bool {
 
 func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {
 	var next time.Time
+	cooldown, nextLevel := nextQuotaCooldown(backoffLevel, false)
+	if cooldown < 10*time.Second {
+		cooldown = 10 * time.Second
+	}
 	if !disableCooling {
-		cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
-		if cooldown < 10*time.Second {
-			cooldown = 10 * time.Second
-		}
 		if cooldown > 0 {
 			next = now.Add(cooldown)
 		}
-		backoffLevel = nextLevel
 	}
-	return next, backoffLevel
+	return next, nextLevel
 }
 
 func isRequestScopedNotFoundResultError(err *Error) bool {
@@ -2073,6 +2115,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		var next time.Time
+		backoffLevel := auth.Quota.BackoffLevel
 		transientCooldownOff := false
 		if !disableCooling {
 			switch {
@@ -2092,7 +2135,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				// ladder would park a still-usable credential for up to the full ladder step.
 				next = now.Add(*retryAfter)
 			default:
-				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
+				next, backoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				if retryAfter != nil {
 					// An exhausted-quota hint can be sub-second even when the quota is gone for
 					// the whole day, so never let it undercut the escalating quota ladder.
@@ -2104,6 +2147,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 				next = auth.Quota.NextRecoverAt
 			}
+		} else {
+			_, backoffLevel = nextQuotaCooldown(auth.Quota.BackoffLevel, false)
 		}
 		if transientCooldownOff && !prevExceeded {
 			// Transient cooldowns are disabled: keep the credential available
@@ -2117,6 +2162,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			break
 		}
 		auth.Quota.NextRecoverAt = next
+		auth.Quota.BackoffLevel = backoffLevel
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
@@ -2132,6 +2178,39 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
+	}
+}
+
+func classifyFailureResult(err *Error, statusCode int) string {
+	switch {
+	case isModelSupportResultError(err):
+		return "model_not_supported"
+	case isCloudflareChallengeResultError(err):
+		return "cloudflare_challenge"
+	case isInvalidGrantResultError(err):
+		return "invalid_grant"
+	case isInvalidAPIKeyResultError(err):
+		return "invalid_api_key"
+	case isRequestScopedResultError(err):
+		return "request_scoped"
+	case isConnectionLifecycleResultError(err):
+		return "connection_lifecycle"
+	case statusCode == http.StatusUnauthorized:
+		return "unauthorized"
+	case statusCode == http.StatusPaymentRequired || statusCode == http.StatusForbidden:
+		return "payment_required"
+	case statusCode == http.StatusNotFound:
+		return "not_found"
+	case statusCode == http.StatusTooManyRequests:
+		return "quota"
+	case statusCode == http.StatusRequestTimeout ||
+		statusCode == http.StatusInternalServerError ||
+		statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout:
+		return "transient_upstream_error"
+	default:
+		return "request_failed"
 	}
 }
 
@@ -2157,15 +2236,17 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 	if prevLevel < 0 {
 		prevLevel = 0
 	}
-	if disableCooling {
-		return 0, prevLevel
-	}
 	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
 	if cooldown < quotaBackoffBase {
 		cooldown = quotaBackoffBase
 	}
+	nextLevel := prevLevel + 1
 	if cooldown >= quotaBackoffMax {
-		return quotaBackoffMax, prevLevel
+		cooldown = quotaBackoffMax
+		nextLevel = prevLevel
 	}
-	return cooldown, prevLevel + 1
+	if disableCooling {
+		return 0, nextLevel
+	}
+	return cooldown, nextLevel
 }
