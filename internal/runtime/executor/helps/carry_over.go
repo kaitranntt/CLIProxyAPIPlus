@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -165,4 +167,141 @@ func mergeCarryOverIntoSystemMessage(msg []byte, carryOverText string) []byte {
 	}
 
 	return msg
+}
+
+// carryOverClaudeSource extracts unsigned assistant thinking blocks from a
+// Claude request and rewrites them as a top-level system instruction. Signed
+// thinking with a compatible signature is left in place so the normal registry
+// path can map it to reasoning_content. This runs before registry translation
+// so plugin NormalizeRequest hooks still see a Claude-shaped payload.
+func carryOverClaudeSource(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	var blocks []string
+	keptMessages := make([][]byte, 0, len(messages.Array()))
+
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		role := msg.Get("role").String()
+		if role != "assistant" {
+			keptMessages = append(keptMessages, []byte(msg.Raw))
+			return true
+		}
+
+		content := msg.Get("content")
+		if !content.IsArray() {
+			keptMessages = append(keptMessages, []byte(msg.Raw))
+			return true
+		}
+
+		var keptParts [][]byte
+		hasToolUse := false
+		extractedFromThis := false
+
+		content.ForEach(func(_, part gjson.Result) bool {
+			partType := part.Get("type").String()
+			if partType == "tool_use" {
+				hasToolUse = true
+			}
+			if partType != "thinking" {
+				if part.IsObject() {
+					keptParts = append(keptParts, []byte(part.Raw))
+				}
+				return true
+			}
+
+			text := thinking.GetThinkingText(part)
+			if strings.TrimSpace(text) == "" {
+				return true
+			}
+
+			if isUnsignedClaudeThinking(part) {
+				extractedFromThis = true
+				blocks = append(blocks, text)
+				return true
+			}
+
+			keptParts = append(keptParts, []byte(part.Raw))
+			return true
+		})
+
+		if !extractedFromThis {
+			keptMessages = append(keptMessages, []byte(msg.Raw))
+			return true
+		}
+
+		if len(keptParts) == 0 && !hasToolUse {
+			// assistant turn was only unsigned thinking; drop it
+			return true
+		}
+
+		updated := []byte(msg.Raw)
+		if len(keptParts) == 0 {
+			updated, _ = sjson.SetRawBytes(updated, "content", []byte("[]"))
+		} else {
+			updated, _ = sjson.SetRawBytes(updated, "content", translatorcommon.JoinRawArray(keptParts))
+		}
+		keptMessages = append(keptMessages, updated)
+		return true
+	})
+
+	if len(blocks) == 0 {
+		return payload
+	}
+
+	systemText := carryOverLabel + ":\n\n" + formatCarryOverText(blocks)
+	payload = injectClaudeCarryOverSystem(payload, systemText)
+	return translatorcommon.SetRawArrayItems(payload, "messages", keptMessages)
+}
+
+func isUnsignedClaudeThinking(part gjson.Result) bool {
+	sig := part.Get("signature").String()
+	if strings.TrimSpace(sig) == "" {
+		return true
+	}
+	_, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, sig)
+	return !ok
+}
+
+func injectClaudeCarryOverSystem(payload []byte, carryOverText string) []byte {
+	system := gjson.GetBytes(payload, "system")
+
+	switch {
+	case !system.Exists() || system.Type == gjson.Null:
+		payload, _ = sjson.SetBytes(payload, "system", carryOverText)
+
+	case system.Type == gjson.String:
+		var merged string
+		if strings.TrimSpace(system.String()) != "" {
+			merged = carryOverText + "\n\n" + system.String()
+		} else {
+			merged = carryOverText
+		}
+		payload, _ = sjson.SetBytes(payload, "system", merged)
+
+	case system.IsArray():
+		newPart := []byte(`{"type":"text","text":""}`)
+		newPart, _ = sjson.SetBytes(newPart, "text", carryOverText)
+
+		items := [][]byte{newPart}
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.IsObject() {
+				items = append(items, []byte(part.Raw))
+			}
+			return true
+		})
+
+		payload, _ = sjson.SetRawBytes(payload, "system", translatorcommon.JoinRawArray(items))
+
+	default:
+		payload, _ = sjson.SetBytes(payload, "system", carryOverText)
+	}
+
+	return payload
 }
