@@ -6454,7 +6454,7 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 }
 
 func TestStripCacheControls(t *testing.T) {
-	payload := []byte(`{"model":"claude-opus-4","system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"t","cache_control":{"type":"ephemeral"},"input_schema":{"type":"object","properties":{"cache_control":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}],"cache_control":{"type":"ephemeral"}}]}`)
+	payload := []byte(`{"model":"claude-opus-4","system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"t","cache_control":{"type":"ephemeral"},"input_schema":{"type":"object","properties":{"cache_control":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}},{"type":"tool_use","tool_use_id":"tu_1","name":"tool","input":{"cache_control":{"type":"string"}}}],"cache_control":{"type":"ephemeral"}}]}`)
 	got := stripCacheControls(payload)
 
 	for _, path := range []string{
@@ -6467,9 +6467,13 @@ func TestStripCacheControls(t *testing.T) {
 			t.Fatalf("cache_control still present at %q: %s", path, got)
 		}
 	}
-	// cache_control inside a tool input_schema is data, not an Anthropic marker.
+	// cache_control inside a tool input_schema or tool_use input is data,
+	// not an Anthropic marker.
 	if gjson.GetBytes(got, "tools.0.input_schema.properties.cache_control.type").String() != "string" {
 		t.Fatalf("tool input_schema property cache_control should be preserved, got %s", got)
+	}
+	if gjson.GetBytes(got, "messages.0.content.1.input.cache_control.type").String() != "string" {
+		t.Fatalf("tool_use input property cache_control should be preserved, got %s", got)
 	}
 	if gjson.GetBytes(got, "system.0.text").String() != "sys" {
 		t.Fatalf("system text not preserved, got %s", got)
