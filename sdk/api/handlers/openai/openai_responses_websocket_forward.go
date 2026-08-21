@@ -66,7 +66,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
 			}
 
-			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), sanitizeResponsesStreamErrorMessage(errMsg))
 			if opts.suppressError != nil && opts.suppressError(errMsg) {
 				cancel(errMsg.Error)
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
@@ -129,7 +129,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if eventType == wsEventTypeError {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
 					if h != nil {
-						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
+						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), sanitizeResponsesStreamErrorMessage(payloadErrMsg))
 					}
 					if opts.suppressError != nil && opts.suppressError(payloadErrMsg) {
 						cancel(payloadErrMsg.Error)

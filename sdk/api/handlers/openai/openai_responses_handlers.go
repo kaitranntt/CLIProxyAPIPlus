@@ -1024,8 +1024,12 @@ func truncateResponsesStreamErrorText(text string, limit int) string {
 }
 
 func redactResponsesStreamErrorText(text string) string {
-	text = responsesStreamSensitiveValuePattern.ReplaceAllString(text, `${1}[REDACTED]`)
-	return responsesStreamBearerPattern.ReplaceAllString(text, "Bearer [REDACTED]")
+	// The bearer pattern must run first: it consumes the whole credential
+	// ("Bearer <token>"), while the key/value pattern would otherwise match
+	// "Bearer" itself as the value of an Authorization header and leave the
+	// token behind in the clear.
+	text = responsesStreamBearerPattern.ReplaceAllString(text, "Bearer [REDACTED]")
+	return responsesStreamSensitiveValuePattern.ReplaceAllString(text, `${1}[REDACTED]`)
 }
 
 func sanitizeResponsesStreamEventName(eventName string) string {
