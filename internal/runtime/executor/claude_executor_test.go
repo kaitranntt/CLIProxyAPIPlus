@@ -6455,7 +6455,11 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 
 func TestApplyCloaking_DeterministicUserID(t *testing.T) {
 	cfg := &config.Config{}
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "cloak_mode": "always"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":             "key-123",
+		"cloak_mode":          "always",
+		"cloak_cache_user_id": "true",
+	}}
 	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
 
 	first, cloaked, err := applyCloaking(context.Background(), cfg, auth, payload, "key-123", false, false)
@@ -6480,11 +6484,15 @@ func TestApplyCloaking_DeterministicUserID(t *testing.T) {
 		t.Fatal("metadata.user_id is empty")
 	}
 	if userID1 != userID2 {
-		t.Fatalf("same conversation produced different metadata.user_id: %q vs %q", userID1, userID2)
+		t.Fatalf("cache-user-id:true must produce a stable user_id, got %q vs %q", userID1, userID2)
 	}
 
 	// Different credentials must produce different user IDs.
-	auth2 := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-456", "cloak_mode": "always"}}
+	auth2 := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":             "key-456",
+		"cloak_mode":          "always",
+		"cloak_cache_user_id": "true",
+	}}
 	third, _, _ := applyCloaking(context.Background(), cfg, auth2, payload, "key-456", false, false)
 	userID3 := gjson.GetBytes(third, "metadata.user_id").String()
 	if userID1 == userID3 {
@@ -6500,5 +6508,99 @@ func TestApplyCloaking_DeterministicUserID(t *testing.T) {
 	}
 	if got := gjson.GetBytes(fourth, "metadata.user_id").String(); got != callerUserID {
 		t.Fatalf("caller-supplied metadata.user_id not preserved, got %q want %q", got, callerUserID)
+	}
+}
+
+func TestApplyCloaking_NonCachedUserIDIsRandom(t *testing.T) {
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "key-123",
+		"cloak_mode": "always",
+	}}
+	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	first, cloaked, err := applyCloaking(context.Background(), cfg, auth, payload, "key-123", false, false)
+	if err != nil {
+		t.Fatalf("applyCloaking() error = %v", err)
+	}
+	if !cloaked {
+		t.Fatal("applyCloaking() cloaked = false, want true")
+	}
+
+	second, cloaked2, err2 := applyCloaking(context.Background(), cfg, auth, payload, "key-123", false, false)
+	if err2 != nil {
+		t.Fatalf("applyCloaking() second error = %v", err2)
+	}
+	if !cloaked2 {
+		t.Fatal("applyCloaking() second cloaked = false, want true")
+	}
+
+	userID1 := gjson.GetBytes(first, "metadata.user_id").String()
+	userID2 := gjson.GetBytes(second, "metadata.user_id").String()
+	if userID1 == "" || userID2 == "" {
+		t.Fatalf("metadata.user_id is empty: %q, %q", userID1, userID2)
+	}
+
+	deviceID1 := gjson.Get(userID1, "device_id").String()
+	deviceID2 := gjson.Get(userID2, "device_id").String()
+	if deviceID1 == deviceID2 {
+		t.Fatalf("cache-user-id:false must produce a fresh device_id per call, got %q", deviceID1)
+	}
+
+	sessionID1 := gjson.Get(userID1, "session_id").String()
+	sessionID2 := gjson.Get(userID2, "session_id").String()
+	if sessionID1 == "" || sessionID1 != sessionID2 {
+		t.Fatalf("cache-user-id:false must keep the stable session_id, got %q vs %q", sessionID1, sessionID2)
+	}
+}
+
+func TestInjectFakeUserID_CacheEnabledIsDeterministic(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	first, errFirst := injectFakeUserID(context.Background(), payload, "key-cache-enabled", true)
+	if errFirst != nil {
+		t.Fatalf("first injectFakeUserID error: %v", errFirst)
+	}
+	second, errSecond := injectFakeUserID(context.Background(), payload, "key-cache-enabled", true)
+	if errSecond != nil {
+		t.Fatalf("second injectFakeUserID error: %v", errSecond)
+	}
+
+	firstID := gjson.GetBytes(first, "metadata.user_id").String()
+	secondID := gjson.GetBytes(second, "metadata.user_id").String()
+	if firstID == "" || secondID == "" {
+		t.Fatalf("user_id not injected: first=%q second=%q", firstID, secondID)
+	}
+	if firstID != secondID {
+		t.Fatalf("cache-user-id:true must produce a stable user_id, got %q and %q", firstID, secondID)
+	}
+}
+
+func TestInjectFakeUserID_CacheDisabledIsRandomPerRequest(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	first, errFirst := injectFakeUserID(context.Background(), payload, "key-cache-disabled", false)
+	if errFirst != nil {
+		t.Fatalf("first injectFakeUserID error: %v", errFirst)
+	}
+	second, errSecond := injectFakeUserID(context.Background(), payload, "key-cache-disabled", false)
+	if errSecond != nil {
+		t.Fatalf("second injectFakeUserID error: %v", errSecond)
+	}
+
+	firstID := gjson.GetBytes(first, "metadata.user_id").String()
+	secondID := gjson.GetBytes(second, "metadata.user_id").String()
+	if firstID == "" || secondID == "" {
+		t.Fatalf("user_id not injected: first=%q second=%q", firstID, secondID)
+	}
+
+	firstDevice := gjson.Get(firstID, "device_id").String()
+	secondDevice := gjson.Get(secondID, "device_id").String()
+	if firstDevice == secondDevice {
+		t.Fatalf("cache-user-id:false must produce a fresh device_id per request, got %q", firstDevice)
+	}
+
+	firstSession := gjson.Get(firstID, "session_id").String()
+	secondSession := gjson.Get(secondID, "session_id").String()
+	if firstSession == "" || firstSession != secondSession {
+		t.Fatalf("cache-user-id:false must keep the stable session_id, got %q vs %q", firstSession, secondSession)
 	}
 }
