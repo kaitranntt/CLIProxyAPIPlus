@@ -664,7 +664,6 @@ func TestConvertGeminiResponseToClaude_ThinkingContinuationsAfterSignedAndVisibl
 	}
 }
 
-
 func TestConvertGeminiResponseToClaude_SignatureBeforeThinkingTextEmitsSignatureDelta(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	chunk1 := []byte(`{
@@ -793,7 +792,6 @@ func TestConvertGeminiResponseToClaude_ThreeConsecutiveSignaturesSplitBlocks(t *
 		t.Fatalf("expected exactly 3 signature_deltas, got %d: %s", sigCount, outputText)
 	}
 }
-
 
 func TestConvertGeminiResponseToClaude_MultiPartMixedThoughtVisibleToolSignatures(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
