@@ -224,10 +224,15 @@ func TestAntigravityConcurrentRequestsReusePooledConnections(t *testing.T) {
 	mu.Unlock()
 	// The first wave legitimately opens perWave connections. Later waves must reuse
 	// them; with MaxIdleConnsPerHost=2 only two survive each wave and distinct grows
-	// towards totalConns instead.
-	if distinct > perWave {
+	// towards totalConns instead. A wave boundary can cost one extra dial when a
+	// connection is retired between waves (the server closes an idle connection at
+	// exactly the wrong moment), so allow one stray dial per later wave: that still
+	// cleanly separates the pooled case from the MaxIdleConnsPerHost=2 regression
+	// (which would open roughly totalConns - 2*(waves-1) distinct connections).
+	maxAllowed := perWave + (waves - 1)
+	if distinct > maxAllowed {
 		t.Fatalf("%d waves of %d concurrent requests opened %d connections, want at most %d (unpooled worst case is %d)",
-			waves, perWave, distinct, perWave, totalConns)
+			waves, perWave, distinct, maxAllowed, totalConns)
 	}
 }
 
