@@ -6453,6 +6453,7 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestApplyCloaking_DeterministicUserID(t *testing.T) {
 	cfg := &config.Config{}
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "cloak_mode": "always", "cloak_cache_user_id": "true"}}
@@ -6587,5 +6588,51 @@ func TestInjectFakeUserID_CacheDisabledIsRandomPerRequest(t *testing.T) {
 	secondSession := gjson.Get(secondID, "session_id").String()
 	if firstSession == "" || firstSession != secondSession {
 		t.Fatalf("cache-user-id:false must keep the stable session_id, got %q vs %q", firstSession, secondSession)
+	}
+}
+
+func TestStripCacheControls(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4","system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"t","cache_control":{"type":"ephemeral"},"input_schema":{"type":"object","properties":{"cache_control":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}],"cache_control":{"type":"ephemeral"}}]}`)
+	got := stripCacheControls(payload)
+
+	for _, path := range []string{
+		"system.0.cache_control",
+		"tools.0.cache_control",
+		"messages.0.cache_control",
+		"messages.0.content.0.cache_control",
+	} {
+		if gjson.GetBytes(got, path).Exists() {
+			t.Fatalf("cache_control still present at %q: %s", path, got)
+		}
+	}
+	// cache_control inside a tool input_schema is data, not an Anthropic marker.
+	if gjson.GetBytes(got, "tools.0.input_schema.properties.cache_control.type").String() != "string" {
+		t.Fatalf("tool input_schema property cache_control should be preserved, got %s", got)
+	}
+	if gjson.GetBytes(got, "system.0.text").String() != "sys" {
+		t.Fatalf("system text not preserved, got %s", got)
+	}
+	if gjson.GetBytes(got, "messages.0.content.0.text").String() != "hi" {
+		t.Fatalf("message content not preserved, got %s", got)
+	}
+}
+
+func TestStripCacheControls_NestedToolResultContent(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":[{"type":"text","text":"result","cache_control":{"type":"ephemeral"}}],"cache_control":{"type":"ephemeral"}}]}]}`)
+	got := stripCacheControls(payload)
+
+	for _, path := range []string{
+		"messages.0.content.0.cache_control",
+		"messages.0.content.0.content.0.cache_control",
+	} {
+		if gjson.GetBytes(got, path).Exists() {
+			t.Fatalf("cache_control still present at %q: %s", path, got)
+		}
+	}
+	if gjson.GetBytes(got, "messages.0.content.0.tool_use_id").String() != "tu_1" {
+		t.Fatalf("tool_use_id not preserved, got %s", got)
+	}
+	if gjson.GetBytes(got, "messages.0.content.0.content.0.text").String() != "result" {
+		t.Fatalf("nested tool_result content not preserved, got %s", got)
 	}
 }
