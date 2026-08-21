@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -245,5 +246,116 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_DisabledByDefault(t *testi
 	// Non-compat default drops unsigned thinking.
 	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
 		t.Fatalf("unsigned thinking should not become reasoning_content on default non-compat path, got %s", string(out))
+	}
+}
+
+func validGPTChatReasoningSignature() string {
+	raw := make([]byte, 1+8+16+16+32)
+	raw[0] = 0x80
+	raw[8] = 1
+	for i := 9; i < len(raw); i++ {
+		raw[i] = byte(i)
+	}
+	return base64.URLEncoding.EncodeToString(raw)
+}
+
+func TestTranslateRequestWithAPIKeyModelCompatibility_CarryOverKeepsSignedReasoningContent(t *testing.T) {
+	cfg := &config.Config{
+		Translator: config.TranslatorConfig{
+			CarryOverThinkingInSystem: true,
+		},
+	}
+
+	sig := validGPTChatReasoningSignature()
+	claudePayload := []byte(`{
+		"model": "claude-3-opus",
+		"messages": [
+			{"role": "assistant", "content": [
+				{"type":"thinking","thinking":"unsigned fallback reasoning"},
+				{"type":"thinking","thinking":"signed canonical reasoning","signature":"` + sig + `"},
+				{"type":"text","text":"hi"}
+			]}
+		]
+	}`)
+
+	out := TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, cfg, sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, "test", claudePayload, false, false)
+
+	system := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(system, "unsigned fallback reasoning") {
+		t.Fatalf("expected unsigned reasoning in system message, got %s", string(out))
+	}
+	if strings.Contains(system, "signed canonical reasoning") {
+		t.Fatalf("signed reasoning should stay as reasoning_content, got %s", string(out))
+	}
+
+	assistant := gjson.GetBytes(out, "messages.1")
+	if assistant.Get("role").String() != "assistant" {
+		t.Fatalf("expected assistant message, got %s", assistant.Raw)
+	}
+	if !strings.Contains(assistant.Get("reasoning_content").String(), "signed canonical reasoning") {
+		t.Fatalf("expected signed reasoning as reasoning_content, got %s", string(out))
+	}
+	if assistant.Get("content.0.text").String() != "hi" {
+		t.Fatalf("expected assistant content to be preserved, got %s", string(out))
+	}
+}
+
+func TestTranslateRequestWithAPIKeyModelCompatibility_CarryOverMergesWithSystem(t *testing.T) {
+	cfg := &config.Config{
+		Translator: config.TranslatorConfig{
+			CarryOverThinkingInSystem: true,
+		},
+	}
+
+	claudePayload := []byte(`{
+		"model": "claude-3-opus",
+		"system": "Base instructions",
+		"messages": [
+			{"role": "assistant", "content": [{"type":"thinking","thinking":"prior reasoning"}]}
+		]
+	}`)
+
+	out := TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, cfg, sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, "test", claudePayload, false, false)
+
+	system := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(system, carryOverLabel) {
+		t.Fatalf("expected carry-over label in system message, got %q", system)
+	}
+	if !strings.Contains(system, "Base instructions") {
+		t.Fatalf("expected original system instructions to be preserved, got %q", system)
+	}
+	if !strings.Contains(system, "prior reasoning") {
+		t.Fatalf("expected prior reasoning in system message, got %q", system)
+	}
+}
+
+func TestTranslateRequestWithAPIKeyModelCompatibility_CarryOverKeepsToolCalls(t *testing.T) {
+	cfg := &config.Config{
+		Translator: config.TranslatorConfig{
+			CarryOverThinkingInSystem: true,
+		},
+	}
+
+	claudePayload := []byte(`{
+		"model": "claude-3-opus",
+		"messages": [
+			{"role": "assistant", "content": [
+				{"type":"thinking","thinking":"tool planning"},
+				{"type":"tool_use","id":"tu_1","name":"do_work","input":{"x":1}}
+			]}
+		]
+	}`)
+
+	out := TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, cfg, sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, "test", claudePayload, false, false)
+
+	if gjson.GetBytes(out, "messages.#").Int() != 2 {
+		t.Fatalf("expected 2 messages, got %d: %s", gjson.GetBytes(out, "messages.#").Int(), string(out))
+	}
+	system := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(system, "tool planning") {
+		t.Fatalf("expected tool planning in system message, got %q", system)
+	}
+	if !gjson.GetBytes(out, "messages.1.tool_calls").Exists() {
+		t.Fatalf("expected assistant tool_calls to be preserved, got %s", string(out))
 	}
 }
