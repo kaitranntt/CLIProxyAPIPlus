@@ -126,8 +126,43 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 
 			rawSignature := part.Get("signature").String()
 			if opts.PreserveEmptyThinkingBlocks {
-				report.Preserved++
-				keptParts = append(keptParts, part.Raw)
+				// In compat mode the block shape must survive, but the signature still
+				// needs to be normalized, emulated, or stripped to avoid sending an
+				// incompatible or opaque signature to the upstream.
+				decision := DecideSignatureCompatibilityForModel(targetProvider, opts.TargetModel, rawSignature, SignatureBlockKindClaudeThinking)
+				decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
+				report.Decisions = append(report.Decisions, decision)
+
+				switch decision.Action {
+				case SignatureActionPreserve:
+					report.Preserved++
+					if decision.NormalizedSignature != "" && decision.NormalizedSignature != rawSignature {
+						updated, _ := sjson.Set(part.Raw, "signature", decision.NormalizedSignature)
+						keptParts = append(keptParts, updated)
+						messageModified = true
+					} else {
+						keptParts = append(keptParts, part.Raw)
+					}
+				case SignatureActionReplaceWithGeminiBypass:
+					report.ReplacedSignatures++
+					updated, _ := sjson.Set(part.Raw, "signature", decision.ReplacementSignature)
+					keptParts = append(keptParts, updated)
+					messageModified = true
+				default:
+					// DropBlock, DropSignature, or NoCompatibleReplacement: keep the
+					// block shape for the compat endpoint, but strip the signature unless
+					// it is at least a decodable Claude E/R shape (short synthetic
+					// signatures used by the Claude thinking replay cache).
+					if targetProvider == SignatureProviderClaude && HasDecodableClaudeThinkingSignature(rawSignature) {
+						report.Preserved++
+						keptParts = append(keptParts, part.Raw)
+					} else {
+						report.DroppedSignatures++
+						updated, _ := sjson.Delete(part.Raw, "signature")
+						keptParts = append(keptParts, updated)
+					}
+					messageModified = true
+				}
 				continue
 			}
 			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
