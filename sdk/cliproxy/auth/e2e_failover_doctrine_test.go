@@ -95,9 +95,6 @@ func (e *doctrineExecutor) Execute(_ context.Context, auth *Auth, req cliproxyex
 	if err := e.executeErrs[auth.ID]; err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if p, ok := e.executePayloads[auth.ID]; ok {
-		return cliproxyexecutor.Response{Payload: append([]byte(nil), p...)}, nil
-	}
 	if e.firstExecuteEmpty && !e.firstExecuteDone {
 		e.firstExecuteDone = true
 		return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)}, nil
@@ -107,6 +104,9 @@ func (e *doctrineExecutor) Execute(_ context.Context, auth *Auth, req cliproxyex
 			return cliproxyexecutor.Response{}, e.failFirstError
 		}
 		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}
+	}
+	if p, ok := e.executePayloads[auth.ID]; ok {
+		return cliproxyexecutor.Response{Payload: append([]byte(nil), p...)}, nil
 	}
 	return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":"ok"}}]}`)}, nil
 }
@@ -509,12 +509,9 @@ func TestAliasedAccountDiscoveredWhenSiblingsDie(t *testing.T) {
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 	manager.RefreshSchedulerEntry(auth.ID)
 
-	// First sibling model is exhausted; second sibling is healthy.
-	exec.executeErrs[auth.ID] = &doctrineRetryAfterError{
-		status:     http.StatusTooManyRequests,
-		message:    "quota",
-		retryAfter: 5 * time.Minute,
-	}
+	// First resolved sibling model fails; the second sibling is healthy and
+	// returns the payload below.
+	exec.failFirstN = 1
 	exec.executePayloads[auth.ID] = []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
 
 	resp, err := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "g25p"}, cliproxyexecutor.Options{})
