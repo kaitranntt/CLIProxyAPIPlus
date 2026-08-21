@@ -422,8 +422,9 @@ func TestAllButOneDeadStillServes(t *testing.T) {
 // while the fallback auth is still healthy.
 func TestAffinityStaysHealthyAfterTransientBlip(t *testing.T) {
 	// Shrink the transient cooldown so the test does not sleep for a minute.
+	previousTransient := transientErrorCooldownSeconds.Load()
 	SetTransientErrorCooldownSeconds(1)
-	defer SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
 
 	exec := newDoctrineExecutor("claude")
 	manager, _, model := newDoctrineManager(t, exec, 2)
