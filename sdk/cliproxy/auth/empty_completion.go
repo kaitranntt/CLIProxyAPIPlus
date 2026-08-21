@@ -964,9 +964,10 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 				if strings.TrimSpace(part.Text) != "" {
 					a.hasContent = true
 				}
-				if strings.TrimSpace(part.ThoughtSignature) != "" || strings.TrimSpace(part.Thought_Signature) != "" {
-					a.hasContent = true
-				}
+				// A signature alone must not count as content: it can be replay
+				// metadata for an upstream that returned nothing. Visible text,
+				// tool calls, or positive token usage still keep the completion
+				// from being classified as empty.
 			}
 		}
 	}

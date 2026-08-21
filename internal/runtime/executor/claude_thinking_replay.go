@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // claudeThinkingReplayScope reuses the bounded replay state shape shared with Kimi.
@@ -34,9 +37,18 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 }
 
 // A missing session identity intentionally disables replay instead of sharing hidden reasoning across callers.
+// When no caller session is available, we fall back to a conversation-scoped
+// key derived from the first user message and system content, so distinct
+// conversations through the same credential cannot see each other's cached
+// signatures.
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
 	sessionKey := codexReasoningReplaySessionKey(ctx, sdktranslator.FormatClaude, req, opts, req.Payload)
-	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
+	if sessionKey != "" {
+		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
+	}
+	if sessionKey == "" {
+		sessionKey = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
+	}
 	return claudeThinkingReplayScope{
 		modelFamily: claudeThinkingReplayModelFamily(auth, req.Model),
 		sessionKey:  sessionKey,
@@ -66,38 +78,222 @@ func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) stri
 	return "claude:" + hex.EncodeToString(sum[:8]) + ":" + baseModel
 }
 
-func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, claudeThinkingReplayScope) {
+// obfuscateClaudeThinkingReplayContents applies the same sensitive-word
+// obfuscation to cached assistant content that applyCloaking applies to the
+// upstream body. This lets the post-cloak replay match compare like-for-like
+// bytes instead of failing because the caller body is obfuscated and the cache
+// is not.
+func obfuscateClaudeThinkingReplayContents(contents [][]byte, words []string) [][]byte {
+	matcher := helps.BuildSensitiveWordMatcher(words)
+	if matcher == nil {
+		return contents
+	}
+	out := make([][]byte, len(contents))
+	for i, content := range contents {
+		wrapper, _ := sjson.SetRawBytes([]byte(`{"messages":[{"role":"assistant"}]}`), "messages.0.content", content)
+		obfuscated := helps.ObfuscateSensitiveWords(wrapper, matcher)
+		obfuscatedContent := gjson.GetBytes(obfuscated, "messages.0.content")
+		if !obfuscatedContent.Exists() {
+			out[i] = content
+			continue
+		}
+		out[i] = []byte(obfuscatedContent.Raw)
+	}
+	return out
+}
+
+// prepareClaudeThinkingReplayRequest loads cached assistant content for this
+// request and strips any client-supplied _cliproxy_replay_provenance markers
+// from req.Payload. The actual restore is applied to bodyForUpstream after
+// signature sanitization and before MCP tool-name remapping, so cache-provenanced
+// signatures bypass the sanitizer while matching against the caller-facing body.
+func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (claudeThinkingReplayScope, [][]byte, bool) {
 	scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
 	if !scope.valid() {
-		return req, scope
+		return scope, nil, false
 	}
+
+	req.Payload = stripClaudeThinkingReplayProvenanceMarkers(req.Payload)
+
 	contents, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotRequired(ctx, scope.modelFamily, scope.sessionKey)
 	scope.snapshot = snapshot
 	scope.cacheReady = errGet == nil
 	if errGet != nil {
 		log.Warnf("claude compatible thinking replay cache read failed: %v", errGet)
-		return req, scope
+		return scope, nil, false
 	}
 	if !found {
-		return req, scope
+		return scope, nil, false
 	}
-	updated, restored := restoreClaudeThinkingReplayContents(req.Payload, contents)
-	if restored {
-		req.Payload = updated
-		scope.replayApplied = true
+	// Normalize cached tool_use parts to match the shape the sanitizer will apply
+	// to the upstream body, so an echo'd tool_use with provenance fields does not
+	// fail the canonical comparison.
+	normalized := make([][]byte, len(contents))
+	for i, content := range contents {
+		normalized[i] = claudeThinkingReplayNormalizeCachedContent(content)
 	}
-	return req, scope
+	return scope, normalized, true
+}
+
+// claudeThinkingReplayNormalizeCachedContent strips tool-use signature/provenance
+// fields from a cached assistant content array. This lets the replay match compare
+// the same normalized shape the upstream sanitizer produces, while the restored
+// content still carries the trusted thinking signature.
+func claudeThinkingReplayNormalizeCachedContent(content []byte) []byte {
+	root := gjson.ParseBytes(content)
+	if !root.IsArray() {
+		return content
+	}
+	parts := root.Array()
+	outParts := make([]string, len(parts))
+	modified := false
+	for i, part := range parts {
+		if strings.TrimSpace(part.Get("type").String()) == "tool_use" {
+			updated, changed := signature.StripClaudeToolUseSignatureFields(part)
+			outParts[i] = updated
+			modified = modified || changed
+			continue
+		}
+		outParts[i] = part.Raw
+	}
+	if !modified {
+		return content
+	}
+	return []byte("[" + strings.Join(outParts, ",") + "]")
+}
+
+// stripClaudeThinkingReplayProvenanceMarkers removes any client-supplied
+// _cliproxy_replay_provenance fields from thinking blocks in the request payload
+// before the sanitizer runs. The marker is internal-only.
+func stripClaudeThinkingReplayProvenanceMarkers(payload []byte) []byte {
+	root := gjson.GetBytes(payload, "messages")
+	if !root.IsArray() {
+		return payload
+	}
+	updated := payload
+	modified := false
+	for i, message := range root.Array() {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for j, part := range content.Array() {
+			if strings.TrimSpace(part.Get("type").String()) != "thinking" {
+				continue
+			}
+			if !part.Get("_cliproxy_replay_provenance").Exists() {
+				continue
+			}
+			path := fmt.Sprintf("messages.%d.content.%d._cliproxy_replay_provenance", i, j)
+			out, _ := sjson.DeleteBytes(updated, path)
+			updated = out
+			modified = true
+		}
+	}
+	if !modified {
+		return payload
+	}
+	return updated
 }
 
 func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
 	updated := body
 	restored := false
-	for _, cachedContent := range cachedContents {
-		var restoredTurn bool
-		updated, restoredTurn = restoreKimiThinkingReplayContent(updated, cachedContent)
-		restored = restored || restoredTurn
+	consumed := make([]bool, len(cachedContents))
+	messages := gjson.GetBytes(updated, "messages")
+	if !messages.IsArray() {
+		return body, false
+	}
+	msgList := messages.Array()
+
+	// Anchor the match window to the first assistant message present in the
+	// incoming request. When clients compact or truncate earlier history, cached
+	// turns older than the first echoed assistant message must not be replayed
+	// into a later matching turn.
+	firstAssistant := -1
+	for i, message := range msgList {
+		if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
+			firstAssistant = i
+			break
+		}
+	}
+	if firstAssistant >= 0 {
+		start := claudeThinkingReplayFindStartIndex(msgList[firstAssistant].Get("content"), cachedContents)
+		for j := 0; j < start; j++ {
+			consumed[j] = true
+		}
+	}
+
+	for i, message := range msgList {
+		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
+			continue
+		}
+		currentContent := message.Get("content")
+		if !currentContent.IsArray() {
+			continue
+		}
+		for j, cachedContent := range cachedContents {
+			if consumed[j] {
+				continue
+			}
+			cached := gjson.ParseBytes(cachedContent)
+			if !claudeThinkingReplayContentsMatch(currentContent, cached) {
+				continue
+			}
+			if !kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
+				var errSet error
+				updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContent)
+				if errSet != nil {
+					return body, false
+				}
+				restored = true
+			}
+			consumed[j] = true
+			break
+		}
 	}
 	return updated, restored
+}
+
+// claudeThinkingReplayContentsMatch reports whether an incoming assistant
+// content array matches a cached assistant turn. It accepts exact equality or
+// non-thinking parts equal and, when the incoming content already contains a
+// thinking block, the thinking text matching the cached one.
+func claudeThinkingReplayContentsMatch(currentContent, cachedContent gjson.Result) bool {
+	if !currentContent.IsArray() || !cachedContent.IsArray() {
+		return false
+	}
+	if kimiJSONEqual([]byte(currentContent.Raw), []byte(cachedContent.Raw)) {
+		return true
+	}
+	cachedParts, ok := kimiNonThinkingContentParts(cachedContent)
+	if !ok {
+		return false
+	}
+	currentParts, ok := kimiNonThinkingContentParts(currentContent)
+	if !ok || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
+		return false
+	}
+	if kimiContentHasThinking(currentContent) && !kimiThinkingMatchesCachedIgnoringSignature(currentContent, cachedContent) {
+		return false
+	}
+	return true
+}
+
+// claudeThinkingReplayFindStartIndex finds the index of the first cached turn
+// that matches the first assistant message present in the request. Cached
+// entries before this index are older than the client's oldest echoed
+// assistant message and must not be replayed into later turns.
+func claudeThinkingReplayFindStartIndex(firstContent gjson.Result, cachedContents [][]byte) int {
+	if !firstContent.IsArray() {
+		return 0
+	}
+	for j, cachedContent := range cachedContents {
+		if claudeThinkingReplayContentsMatch(firstContent, gjson.ParseBytes(cachedContent)) {
+			return j
+		}
+	}
+	return 0
 }
 
 func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinkingReplayScope, response []byte) {
@@ -117,13 +313,14 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 	if !scope.valid() || !scope.cacheReady {
 		return
 	}
+	// Unsigned or non-replayable responses must not evict earlier signed turns.
+	// Only append turns that carry signed thinking; prior replay state is retained
+	// for the next request that echoes an earlier assistant message.
 	if kimiThinkingReplayContentIsReplayable(content) {
 		if _, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content); errReplace != nil {
 			log.Warnf("claude compatible thinking replay cache replace failed: %v", errReplace)
 		}
-		return
 	}
-	clearClaudeThinkingReplayContent(ctx, scope)
 }
 
 func clearClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingReplayScope) {
