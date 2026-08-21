@@ -137,6 +137,12 @@ func formatCarryOverText(blocks []string) string {
 	return strings.Join(parts, "\n")
 }
 
+func newCarryOverTextPart(text string) []byte {
+	part := []byte(`{"type":"text","text":""}`)
+	part, _ = sjson.SetBytes(part, "text", text)
+	return part
+}
+
 func mergeCarryOverIntoSystemMessage(msg []byte, carryOverText string) []byte {
 	c := gjson.GetBytes(msg, "content")
 
@@ -149,13 +155,13 @@ func mergeCarryOverIntoSystemMessage(msg []byte, carryOverText string) []byte {
 		msg, _ = sjson.SetBytes(msg, "content", merged)
 
 	case c.IsArray():
-		newPart := []byte(`{"type":"text","text":""}`)
-		newPart, _ = sjson.SetBytes(newPart, "text", carryOverText)
-
-		items := [][]byte{newPart}
+		items := [][]byte{newCarryOverTextPart(carryOverText)}
 		c.ForEach(func(_, part gjson.Result) bool {
-			if part.IsObject() {
+			switch {
+			case part.IsObject():
 				items = append(items, []byte(part.Raw))
+			case part.Type == gjson.String:
+				items = append(items, newCarryOverTextPart(part.String()))
 			}
 			return true
 		})
@@ -286,13 +292,13 @@ func injectClaudeCarryOverSystem(payload []byte, carryOverText string) []byte {
 		payload, _ = sjson.SetBytes(payload, "system", merged)
 
 	case system.IsArray():
-		newPart := []byte(`{"type":"text","text":""}`)
-		newPart, _ = sjson.SetBytes(newPart, "text", carryOverText)
-
-		items := [][]byte{newPart}
+		items := [][]byte{newCarryOverTextPart(carryOverText)}
 		system.ForEach(func(_, part gjson.Result) bool {
-			if part.IsObject() {
+			switch {
+			case part.IsObject():
 				items = append(items, []byte(part.Raw))
+			case part.Type == gjson.String:
+				items = append(items, newCarryOverTextPart(part.String()))
 			}
 			return true
 		})

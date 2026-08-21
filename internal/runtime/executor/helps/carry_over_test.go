@@ -161,6 +161,25 @@ func TestCarryOverThinkingToSystem_TruncatesLongBlock(t *testing.T) {
 	}
 }
 
+func TestCarryOverThinkingToSystem_PreservesStringArrayElements(t *testing.T) {
+	input := []byte(`{
+		"model": "test",
+		"messages": [
+			{"role": "system", "content": ["plain string", {"type":"text","text":"object part"}]},
+			{"role": "assistant", "reasoning_content": "thinking", "content": "hi"}
+		]
+	}`)
+
+	out := CarryOverThinkingToSystem(input)
+
+	if gjson.GetBytes(out, "messages.0.content.1.type").String() != "text" || gjson.GetBytes(out, "messages.0.content.1.text").String() != "plain string" {
+		t.Fatalf("expected plain string to be wrapped and preserved, got %s", string(out))
+	}
+	if gjson.GetBytes(out, "messages.0.content.2.text").String() != "object part" {
+		t.Fatalf("expected object part to be preserved, got %s", string(out))
+	}
+}
+
 func TestCarryOverThinkingToSystem_NoReasoningLeavesPayloadUnchanged(t *testing.T) {
 	input := []byte(`{"model":"test","messages":[{"role":"user","content":"hello"}]}`)
 	out := CarryOverThinkingToSystem(input)
