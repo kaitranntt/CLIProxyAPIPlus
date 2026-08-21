@@ -170,6 +170,20 @@ save-cooldown-status: false
 # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
 transient-error-cooldown-seconds: 0
 
+# Per-status overrides for transient error cooldowns.
+# Statuses not listed fall back to transient-error-cooldown-seconds.
+# Example:
+# transient-cooldown-by-status:
+#   - status: 408
+#     cooldown-seconds: 2
+#   - status: 503
+#     cooldown-seconds: 10
+
+# Minimum base in seconds for the quota cooldown ladder.
+# Sub-second Retry-After hints are never allowed below this floor. Default 1.
+# Values above 1800 (30 minutes) are clamped to 1800 because the ladder is capped at 30 minutes.
+quota-cooldown-floor-seconds: 1
+
 # When true, globally disable Claude request cloaking (the Claude Code CLI disguise and
 # system prompt replacement), so the original system prompt is passed through to Claude as-is.
 # Individual credentials can still override this: a claude-api-key entry via its "cloak.mode",
