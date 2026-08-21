@@ -207,7 +207,6 @@ func TestConvertClaudeResponseToOpenAINonStream_RefusalStopReason(t *testing.T) 
 	}
 }
 
-
 func TestConvertClaudeResponseToOpenAINonStream_ReasoningContent(t *testing.T) {
 	rawJSON := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-4-6\"}}\n" +
 		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n" +
