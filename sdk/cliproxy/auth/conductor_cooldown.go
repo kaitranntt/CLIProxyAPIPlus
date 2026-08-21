@@ -861,6 +861,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
+							transientCooldownOff := false
 							if !disableCooling {
 								switch {
 								case result.TransientRateLimit:
@@ -873,6 +874,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									} else {
 										next = nextTransientErrorRetryAfter(now)
 									}
+									transientCooldownOff = next.IsZero()
 								case result.RetryAfter != nil && *result.RetryAfter <= 0:
 									// Zero-delay retries keep their hint verbatim: flooring them at the
 									// quota ladder would park a still-usable credential for up to the
@@ -891,6 +893,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
+							}
+							if transientCooldownOff && !state.Quota.Exceeded {
+								// Transient cooldowns are disabled for this auth: keep the model
+								// available instead of recording a zero-time quota block. A
+								// pre-existing quota block is left untouched.
+								state.Unavailable = false
+								state.NextRetryAfter = time.Time{}
+								break
 							}
 							state.NextRetryAfter = next
 							state.Quota = QuotaState{
@@ -2032,10 +2042,13 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = now.Add(12 * time.Hour)
 		}
 	case 429:
+		prevStatusMessage := auth.StatusMessage
+		prevExceeded, prevReason := auth.Quota.Exceeded, auth.Quota.Reason
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		var next time.Time
+		transientCooldownOff := false
 		if !disableCooling {
 			switch {
 			case transientRateLimit:
@@ -2048,6 +2061,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				} else {
 					next = nextTransientErrorRetryAfter(now)
 				}
+				transientCooldownOff = next.IsZero()
 			case retryAfter != nil && *retryAfter <= 0:
 				// Zero-delay retries keep their hint verbatim: flooring them at the quota
 				// ladder would park a still-usable credential for up to the full ladder step.
@@ -2065,6 +2079,15 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 				next = auth.Quota.NextRecoverAt
 			}
+		}
+		if transientCooldownOff && !prevExceeded {
+			// Transient cooldowns are disabled: keep the credential available
+			// instead of recording a zero-time quota block. A pre-existing quota
+			// block is left untouched.
+			auth.StatusMessage = prevStatusMessage
+			auth.Quota.Exceeded = prevExceeded
+			auth.Quota.Reason = prevReason
+			break
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
