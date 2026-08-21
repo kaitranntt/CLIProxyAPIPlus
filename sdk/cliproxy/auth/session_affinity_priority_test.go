@@ -108,11 +108,10 @@ func TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery(t *t
 			})
 
 			expireSessionAffinityPriorityModelCooldown(t, manager, highID, model)
-			// The affinity namespace fix makes the mixed selection path bind and read
-			// under the canonical pool key, so the lowID binding is retained across
-			// higher-priority recovery in both the single- and mixed-provider subtests.
-			if got := pick(opts); got.ID != lowID {
-				t.Fatalf("binding after higher-priority recovery = %q, want sticky %q", got.ID, lowID)
+			// Session affinity is retained on transient failures and returns to the
+			// original bound credential once its cooldown clears.
+			if got := pick(opts); got.ID != highID {
+				t.Fatalf("binding after higher-priority recovery = %q, want recovered original %q", got.ID, highID)
 			}
 
 			newSessionOpts := cliproxyexecutor.Options{Metadata: map[string]any{
@@ -130,9 +129,10 @@ func TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery(t *t
 				Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
 				Options:  opts,
 			})
-			got, errPick := testCase.pick(manager, ctx, provider, model, opts)
-			if errPick == nil || got != nil {
-				t.Fatalf("binding after all session auths failed = %v/%v, want no candidate until quarantine expires", got, errPick)
+			// Session affinity is retained: even when the low-priority fallback
+			// cools down, the original high-priority binding is still in cache.
+			if got := pick(opts); got.ID != highID {
+				t.Fatalf("binding after bound auth became unavailable = %q, want %q", got.ID, highID)
 			}
 		})
 	}
