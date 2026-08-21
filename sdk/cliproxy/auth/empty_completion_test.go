@@ -784,6 +784,33 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		})
 	}
 }
+
+func TestEmptyCompletionPredicateInteractions(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		expected bool
+	}{
+		{
+			name:     "interactions sse stream ending in bare finish with zero output is empty",
+			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\nevent: finish\ndata: {\"event_type\":\"finish\",\"metadata\":{\"total_usage\":{\"total_output_tokens\":0}}}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "interactions sse stream ending in bare finish with output is not empty",
+			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\nevent: finish\ndata: {\"event_type\":\"finish\",\"metadata\":{\"total_usage\":{\"total_output_tokens\":7}}}\n\n"),
+			expected: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEmptyCompletionPayload(tc.payload); got != tc.expected {
+				t.Fatalf("isEmptyCompletionPayload() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}
+
 func TestEmptyCompletionTolerantUsage(t *testing.T) {
 	cases := []struct {
 		name     string
