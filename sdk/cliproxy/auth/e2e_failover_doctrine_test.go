@@ -359,12 +359,29 @@ func TestInStreamProviderErrorDuringBootstrap(t *testing.T) {
 	exec := newDoctrineExecutor("claude")
 	manager, ids, model := newDoctrineManager(t, exec, 2)
 
+	// RoundRobin available list is ID-sorted; make ids[0] the first pick so the
+	// error auth and the fallback auth are deterministic.
+	sort.Strings(ids)
+
 	geminiError := `data: {"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED"}}` + "\n\n"
 	exec.streamPayloads[ids[0]] = [][]byte{[]byte(geminiError)}
 
-	_, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
-	if err == nil {
-		t.Fatal("expected rotation to fallback auth after in-stream provider error")
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("expected rotation to fallback auth, got error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("expected non-nil stream after fallback rotation")
+	}
+	var got strings.Builder
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+	if !strings.Contains(got.String(), "ok") {
+		t.Fatalf("fallback stream payload = %q, want content", got.String())
 	}
 
 	auth, ok := manager.GetByID(ids[0])
