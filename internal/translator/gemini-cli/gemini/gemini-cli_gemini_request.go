@@ -126,7 +126,8 @@ type FunctionCallGroup struct {
 	CallNames       []string // ordered function call names for backfilling empty response names
 }
 
-// backfillFunctionResponseName ensures that a functionResponse JSON object has a non-empty name,
+// normalizeInlineDataPart extracts inline image data from a part, normalizing
+// snake_case and camelCase keys and defaulting the mime type to image/png.
 func normalizeInlineDataPart(part gjson.Result) ([]byte, bool) {
 	inline := part.Get("inlineData")
 	if !inline.Exists() {
@@ -152,6 +153,7 @@ func normalizeInlineDataPart(part gjson.Result) ([]byte, bool) {
 	return out, true
 }
 
+// attachInlineDataToFunctionResponse appends inline image parts to a functionResponse.
 func attachInlineDataToFunctionResponse(response gjson.Result, images [][]byte) gjson.Result {
 	if len(images) == 0 {
 		return response
@@ -194,6 +196,7 @@ func collectFunctionResponsesWithSiblingInlineData(parts gjson.Result) []gjson.R
 	return responses
 }
 
+// backfillFunctionResponseName ensures that a functionResponse JSON object has a non-empty name,
 // falling back to fallbackName if the original is empty.
 func backfillFunctionResponseName(raw string, fallbackName string) string {
 	name := gjson.Get(raw, "functionResponse.name").String()
