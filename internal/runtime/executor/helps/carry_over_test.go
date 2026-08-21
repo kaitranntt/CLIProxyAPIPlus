@@ -228,6 +228,30 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_RespectsCompat(t *testing.
 	}
 }
 
+func TestTranslateRequestWithAPIKeyModelCompatibility_SkipsCarryOverForKimi(t *testing.T) {
+	cfg := &config.Config{
+		Translator: config.TranslatorConfig{
+			CarryOverThinkingInSystem: true,
+		},
+	}
+
+	payload := []byte(`{
+		"model": "kimi-k3",
+		"messages": [
+			{"role": "assistant", "content": "visible", "reasoning_content": "prior reasoning"}
+		]
+	}`)
+
+	out := TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, cfg, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAI, "kimi-k3", payload, false, false)
+
+	if gjson.GetBytes(out, "messages.0.role").String() == "system" {
+		t.Fatalf("carry-over should not move reasoning to system for Kimi, got %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "prior reasoning" {
+		t.Fatalf("Kimi should keep canonical reasoning_content, got %q; output: %s", got, string(out))
+	}
+}
+
 func TestTranslateRequestWithAPIKeyModelCompatibility_DisabledByDefault(t *testing.T) {
 	cfg := &config.Config{} // default false
 

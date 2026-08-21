@@ -173,7 +173,7 @@ func mergeCarryOverIntoSystemMessage(msg []byte, carryOverText string) []byte {
 // Claude request and rewrites them as a top-level system instruction. Signed
 // thinking with a compatible signature is left in place so the normal registry
 // path can map it to reasoning_content. This runs before registry translation
-// so plugin NormalizeRequest hooks still see a Claude-shaped payload.
+// so plugin NormalizeRequest hooks still see the translated OpenAI-shaped payload.
 func carryOverClaudeSource(payload []byte) []byte {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload

@@ -38,6 +38,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Model mapping
 	out, _ = sjson.SetBytes(out, "model", modelName)
+	targetProvider := sigcompat.SignatureProviderFromModelName(modelName)
 
 	// Max tokens
 	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
@@ -174,7 +175,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "thinking":
 						// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
 						if role == "assistant" {
-							if !shouldMapClaudeThinkingToGPTReasoning(part, preserveThinkingBlocks) {
+							if !shouldMapClaudeThinkingToReasoning(part, preserveThinkingBlocks, targetProvider, modelName) {
 								return true
 							}
 							thinkingText := thinking.GetThinkingText(part)
@@ -369,10 +370,15 @@ func normalizeObjectSchemaProperties(schema any) any {
 	}
 }
 
-func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result, preserveThinkingBlocks ...bool) bool {
-	preserveThinking := len(preserveThinkingBlocks) > 0 && preserveThinkingBlocks[0]
-	if preserveThinking {
+func shouldMapClaudeThinkingToReasoning(part gjson.Result, preserveThinkingBlocks bool, targetProvider sigcompat.SignatureProvider, modelName string) bool {
+	if preserveThinkingBlocks {
 		return true
+	}
+
+	if targetProvider == sigcompat.SignatureProviderKimi {
+		rawSignature := part.Get("signature").String()
+		decision := sigcompat.DecideSignatureCompatibilityForModel(targetProvider, modelName, rawSignature, sigcompat.SignatureBlockKindClaudeThinking)
+		return decision.Action == sigcompat.SignatureActionPreserve || decision.Action == sigcompat.SignatureActionDropSignature
 	}
 
 	signature := part.Get("signature")

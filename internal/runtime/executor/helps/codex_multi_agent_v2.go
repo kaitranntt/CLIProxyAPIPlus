@@ -6,6 +6,7 @@ import (
 
 	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	openaichatclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/chat-completions"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
@@ -69,7 +70,7 @@ func sameByteSlice(a, b []byte) bool {
 // request translators when a configured API-key model enables compatibility mode.
 func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool) []byte {
 	if !isCompat {
-		if cfg != nil && cfg.Translator.CarryOverThinkingInSystem && to == sdktranslator.FormatOpenAI {
+		if cfg != nil && cfg.Translator.CarryOverThinkingInSystem && to == sdktranslator.FormatOpenAI && !isKimiReasoningTarget(model) {
 			working := payload
 			if from == sdktranslator.FormatClaude {
 				// Extract unsigned assistant thinking into the top-level system
@@ -118,6 +119,14 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 // the reserved optimized namespace, which must remain untouched.
 func HasCodexMultiAgentV2NamespaceConflict(payload []byte) bool {
 	return multiagentv2.HasCodexMultiAgentV2NamespaceConflict(payload)
+}
+
+// isKimiReasoningTarget reports whether the requested OpenAI-shaped target
+// already carries a canonical reasoning_content field, so carrying prior
+// reasoning into the system message would move it out of the canonical
+// container.
+func isKimiReasoningTarget(model string) bool {
+	return sigcompat.SignatureProviderFromModelName(model) == sigcompat.SignatureProviderKimi
 }
 
 // OptimizeCodexMultiAgentV2Request rewrites an eligible spawn_agent request and
