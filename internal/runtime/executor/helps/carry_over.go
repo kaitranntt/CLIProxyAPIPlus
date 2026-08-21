@@ -19,8 +19,10 @@ const (
 
 // CarryOverThinkingToSystem extracts reasoning_content from assistant messages
 // in an OpenAI Chat Completions payload and rewrites it as a labeled system
-// instruction. It drops assistant messages that become empty after the move.
-// Existing first system message is extended; otherwise a new one is inserted.
+// instruction. It drops assistant messages that are empty after reasoning is
+// removed, including assistant messages that were already empty. OpenAI rejects
+// empty assistant messages, so removing them is intentional. Existing first
+// system message is extended; otherwise a new one is inserted.
 //
 // The function does not add reasoning to response bodies; it is only for
 // request bodies being sent to a target without a canonical thought field.
