@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -731,5 +732,51 @@ func TestMarkResultPerAttemptFailureLogging(t *testing.T) {
 		!strings.Contains(matchedMsg, "backoff=1") ||
 		!strings.Contains(matchedMsg, "disable_cooling=true") {
 		t.Fatalf("unexpected log message format: %s", matchedMsg)
+	}
+}
+
+func TestQuotaCooldownFloorSecondsConfiguresLadderBase(t *testing.T) {
+	prev := quotaCooldownFloorSeconds.Load()
+	quotaCooldownFloorSeconds.Store(5)
+	t.Cleanup(func() { quotaCooldownFloorSeconds.Store(prev) })
+
+	now := time.Now()
+	cooldown, level := nextQuotaCooldown(0, false)
+	if cooldown != 5*time.Second {
+		t.Fatalf("level 0 cooldown with floor 5 = %v, want 5s", cooldown)
+	}
+	if level != 1 {
+		t.Fatalf("level = %d, want 1", level)
+	}
+	if got := now.Add(cooldown).Sub(now); got != 5*time.Second {
+		t.Fatalf("effective wait = %v, want 5s", got)
+	}
+
+	cooldown, level = nextQuotaCooldown(1, false)
+	if cooldown != 10*time.Second {
+		t.Fatalf("level 1 cooldown with floor 5 = %v, want 10s", cooldown)
+	}
+}
+
+func TestNextTransientErrorRetryAfterRespectsPerStatusOverride(t *testing.T) {
+	prevGlobal := transientErrorCooldownSeconds.Load()
+	transientErrorCooldownSeconds.Store(10)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevGlobal) })
+
+	SetTransientCooldownByStatus([]internalconfig.TransientCooldownByStatusRule{
+		{Status: 408, CooldownSeconds: 2},
+		{Status: 503, CooldownSeconds: -1},
+	})
+	t.Cleanup(func() { SetTransientCooldownByStatus(nil) })
+
+	now := time.Now()
+	if got := nextTransientErrorRetryAfter(now, 408); got.Sub(now) != 2*time.Second {
+		t.Fatalf("status 408 cooldown = %v, want 2s", got.Sub(now))
+	}
+	if got := nextTransientErrorRetryAfter(now, 503); !got.IsZero() {
+		t.Fatalf("status 503 should be disabled, got %v", got)
+	}
+	if got := nextTransientErrorRetryAfter(now, 504); got.Sub(now) != 10*time.Second {
+		t.Fatalf("status 504 fallback cooldown = %v, want 10s", got.Sub(now))
 	}
 }

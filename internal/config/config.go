@@ -72,6 +72,14 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
+	// QuotaCooldownFloorSeconds is the minimum base for the quota cooldown ladder.
+	// Sub-second Retry-After hints are never allowed below this floor. Default 1.
+	QuotaCooldownFloorSeconds int `yaml:"quota-cooldown-floor-seconds" json:"quota-cooldown-floor-seconds"`
+
+	// TransientCooldownByStatus lets operators override the transient cooldown per HTTP status.
+	// Statuses not listed fall back to TransientErrorCooldownSeconds.
+	TransientCooldownByStatus []TransientCooldownByStatusRule `yaml:"transient-cooldown-by-status,omitempty" json:"transient-cooldown-by-status,omitempty"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`

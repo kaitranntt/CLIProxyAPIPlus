@@ -23,6 +23,8 @@ import (
 var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
+var quotaCooldownFloorSeconds atomic.Int64
+var transientCooldownByStatus atomic.Value
 
 // resumableCooldownReasons are the registry suspension reasons a successful result can clear for
 // the model that just succeeded (they include model-specific reasons like not_found and quota).
@@ -53,6 +55,37 @@ func SetQuotaCooldownDisabled(disable bool) {
 // 0 keeps the legacy default; negative values disable transient error cooldowns.
 func SetTransientErrorCooldownSeconds(seconds int) {
 	transientErrorCooldownSeconds.Store(int64(seconds))
+}
+
+// SetQuotaCooldownFloorSeconds sets the minimum base for the quota cooldown ladder.
+// Sub-second Retry-After hints are never allowed below this floor. Default 1 second.
+func SetQuotaCooldownFloorSeconds(seconds int) {
+	if seconds <= 0 {
+		seconds = 1
+	}
+	quotaCooldownFloorSeconds.Store(int64(seconds))
+}
+
+// SetTransientCooldownByStatus configures per-status transient cooldown overrides.
+// Statuses missing from the map fall back to SetTransientErrorCooldownSeconds.
+func SetTransientCooldownByStatus(rules []internalconfig.TransientCooldownByStatusRule) {
+	m := make(map[int]int, len(rules))
+	for _, r := range rules {
+		m[r.Status] = r.CooldownSeconds
+	}
+	transientCooldownByStatus.Store(m)
+}
+
+func transientCooldownSecondsForStatus(status int) int {
+	v := transientCooldownByStatus.Load()
+	if v == nil {
+		return 0
+	}
+	m, ok := v.(map[int]int)
+	if !ok {
+		return 0
+	}
+	return m[status]
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
@@ -105,8 +138,11 @@ func providerCoolingOverrideForAuth(auth *Auth, cfg *internalconfig.Config) (boo
 	return *entry.DisableCooling, true
 }
 
-func nextTransientErrorRetryAfter(now time.Time) time.Time {
+func nextTransientErrorRetryAfter(now time.Time, status int) time.Time {
 	seconds := transientErrorCooldownSeconds.Load()
+	if perStatus := transientCooldownSecondsForStatus(status); perStatus != 0 {
+		seconds = int64(perStatus)
+	}
 	if seconds < 0 {
 		return time.Time{}
 	}
@@ -116,11 +152,11 @@ func nextTransientErrorRetryAfter(now time.Time) time.Time {
 	return now.Add(time.Duration(seconds) * time.Second)
 }
 
-func recoverableFailureRetryAfter(now time.Time, disableCooling bool) time.Time {
+func recoverableFailureRetryAfter(now time.Time, status int, disableCooling bool) time.Time {
 	if disableCooling {
 		return time.Time{}
 	}
-	return nextTransientErrorRetryAfter(now)
+	return nextTransientErrorRetryAfter(now, status)
 }
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
@@ -911,7 +947,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									if result.RetryAfter != nil {
 										next = now.Add(*result.RetryAfter)
 									} else {
-										next = nextTransientErrorRetryAfter(now)
+										next = nextTransientErrorRetryAfter(now, statusCode)
 									}
 									transientCooldownOff = next.IsZero()
 								case result.RetryAfter != nil && *result.RetryAfter <= 0:
@@ -984,10 +1020,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								auth.NextRetryAfter = authNext
 							}
 						case 408, 500, 502, 503, 504:
-							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+							state.NextRetryAfter = recoverableFailureRetryAfter(now, statusCode, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						default:
-							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+							state.NextRetryAfter = recoverableFailureRetryAfter(now, statusCode, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						}
 					}
@@ -2127,7 +2163,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				if retryAfter != nil {
 					next = now.Add(*retryAfter)
 				} else {
-					next = nextTransientErrorRetryAfter(now)
+					next = nextTransientErrorRetryAfter(now, statusCode)
 				}
 				transientCooldownOff = next.IsZero()
 			case retryAfter != nil && *retryAfter <= 0:
@@ -2166,13 +2202,13 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
-		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+		auth.NextRetryAfter = recoverableFailureRetryAfter(now, statusCode, disableCooling)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
-		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+		auth.NextRetryAfter = recoverableFailureRetryAfter(now, statusCode, disableCooling)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	}
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
@@ -2236,9 +2272,13 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 	if prevLevel < 0 {
 		prevLevel = 0
 	}
-	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
-	if cooldown < quotaBackoffBase {
-		cooldown = quotaBackoffBase
+	base := time.Duration(quotaCooldownFloorSeconds.Load()) * time.Second
+	if base <= 0 {
+		base = quotaBackoffBase
+	}
+	cooldown := base * time.Duration(1<<prevLevel)
+	if cooldown < base {
+		cooldown = base
 	}
 	nextLevel := prevLevel + 1
 	if cooldown >= quotaBackoffMax {
