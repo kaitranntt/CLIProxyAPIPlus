@@ -926,95 +926,95 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StringValueNotTreatedA
 }
 
 func TestFixCLIToolResponse_AttachesSiblingInlineDataToNearestFunctionResponse(t *testing.T) {
+	type wantImage struct {
+		id   string
+		mime string
+		data string
+	}
 	tests := []struct {
-		name  string
-		parts string
-		want  []struct {
-			id   string
-			mime string
-			data string
-		}
+		name        string
+		modelCalls  string
+		parts       string
+		want        []wantImage
+		extraChecks func(t *testing.T, gotByID map[string][]gjson.Result)
 	}{
 		{
-			name: "snake_case sibling after single response",
+			name:       "snake_case sibling after single response",
+			modelCalls: `{"functionCall":{"name":"read","id":"call_1"}}`,
 			parts: `{"functionResponse":{"name":"read","response":{"result":"Read image file [image/png]"},"id":"call_1"}},` +
 				`{"inline_data":{"mime_type":"image/png","data":"QUJD"}}`,
-			want: []struct {
-				id   string
-				mime string
-				data string
-			}{{id: "call_1", mime: "image/png", data: "QUJD"}},
+			want: []wantImage{{id: "call_1", mime: "image/png", data: "QUJD"}},
 		},
 		{
-			name: "camelCase sibling after single response",
+			name:       "camelCase sibling after single response",
+			modelCalls: `{"functionCall":{"name":"read","id":"call_1"}}`,
 			parts: `{"functionResponse":{"name":"read","response":{"result":"ok"},"id":"call_1"}},` +
 				`{"inlineData":{"mimeType":"image/webp","data":"NEW"}}`,
-			want: []struct {
-				id   string
-				mime string
-				data string
-			}{{id: "call_1", mime: "image/webp", data: "NEW"}},
+			want: []wantImage{{id: "call_1", mime: "image/webp", data: "NEW"}},
 		},
 		{
-			name: "append sibling onto existing functionResponse.parts",
+			name:       "append sibling onto existing functionResponse.parts",
+			modelCalls: `{"functionCall":{"name":"read","id":"call_1"}}`,
 			parts: `{"functionResponse":{"name":"read","response":{"result":"ok"},"id":"call_1","parts":[{"inlineData":{"mimeType":"image/gif","data":"OLD"}}]}},` +
 				`{"inlineData":{"mimeType":"image/webp","data":"NEW"}}`,
-			want: []struct {
-				id   string
-				mime string
-				data string
-			}{
+			want: []wantImage{
 				{id: "call_1", mime: "image/gif", data: "OLD"},
+			},
+			extraChecks: func(t *testing.T, gotByID map[string][]gjson.Result) {
+				images := gotByID["call_1"]
+				if len(images) != 2 {
+					t.Fatalf("existing+sibling parts = %d, want 2", len(images))
+				}
+				if images[1].Get("inlineData.data").String() != "NEW" {
+					t.Fatalf("appended sibling data = %q, want NEW", images[1].Get("inlineData.data").String())
+				}
 			},
 		},
 		{
-			name: "interleaved siblings attach to nearest response",
+			name:       "interleaved siblings attach to nearest response",
+			modelCalls: `{"functionCall":{"name":"read","id":"call_a"}},{"functionCall":{"name":"read","id":"call_b"}}`,
 			parts: `{"functionResponse":{"name":"read","response":{"result":"A"},"id":"call_a"}},` +
 				`{"inline_data":{"mime_type":"image/png","data":"AAA"}},` +
 				`{"functionResponse":{"name":"read","response":{"result":"B"},"id":"call_b"}},` +
 				`{"inline_data":{"mime_type":"image/jpeg","data":"BBB"}}`,
-			want: []struct {
-				id   string
-				mime string
-				data string
-			}{
+			want: []wantImage{
 				{id: "call_a", mime: "image/png", data: "AAA"},
 				{id: "call_b", mime: "image/jpeg", data: "BBB"},
 			},
-		},
-		{
-			name: "leading sibling attaches to first response",
-			parts: `{"inline_data":{"mime_type":"image/png","data":"LEAD"}},` +
-				`{"functionResponse":{"name":"read","response":{"result":"A"},"id":"call_a"}},` +
-				`{"functionResponse":{"name":"read","response":{"result":"B"},"id":"call_b"}}`,
-			want: []struct {
-				id   string
-				mime string
-				data string
-			}{
-				{id: "call_a", mime: "image/png", data: "LEAD"},
+			extraChecks: func(t *testing.T, gotByID map[string][]gjson.Result) {
+				if len(gotByID["call_a"]) != 1 || len(gotByID["call_b"]) != 1 {
+					t.Fatalf("nearest attribution failed: A=%d B=%d", len(gotByID["call_a"]), len(gotByID["call_b"]))
+				}
 			},
 		},
 		{
-			name: "missing mimeType defaults to image/png",
+			name:       "leading sibling attaches to first response",
+			modelCalls: `{"functionCall":{"name":"read","id":"call_a"}},{"functionCall":{"name":"read","id":"call_b"}}`,
+			parts: `{"inline_data":{"mime_type":"image/png","data":"LEAD"}},` +
+				`{"functionResponse":{"name":"read","response":{"result":"A"},"id":"call_a"}},` +
+				`{"functionResponse":{"name":"read","response":{"result":"B"},"id":"call_b"}}`,
+			want: []wantImage{
+				{id: "call_a", mime: "image/png", data: "LEAD"},
+			},
+			extraChecks: func(t *testing.T, gotByID map[string][]gjson.Result) {
+				if len(gotByID["call_b"]) != 0 {
+					t.Fatalf("leading image leaked onto call_b")
+				}
+			},
+		},
+		{
+			name:       "missing mimeType defaults to image/png",
+			modelCalls: `{"functionCall":{"name":"read","id":"call_1"}}`,
 			parts: `{"functionResponse":{"name":"read","response":{"result":"ok"},"id":"call_1"}},` +
 				`{"inlineData":{"data":"QUJD"}}`,
-			want: []struct {
-				id   string
-				mime string
-				data string
-			}{{id: "call_1", mime: "image/png", data: "QUJD"}},
+			want: []wantImage{{id: "call_1", mime: "image/png", data: "QUJD"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			modelParts := `{"functionCall":{"name":"read","id":"call_1"}}`
-			if tt.name == "interleaved siblings attach to nearest response" || tt.name == "leading sibling attaches to first response" {
-				modelParts = `{"functionCall":{"name":"read","id":"call_a"}},{"functionCall":{"name":"read","id":"call_b"}}`
-			}
 			input := `{"request":{"contents":[` +
-				`{"role":"model","parts":[` + modelParts + `]},` +
+				`{"role":"model","parts":[` + tt.modelCalls + `]},` +
 				`{"role":"user","parts":[` + tt.parts + `]}` +
 				`]}}`
 			result, err := fixCLIToolResponse([]byte(input))
@@ -1044,24 +1044,8 @@ func TestFixCLIToolResponse_AttachesSiblingInlineDataToNearestFunctionResponse(t
 					t.Fatalf("id=%s missing inlineData mime=%s data=%s. Output: %s", want.id, want.mime, want.data, result)
 				}
 			}
-			if tt.name == "interleaved siblings attach to nearest response" {
-				if len(gotByID["call_a"]) != 1 || len(gotByID["call_b"]) != 1 {
-					t.Fatalf("nearest attribution failed: A=%d B=%d. Output: %s", len(gotByID["call_a"]), len(gotByID["call_b"]), result)
-				}
-			}
-			if tt.name == "leading sibling attaches to first response" {
-				if len(gotByID["call_b"]) != 0 {
-					t.Fatalf("leading image leaked onto call_b. Output: %s", result)
-				}
-			}
-			if tt.name == "append sibling onto existing functionResponse.parts" {
-				images := gotByID["call_1"]
-				if len(images) != 2 {
-					t.Fatalf("existing+sibling parts = %d, want 2. Output: %s", len(images), result)
-				}
-				if images[1].Get("inlineData.data").String() != "NEW" {
-					t.Fatalf("appended sibling data = %q, want NEW. Output: %s", images[1].Get("inlineData.data").String(), result)
-				}
+			if tt.extraChecks != nil {
+				tt.extraChecks(t, gotByID)
 			}
 		})
 	}
