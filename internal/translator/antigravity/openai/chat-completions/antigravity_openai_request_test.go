@@ -456,7 +456,6 @@ func TestConvertOpenAIRequestToAntigravityTranslatesVideoURL(t *testing.T) {
 	}
 }
 
-
 func TestConvertOpenAIRequestToAntigravityMapsMaxTokens(t *testing.T) {
 	tests := []struct {
 		name       string
