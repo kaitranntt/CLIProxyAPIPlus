@@ -281,6 +281,10 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			chunk, ok = <-ch
 		}
 		if !ok {
+			// A final frame without its blank-line delimiter is only parsed by
+			// finish(): without it a provider error carried by that last frame stays
+			// pending and the stream looks like a clean close.
+			bootstrap.finish()
 			if err := bootstrap.streamError(); err != nil && !bootstrap.hasMeaningfulOutput() {
 				return nil, false, err
 			}
