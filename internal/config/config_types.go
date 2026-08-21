@@ -367,6 +367,15 @@ type PayloadModelRule struct {
 	NotExist []string `yaml:"not-exist" json:"not-exist"`
 }
 
+// TranslatorConfig controls cross-format request translation behavior.
+type TranslatorConfig struct {
+	// CarryOverThinkingInSystem moves prior assistant reasoning/thinking into a
+	// labeled system instruction when the target protocol has no canonical thought
+	// field (e.g. plain OpenAI chat completions). Default false preserves strict
+	// protocol behavior.
+	CarryOverThinkingInSystem bool `yaml:"carry-over-thinking-in-system" json:"carry-over-thinking-in-system"`
+}
+
 // CloakConfig configures request cloaking for non-Claude-Code clients.
 // Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
 type CloakConfig struct {
