@@ -227,6 +227,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				// Create system message in Claude Code format.
 				systemMessage := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
 				systemMessage, _ = sjson.SetBytes(systemMessage, "content.0.text", systemText.String())
+				systemMessage = translatorcommon.AttachMessageCacheControl(systemMessage, sysInstr)
 				messageAccumulator.Append(systemMessage)
 				messageAccumulator.Flush()
 			}
@@ -261,6 +262,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					if text := part.Get("text"); text.Exists() {
 						textContent := []byte(`{"type":"text","text":""}`)
 						textContent, _ = sjson.SetBytes(textContent, "text", text.String())
+						textContent = translatorcommon.AttachCacheControl(textContent, part)
 						contentItems = append(contentItems, textContent)
 						return true
 					}
@@ -283,6 +285,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						if args := fc.Get("args"); args.Exists() && args.IsObject() {
 							toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(args.Raw))
 						}
+						toolUse = translatorcommon.AttachCacheControl(toolUse, part)
 						contentItems = append(contentItems, toolUse)
 						return true
 					}
@@ -313,6 +316,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						} else if response := fr.Get("response"); response.Exists() {
 							toolResult, _ = sjson.SetBytes(toolResult, "content", response.Raw)
 						}
+						toolResult = translatorcommon.AttachCacheControl(toolResult, part)
 						contentItems = append(contentItems, toolResult)
 						return true
 					}
@@ -320,6 +324,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					// Inline data conversion to Claude Code content format
 					if inlineData := geminiClaudeInlineData(part); inlineData.Exists() {
 						if contentPart, ok := claudeContentPartFromGeminiInlineData(inlineData); ok {
+							contentPart = translatorcommon.AttachCacheControl(contentPart, part)
 							contentItems = append(contentItems, contentPart)
 						}
 						return true
@@ -328,6 +333,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					// File data conversion to Claude Code content format
 					if fileData := geminiClaudeFileData(part); fileData.Exists() {
 						if contentPart, ok := claudeContentPartFromGeminiFileData(fileData); ok {
+							contentPart = translatorcommon.AttachCacheControl(contentPart, part)
 							contentItems = append(contentItems, contentPart)
 						}
 						return true
@@ -342,6 +348,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
 				msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+				msg = translatorcommon.AttachMessageCacheControl(msg, content)
 				messageAccumulator.Append(msg)
 			}
 
@@ -373,6 +380,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", cleaned)
 					}
 
+					anthropicTool = translatorcommon.AttachCacheControl(anthropicTool, funcDecl)
 					anthropicTool = lowercaseClaudeToolSchemaTypes(anthropicTool)
 					anthropicTools = append(anthropicTools, gjson.ParseBytes(anthropicTool).Value())
 					return true
