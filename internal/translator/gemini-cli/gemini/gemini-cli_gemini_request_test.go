@@ -89,6 +89,45 @@ func TestConvertGeminiRequestToGeminiCLI_ToolCallAndResponse(t *testing.T) {
 	}
 }
 
+func TestConvertGeminiRequestToGeminiCLI_PreservesSiblingToolImage(t *testing.T) {
+	input := []byte(`{
+		"model": "gemini-3-flash",
+		"contents": [
+			{"role": "model", "parts": [{"functionCall": {"name": "read", "args": {"path": "/tmp"}, "id": "call_1"}}]},
+			{"role": "user", "parts": [
+				{"functionResponse": {"name": "read", "response": {"result": "Read image file [image/png]"}, "id": "call_1"}},
+				{"inline_data": {"mime_type": "image/png", "data": "QUJD"}}
+			]}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToGeminiCLI("gemini-3-flash", input, false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("contents length = %d, want 2. Output: %s", len(contents), out)
+	}
+	funcResp := contents[1].Get("parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatalf("functionResponse missing. Output: %s", out)
+	}
+	if got := funcResp.Get("id").String(); got != "call_1" {
+		t.Fatalf("id = %q, want call_1. Output: %s", got, out)
+	}
+	inlineData := funcResp.Get("parts.0.inlineData")
+	if !inlineData.Exists() {
+		t.Fatalf("functionResponse.parts.0.inlineData missing. Output: %s", out)
+	}
+	if got := inlineData.Get("mimeType").String(); got != "image/png" {
+		t.Fatalf("mimeType = %q, want image/png. Output: %s", got, out)
+	}
+	if got := inlineData.Get("data").String(); got != "QUJD" {
+		t.Fatalf("data = %q, want QUJD. Output: %s", got, out)
+	}
+	if contents[1].Get("parts.1.inline_data").Exists() || contents[1].Get("parts.1.inlineData").Exists() {
+		t.Fatalf("sibling inline data should be absorbed into functionResponse.parts. Output: %s", out)
+	}
+}
+
 func TestConvertGeminiCliResponseToGemini_Stream(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "alt", "")
 	resp := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]}}],"usageMetadata":{"totalTokenCount":5}}}`)
