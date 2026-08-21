@@ -151,9 +151,9 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				default:
 					// DropBlock, DropSignature, or NoCompatibleReplacement: keep the
 					// block shape for the compat endpoint, but strip the signature unless
-					// it is at least a decodable Claude E/R shape (short synthetic
-					// signatures used by the Claude thinking replay cache).
-					if targetProvider == SignatureProviderClaude && HasDecodableClaudeThinkingSignature(rawSignature) {
+					// it is an unprefixed, non-foreign decodable Claude E/R shape (short
+					// synthetic signatures used by the Claude thinking replay cache).
+					if targetProvider == SignatureProviderClaude && isClaudeReplayableShortSignature(rawSignature) {
 						report.Preserved++
 						keptParts = append(keptParts, part.Raw)
 					} else {
@@ -312,4 +312,23 @@ func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
 		return raw, false
 	}
 	return updated, true
+}
+
+// isClaudeReplayableShortSignature preserves decodable Claude E/R-shaped
+// signatures in compat mode, but only when the value is not explicitly
+// prefixed or identified as a foreign provider. This prevents Gemini
+// E-prefixed signatures (or values like "gemini#<E-sig>") from slipping
+// through the Claude fallback and failing upstream validation.
+func isClaudeReplayableShortSignature(rawSignature string) bool {
+	if !HasDecodableClaudeThinkingSignature(rawSignature) {
+		return false
+	}
+	if provider, _, ok := SplitSignatureProviderPrefix(rawSignature); ok && provider != SignatureProviderClaude {
+		return false
+	}
+	detected := DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindClaudeThinking)
+	if detected != SignatureProviderUnknown && detected != SignatureProviderClaude {
+		return false
+	}
+	return true
 }
