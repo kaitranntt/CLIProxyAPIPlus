@@ -1260,7 +1260,6 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishRe
 	}
 }
 
-
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ReasoningFallback(t *testing.T) {
 	tests := []struct {
 		name          string
