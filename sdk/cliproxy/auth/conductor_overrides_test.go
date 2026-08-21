@@ -993,8 +993,8 @@ func TestManager_MarkResult_Transient429WithoutHintBypassesQuotaLadder(t *testin
 		t.Fatalf("expected credential quota ladder to stay at level 0 for a transient 429 without hint, got %d", updated.Quota.BackoffLevel)
 	}
 	diff := time.Until(updated.NextRetryAfter)
-	if diff < 55*time.Second || diff > 65*time.Second {
-		t.Fatalf("expected credential NextRetryAfter ~60s transient cooldown, got %v", diff)
+	if diff < 5*time.Second || diff > 15*time.Second {
+		t.Fatalf("expected credential NextRetryAfter ~10s transient cooldown, got %v", diff)
 	}
 
 	state := updated.ModelStates[model]
@@ -1005,8 +1005,8 @@ func TestManager_MarkResult_Transient429WithoutHintBypassesQuotaLadder(t *testin
 		t.Fatalf("expected per-model quota ladder to stay at level 0, got %d", state.Quota.BackoffLevel)
 	}
 	modelDiff := time.Until(state.NextRetryAfter)
-	if modelDiff < 55*time.Second || modelDiff > 65*time.Second {
-		t.Fatalf("expected per-model NextRetryAfter ~60s transient cooldown, got %v", modelDiff)
+	if modelDiff < 5*time.Second || modelDiff > 15*time.Second {
+		t.Fatalf("expected per-model NextRetryAfter ~10s transient cooldown, got %v", modelDiff)
 	}
 }
 

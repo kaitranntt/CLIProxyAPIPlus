@@ -3423,6 +3423,8 @@ func TestToolCallIDOnlyRegression(t *testing.T) {
 			t.Fatal("IsEmptyCompletionPayload() = true for Responses function_call with name and empty object args, want false")
 		}
 	})
+}
+
 func TestExecuteStreamInStreamGemini429ErrorRotatesAuth(t *testing.T) {
 	executor := &emptyCompletionTestExecutor{
 		streamPayloads: map[string][][]byte{},
