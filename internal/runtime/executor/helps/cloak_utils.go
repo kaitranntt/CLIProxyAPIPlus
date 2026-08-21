@@ -7,6 +7,7 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 var claudeMetadataDeviceIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -19,16 +20,22 @@ type claudeMetadataUserID struct {
 
 // generateFakeUserID generates metadata.user_id in the JSON string format used
 // by Claude Code 2.1.78 and newer.
-// The device_id is derived deterministically so the same auth + session always
-// produces the same upstream request metadata and preserves prompt-cache prefix
-// stability. Callers that need a per-request random value can still supply a
-// fresh session UUID.
-func generateFakeUserID() string {
-	return generateDeterministicFakeUserID("", uuid.New().String())
+// The device_id is derived deterministically from the credential seed +
+// session, preserving prompt-cache prefix stability even on cache-miss paths.
+func generateFakeUserID(apiKey string, auth *cliproxyauth.Auth) string {
+	seed := claudeCredentialSeed(apiKey, auth)
+	return generateDeterministicFakeUserID(seed, CachedSessionID(apiKey, auth))
 }
 
 func generateFakeUserIDWithSessionID(sessionID string) string {
 	return generateDeterministicFakeUserID("", sessionID)
+}
+
+// GenerateRandomFakeUserIDForSession returns a metadata.user_id with a fresh
+// random device_id while keeping the session_id stable. This is the legacy
+// per-request random behavior used when cache-user-id is false.
+func GenerateRandomFakeUserIDForSession(sessionID string) string {
+	return generateDeterministicFakeUserID(uuid.New().String(), sessionID)
 }
 
 func generateDeterministicFakeUserID(seed, sessionID string) string {
@@ -64,18 +71,11 @@ func isValidUserID(userID string) bool {
 }
 
 func GenerateFakeUserID() string {
-	return generateFakeUserID()
+	return generateFakeUserID("", nil)
 }
 
 func GenerateFakeUserIDWithSessionID(sessionID string) string {
 	return generateFakeUserIDWithSessionID(sessionID)
-}
-
-// GenerateRandomFakeUserIDForSession returns a metadata.user_id with a fresh
-// random device_id while keeping the session_id stable. This is the legacy
-// per-request random behavior used when cache-user-id is false.
-func GenerateRandomFakeUserIDForSession(sessionID string) string {
-	return generateDeterministicFakeUserID(uuid.New().String(), sessionID)
 }
 
 func IsValidUserID(userID string) bool {

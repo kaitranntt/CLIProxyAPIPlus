@@ -33,8 +33,8 @@ func TestCachedUserIDUsesCachedClaudeSessionID(t *testing.T) {
 	resetSessionIDCache()
 
 	const key = "api-key-shared-session"
-	sessionID := CachedSessionID(key)
-	userID := CachedUserID(key)
+	sessionID := CachedSessionID(key, nil)
+	userID := CachedUserID(key, nil)
 	var value claudeMetadataUserID
 	if errUnmarshal := json.Unmarshal([]byte(userID), &value); errUnmarshal != nil {
 		t.Fatalf("unmarshal user ID: %v", errUnmarshal)
@@ -47,8 +47,8 @@ func TestCachedUserIDUsesCachedClaudeSessionID(t *testing.T) {
 func TestCachedUserID_ReusesWithinTTL(t *testing.T) {
 	resetUserIDCache()
 
-	first := CachedUserID("api-key-1")
-	second := CachedUserID("api-key-1")
+	first := CachedUserID("api-key-1", nil)
+	second := CachedUserID("api-key-1", nil)
 
 	if first == "" {
 		t.Fatal("expected generated user_id to be non-empty")
@@ -61,7 +61,7 @@ func TestCachedUserID_ReusesWithinTTL(t *testing.T) {
 func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	resetUserIDCache()
 
-	expiredID := CachedUserID("api-key-expired")
+	expiredID := CachedUserID("api-key-expired", nil)
 	cacheKey := userIDCacheKey("api-key-expired")
 	userIDCacheMu.Lock()
 	userIDCache[cacheKey] = userIDCacheEntry{
@@ -70,7 +70,7 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	}
 	userIDCacheMu.Unlock()
 
-	newID := CachedUserID("api-key-expired")
+	newID := CachedUserID("api-key-expired", nil)
 	if newID == "" {
 		t.Fatal("expected regenerated user_id to be non-empty")
 	}
@@ -94,8 +94,8 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 func TestCachedUserID_IsScopedByAPIKey(t *testing.T) {
 	resetUserIDCache()
 
-	first := CachedUserID("api-key-1")
-	second := CachedUserID("api-key-2")
+	first := CachedUserID("api-key-1", nil)
+	second := CachedUserID("api-key-2", nil)
 
 	if first == second {
 		t.Fatalf("expected different API keys to have different user_ids, got %q", first)
@@ -106,7 +106,7 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 	resetUserIDCache()
 
 	key := "api-key-renew"
-	id := CachedUserID(key)
+	id := CachedUserID(key, nil)
 	cacheKey := userIDCacheKey(key)
 
 	soon := time.Now()
@@ -117,7 +117,7 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 	}
 	userIDCacheMu.Unlock()
 
-	if refreshed := CachedUserID(key); refreshed != id {
+	if refreshed := CachedUserID(key, nil); refreshed != id {
 		t.Fatalf("expected cached user_id to be reused before expiry, got %q", refreshed)
 	}
 
@@ -135,12 +135,12 @@ func TestCachedUserIDRequiredHomeReusesKVAcrossLocalCacheReset(t *testing.T) {
 	client := newFakeClaudeIDKVClient()
 	useFakeClaudeIDKVClient(t, client, true, nil)
 
-	first, errFirst := CachedUserIDRequired(context.Background(), "api-key-1")
+	first, errFirst := CachedUserIDRequired(context.Background(), "api-key-1", nil)
 	if errFirst != nil {
 		t.Fatalf("CachedUserIDRequired() first error = %v", errFirst)
 	}
 	resetUserIDCache()
-	second, errSecond := CachedUserIDRequired(context.Background(), "api-key-1")
+	second, errSecond := CachedUserIDRequired(context.Background(), "api-key-1", nil)
 	if errSecond != nil {
 		t.Fatalf("CachedUserIDRequired() second error = %v", errSecond)
 	}
@@ -165,7 +165,7 @@ func TestCachedUserIDRequiredEmptyAPIKeyDoesNotUseHomeKV(t *testing.T) {
 	client := newFakeClaudeIDKVClient()
 	useFakeClaudeIDKVClient(t, client, true, nil)
 
-	value, errValue := CachedUserIDRequired(context.Background(), "")
+	value, errValue := CachedUserIDRequired(context.Background(), "", nil)
 	if errValue != nil {
 		t.Fatalf("CachedUserIDRequired(empty) error = %v", errValue)
 	}
@@ -190,10 +190,39 @@ func TestCachedUserIDRequiredHomeKVFailures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useFakeClaudeIDKVClient(t, tc.client, true, nil)
-			if _, errValue := CachedUserIDRequired(context.Background(), "api-key-1"); errValue == nil {
+			if _, errValue := CachedUserIDRequired(context.Background(), "api-key-1", nil); errValue == nil {
 				t.Fatalf("CachedUserIDRequired() error = nil, want error")
 			}
 		})
+	}
+}
+
+func TestCachedUserIDFallbackIsDeterministic(t *testing.T) {
+	resetUserIDCache()
+	client := newFakeClaudeIDKVClient()
+	useFakeClaudeIDKVClient(t, client, true, errors.New("kv down"))
+
+	// Forcing CachedUserIDRequired to fall through to the no-cache path; the
+	// fallback must still derive a stable, auth-seeded user_id.
+	first := CachedUserID("fallback-key", nil)
+	if !IsValidUserID(first) {
+		t.Fatalf("fallback user_id %q is not valid", first)
+	}
+
+	second := CachedUserID("fallback-key", nil)
+	if first != second {
+		t.Fatalf("fallback user_id not deterministic: %q vs %q", first, second)
+	}
+}
+
+func TestGenerateFakeUserIDIsDeterministic(t *testing.T) {
+	first := GenerateFakeUserID()
+	second := GenerateFakeUserID()
+	if !IsValidUserID(first) {
+		t.Fatalf("GenerateFakeUserID() %q is not valid", first)
+	}
+	if first != second {
+		t.Fatalf("GenerateFakeUserID() not deterministic: %q vs %q", first, second)
 	}
 }
 
@@ -202,7 +231,7 @@ func TestCachedUserIDRequiredHomeRequiresReadAfterSet(t *testing.T) {
 	client.setNoPersist = true
 	useFakeClaudeIDKVClient(t, client, true, nil)
 
-	if _, errValue := CachedUserIDRequired(context.Background(), "api-key-1"); errValue == nil {
+	if _, errValue := CachedUserIDRequired(context.Background(), "api-key-1", nil); errValue == nil {
 		t.Fatalf("CachedUserIDRequired() error = nil, want missing-after-set error")
 	}
 }
