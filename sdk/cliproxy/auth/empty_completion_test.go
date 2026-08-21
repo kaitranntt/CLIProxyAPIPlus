@@ -471,6 +471,26 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "gemini non-stream thoughtSignature alone is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-dead-upstream"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream thought_signature alone is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought_signature":"opaque-dead-upstream"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream thoughtSignature with visible text is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"answer","thoughtSignature":"opaque"}]},"finishReason":"STOP"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini non-stream thoughtSignature with positive usage is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1}}`),
+			expected: false,
+		},
+		{
 			name:     "gemini sse stream with empty text and thought flag is empty",
 			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
 			expected: true,
@@ -2473,31 +2493,31 @@ func TestMultiValueJSONMixedUnknownEmptyCompletion(t *testing.T) {
 }
 
 func TestGeminiThoughtSignatureEmptyCompletion(t *testing.T) {
-	t.Run("gemini STOP with thoughtSignature and omitted candidatesTokenCount is not empty", func(t *testing.T) {
+	t.Run("gemini STOP with thoughtSignature and omitted candidatesTokenCount is empty", func(t *testing.T) {
 		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}]}`)
-		if IsEmptyCompletionPayload(payload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thoughtSignature with omitted token count, want false")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for non-empty thoughtSignature with omitted token count, want true")
 		}
 	})
 
-	t.Run("gemini STOP with thought_signature and omitted candidatesTokenCount is not empty", func(t *testing.T) {
+	t.Run("gemini STOP with thought_signature and omitted candidatesTokenCount is empty", func(t *testing.T) {
 		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought_signature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}]}`)
-		if IsEmptyCompletionPayload(payload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thought_signature with omitted token count, want false")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for non-empty thought_signature with omitted token count, want true")
 		}
 	})
 
-	t.Run("gemini STOP with thoughtSignature and zero candidatesTokenCount is not empty", func(t *testing.T) {
-		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`)
+	t.Run("gemini STOP with thoughtSignature and positive candidatesTokenCount is not empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1}}`)
 		if IsEmptyCompletionPayload(payload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thoughtSignature with zero token count, want false")
+			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thoughtSignature with positive token count, want false")
 		}
 	})
 
-	t.Run("gemini STOP with thought_signature and zero candidatesTokenCount is not empty", func(t *testing.T) {
-		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought_signature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`)
+	t.Run("gemini STOP with thought_signature and positive candidatesTokenCount is not empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought_signature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1}}`)
 		if IsEmptyCompletionPayload(payload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thought_signature with zero token count, want false")
+			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thought_signature with positive token count, want false")
 		}
 	})
 
