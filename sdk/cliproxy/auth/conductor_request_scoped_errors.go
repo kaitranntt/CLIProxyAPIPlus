@@ -87,6 +87,16 @@ func extractRequestScopedErrorRules(auth *Auth, cfg *internalconfig.Config) []in
 		return nil
 	}
 
+	if auth.AuthKind() == AuthKindOAuth {
+		if len(cfg.OAuthRequestScopedErrors) > 0 {
+			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+			if rules, ok := cfg.OAuthRequestScopedErrors[provider]; ok && len(rules) > 0 {
+				return rules
+			}
+		}
+		return nil
+	}
+
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	index := -1
 	if auth.Attributes != nil {
