@@ -57,6 +57,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
+	supportsCache := translatorcommon.ModelSupportsExplicitPromptCache(modelName)
 
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
@@ -81,6 +82,10 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				systemResult := systemResults[i]
 				if systemResult.Get("type").String() == "text" {
 					appendSystemText(systemResult.Get("text").String())
+					if supportsCache && len(contentItems) > 0 {
+						last := len(contentItems) - 1
+						contentItems[last] = translatorcommon.AttachPromptCacheBreakpoint(contentItems[last], systemResult)
+					}
 				}
 			}
 		}
@@ -117,6 +122,9 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					message := []byte(`{"type":"message","role":""}`)
 					message, _ = sjson.SetBytes(message, "role", messageRole)
 					message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
+					if supportsCache {
+						message = translatorcommon.AttachMessagePromptCacheBreakpoint(message, messageResult)
+					}
 					inputItems = append(inputItems, message)
 					contentItems = contentItems[:0]
 				}
@@ -181,6 +189,10 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					switch contentType {
 					case "text":
 						appendTextContent(messageContentResult.Get("text").String())
+						if supportsCache && len(contentItems) > 0 {
+							last := len(contentItems) - 1
+							contentItems[last] = translatorcommon.AttachPromptCacheBreakpoint(contentItems[last], messageContentResult)
+						}
 					case "thinking":
 						appendReasoningContent(messageContentResult)
 					case "image":
@@ -200,6 +212,10 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 								}
 								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
 								appendImageContent(dataURL)
+								if supportsCache && len(contentItems) > 0 {
+									last := len(contentItems) - 1
+									contentItems[last] = translatorcommon.AttachPromptCacheBreakpoint(contentItems[last], messageContentResult)
+								}
 							}
 						}
 					case "document":
@@ -217,6 +233,10 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 						}
 						if data != "" {
 							appendDocumentContent(fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+							if supportsCache && len(contentItems) > 0 {
+								last := len(contentItems) - 1
+								contentItems[last] = translatorcommon.AttachPromptCacheBreakpoint(contentItems[last], messageContentResult)
+							}
 						}
 					case "tool_use":
 						flushMessage()
@@ -263,12 +283,18 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 											toolResultContent := []byte(`{"type":"input_image","image_url":""}`)
 											toolResultContent, _ = sjson.SetBytes(toolResultContent, "image_url", dataURL)
+											if supportsCache {
+												toolResultContent = translatorcommon.AttachPromptCacheBreakpoint(toolResultContent, contentResults[k])
+											}
 											toolResultContentItems = append(toolResultContentItems, toolResultContent)
 										}
 									}
 								} else if toolResultContentType == "text" {
 									toolResultContent := []byte(`{"type":"input_text","text":""}`)
 									toolResultContent, _ = sjson.SetBytes(toolResultContent, "text", contentResults[k].Get("text").String())
+									if supportsCache {
+										toolResultContent = translatorcommon.AttachPromptCacheBreakpoint(toolResultContent, contentResults[k])
+									}
 									toolResultContentItems = append(toolResultContentItems, toolResultContent)
 								}
 							}
@@ -287,6 +313,10 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				flushMessage()
 			} else if messageContentsResult.Type == gjson.String {
 				appendTextContent(messageContentsResult.String())
+				if supportsCache && len(contentItems) > 0 {
+					last := len(contentItems) - 1
+					contentItems[last] = translatorcommon.AttachPromptCacheBreakpoint(contentItems[last], messageContentsResult)
+				}
 				flushMessage()
 			}
 		}
@@ -380,12 +410,21 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
 	// reasoning.summary to the source request's canonical summary intent instead
 	// of coupling it to reasoning effort.
-	serviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
-	if speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "fast" {
+	serviceTier := translatorcommon.NormalizeCodexServiceTier(rootResult.Get("service_tier"))
+	if speed := rootResult.Get("speed"); speed.Type == gjson.String && strings.ToLower(strings.TrimSpace(speed.String())) == "fast" {
 		serviceTier = "priority"
 	}
 	if serviceTier != "" {
 		template, _ = sjson.SetBytes(template, "service_tier", serviceTier)
+	}
+	if v := rootResult.Get("prompt_cache_key"); v.Exists() {
+		template, _ = sjson.SetBytes(template, "prompt_cache_key", v.String())
+	}
+	if v := rootResult.Get("prompt_cache_retention"); v.Exists() {
+		template, _ = sjson.SetBytes(template, "prompt_cache_retention", v.String())
+	}
+	if v := rootResult.Get("prompt_cache_options"); v.Exists() && supportsCache {
+		template, _ = sjson.SetRawBytes(template, "prompt_cache_options", []byte(v.Raw))
 	}
 	template, _ = sjson.SetBytes(template, "stream", true)
 	template, _ = sjson.SetBytes(template, "store", false)
@@ -401,22 +440,6 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
 	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
 	return strings.Contains(baseModel, "grok")
-}
-
-// normalizeCodexServiceTier maps a requested service_tier to the value Codex
-// accepts. "fast" and "priority" (case-insensitive, trimmed) both resolve to
-// "priority"; any other value yields an empty string so the field is omitted.
-func normalizeCodexServiceTier(result gjson.Result) string {
-	if !result.Exists() || result.Type != gjson.String {
-		return ""
-	}
-
-	switch strings.ToLower(strings.TrimSpace(result.String())) {
-	case "fast", "priority":
-		return "priority"
-	default:
-		return ""
-	}
 }
 
 // shortenCodexCallIDIfNeeded keeps Claude tool IDs within the OpenAI Responses

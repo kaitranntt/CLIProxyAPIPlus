@@ -43,6 +43,10 @@ func ConvertClaudeRequestToGeminiWithCompat(modelName string, inputRawJSON []byt
 func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
 	// Build output Gemini request JSON
+	// Claude cache_control markers have no direct Gemini equivalent. Gemini 2.5+
+	// uses implicit context caching; explicit caching requires a separately
+	// created cachedContent resource. We intentionally drop cache_control from
+	// tools, system instructions, and message contents to avoid unsupported fields.
 	out := []byte(`{"contents":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 

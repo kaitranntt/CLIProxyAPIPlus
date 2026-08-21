@@ -41,6 +41,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	root := gjson.ParseBytes(rawJSON)
 	inputItems := translatorcommon.NewRawArrayItems(root.Get("contents.#").Int())
+	supportsCache := translatorcommon.ModelSupportsExplicitPromptCache(modelName)
 
 	// Pre-compute tool name shortening map from declared functionDeclarations
 	shortMap := map[string]string{}
@@ -120,8 +121,21 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
-	if serviceTier := normalizeGeminiCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
+	serviceTier := translatorcommon.NormalizeCodexServiceTier(root.Get("service_tier"))
+	if speed := root.Get("speed"); speed.Type == gjson.String && strings.ToLower(strings.TrimSpace(speed.String())) == "fast" {
+		serviceTier = "priority"
+	}
+	if serviceTier != "" {
 		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+	}
+	if v := root.Get("prompt_cache_key"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "prompt_cache_key", v.String())
+	}
+	if v := root.Get("prompt_cache_retention"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "prompt_cache_retention", v.String())
+	}
+	if v := root.Get("prompt_cache_options"); v.Exists() && supportsCache {
+		out, _ = sjson.SetRawBytes(out, "prompt_cache_options", []byte(v.Raw))
 	}
 
 	// System instruction -> as a user message with input_text parts
@@ -417,14 +431,7 @@ func codexMessageWithPart(role string, part []byte) []byte {
 }
 
 func normalizeGeminiCodexServiceTier(serviceTier gjson.Result) string {
-	if !serviceTier.Exists() || serviceTier.Type != gjson.String {
-		return ""
-	}
-	switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
-	case "priority", "fast":
-		return "priority"
-	}
-	return ""
+	return translatorcommon.NormalizeCodexServiceTier(serviceTier)
 }
 
 func codexContentPartFromGeminiInlineData(part gjson.Result) ([]byte, bool) {
