@@ -871,3 +871,48 @@ func messageHashFor(i int) string {
 	}
 	return string(s)
 }
+
+func TestReplaceClaudeThinkingReplayIfUnchangedLocalCASAvoidsOverwrite(t *testing.T) {
+	useFakeClaudeThinkingReplayKVClient(t, nil, false)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	const sessionKey = "local-concurrent-fallback"
+
+	_, snapshot1, _, err := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if err != nil {
+		t.Fatalf("GetIfExists error: %v", err)
+	}
+	if !snapshot1.loaded || snapshot1.found {
+		t.Fatalf("expected loaded not-found snapshot, got loaded=%v found=%v", snapshot1.loaded, snapshot1.found)
+	}
+
+	_, snapshot2, _, err := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if err != nil {
+		t.Fatalf("GetIfExists error: %v", err)
+	}
+	if !snapshot2.loaded || snapshot2.found {
+		t.Fatalf("expected loaded not-found snapshot, got loaded=%v found=%v", snapshot2.loaded, snapshot2.found)
+	}
+
+	winner := []byte(`[{"type":"thinking","thinking":"winner","signature":"EgI="}]`)
+	loser := []byte(`[{"type":"thinking","thinking":"loser","signature":"EgI="}]`)
+
+	ok, err := ReplaceClaudeThinkingReplayIfUnchanged(ctx, modelFamily, sessionKey, snapshot1, winner)
+	if err != nil || !ok {
+		t.Fatalf("first replace = %v, err %v", ok, err)
+	}
+
+	ok, err = ReplaceClaudeThinkingReplayIfUnchanged(ctx, modelFamily, sessionKey, snapshot2, loser)
+	if err != nil || ok {
+		t.Fatalf("second replace should lose, got ok=%v err=%v", ok, err)
+	}
+
+	got, _, found, err := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if err != nil || !found {
+		t.Fatalf("expected winner value, found=%v err=%v", found, err)
+	}
+	if string(got[0]) != string(winner) {
+		t.Fatalf("winner value was overwritten: got %q, want %q", got[0], winner)
+	}
+}
