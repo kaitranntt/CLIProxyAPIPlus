@@ -656,7 +656,7 @@ func TestClaudeThinkingReplayAliasHomeRollbackRejectsStaleIndexRecord(t *testing
 	client.values[indexKey] = index
 	useFakeClaudeThinkingReplayKVClient(t, client, true)
 
-	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, now)
+	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, nil, now)
 
 	if aliasValueIsLive(client.values[aliasKey]) {
 		t.Fatalf("stale index record left alias value live; expected rollback")
@@ -685,11 +685,27 @@ func TestClaudeThinkingReplayAliasHomeRollbackKeepsFreshIndexRecord(t *testing.T
 	client.values[indexKey] = index
 	useFakeClaudeThinkingReplayKVClient(t, client, true)
 
-	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, now)
+	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, nil, now)
 
 	if !aliasValueIsLive(client.values[aliasKey]) {
 		t.Fatalf("fresh index record allowed value to be rolled back")
 	}
+}
+
+// concurrentAliasClaudeThinkingReplayKVClient simulates a concurrent worker
+// that re-registers the alias between the rollback KVGet and rollback CAS.
+// The CAS should see the changed value and leave it alone.
+type concurrentAliasClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	aliasKey string
+	injected []byte
+}
+
+func (c *concurrentAliasClaudeThinkingReplayKVClient) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	if key == c.aliasKey {
+		c.values[key] = append([]byte(nil), c.injected...)
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(ctx, key, expected, expectedExists, newValue, ttl)
 }
 
 // erroredAliasCASClaudeThinkingReplayKVClient simulates an alias CAS that
@@ -730,6 +746,67 @@ func TestClaudeThinkingReplayAliasHomeRollBackOnFailedRegistration(t *testing.T)
 
 	if aliasValueIsLive(client.values[aliasKey]) {
 		t.Fatalf("alias %q was left after a failed CAS; expected rollback", aliasKey)
+	}
+}
+
+func TestClaudeThinkingReplayAliasHomeRollBackRestoresPreviousValue(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	messageHash := "msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	now := time.Now()
+	previous := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{{SessionKey: "old", FirstUserHash: "first", Timestamp: now}}}
+	previousRaw, _ := json.Marshal(previous)
+	committed := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{
+		{SessionKey: "old", FirstUserHash: "first", Timestamp: now},
+		{SessionKey: "new", FirstUserHash: "first", Timestamp: now},
+	}}
+	committedRaw, _ := json.Marshal(committed)
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	client.values[aliasKey] = append([]byte(nil), committedRaw...)
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, previousRaw, now)
+
+	if string(client.values[aliasKey]) != string(previousRaw) {
+		t.Fatalf("rollback did not restore previous alias value: got %s, want %s", client.values[aliasKey], previousRaw)
+	}
+}
+
+func TestClaudeThinkingReplayAliasHomeRollBackPreservesPreviousDespiteConcurrentRepopulation(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	now := time.Now()
+	previous := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{{SessionKey: "old", FirstUserHash: "first", Timestamp: now}}}
+	previousRaw, _ := json.Marshal(previous)
+	committed := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{
+		{SessionKey: "old", FirstUserHash: "first", Timestamp: now},
+		{SessionKey: "new", FirstUserHash: "first", Timestamp: now},
+	}}
+	committedRaw, _ := json.Marshal(committed)
+	injected := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{{SessionKey: "other", FirstUserHash: "first", Timestamp: now}}}
+	injectedRaw, _ := json.Marshal(injected)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	base.values[aliasKey] = append([]byte(nil), committedRaw...)
+	client := &concurrentAliasClaudeThinkingReplayKVClient{fakeClaudeThinkingReplayKVClient: base, aliasKey: aliasKey, injected: injectedRaw}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, previousRaw, now)
+
+	if string(client.values[aliasKey]) != string(injectedRaw) {
+		t.Fatalf("concurrently repopulated alias was overwritten during rollback: got %s, want %s", client.values[aliasKey], injectedRaw)
 	}
 }
 
