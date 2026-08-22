@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -117,9 +118,18 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						if !preserveEmptyThinkingBlocks {
 							return true
 						}
+						rawSignature := contentResult.Get("signature").String()
+						thoughtSignature := rawSignature
+						if rawSignature != "" {
+							if sig, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGemini, rawSignature); ok {
+								thoughtSignature = sig
+							} else {
+								thoughtSignature = geminiClaudeThoughtSignature
+							}
+						}
 						part := []byte(`{"text":"","thought":true,"thoughtSignature":""}`)
 						part, _ = sjson.SetBytes(part, "text", contentResult.Get("thinking").String())
-						part, _ = sjson.SetBytes(part, "thoughtSignature", contentResult.Get("signature").String())
+						part, _ = sjson.SetBytes(part, "thoughtSignature", thoughtSignature)
 						partItems = append(partItems, part)
 
 					case "tool_use":
