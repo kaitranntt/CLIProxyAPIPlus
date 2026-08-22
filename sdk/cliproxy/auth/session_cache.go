@@ -176,6 +176,46 @@ func (c *SessionCache) RestoreAliasesIfAbsent(authID string, sessionIDs ...strin
 	return true
 }
 
+// SetAliasesIfAllAbsent atomically binds all sessionIDs to authID only when every
+// alias is currently absent or expired. If any alias is already live, it returns
+// the authID currently bound to the first occupied alias and false, without
+// modifying anything. This prevents a cold binding from splitting an existing
+// affinity group when one key is already occupied.
+func (c *SessionCache) SetAliasesIfAllAbsent(authID string, sessionIDs ...string) (string, bool) {
+	if c == nil || authID == "" || len(sessionIDs) == 0 {
+		return "", false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var absent []string
+	for _, sid := range sessionIDs {
+		if sid == "" {
+			continue
+		}
+		if entry, ok := c.entries[sid]; ok && now.Before(entry.expiresAt) {
+			return entry.authID, false
+		}
+		absent = append(absent, sid)
+	}
+	aliases := compactSessionAliases(absent)
+	if len(aliases) == 0 {
+		return "", false
+	}
+	c.generation++
+	entry := sessionEntry{
+		authID:     authID,
+		expiresAt:  now.Add(c.ttl),
+		aliases:    aliases,
+		generation: c.generation,
+	}
+	for _, alias := range aliases {
+		c.entries[alias] = entry
+	}
+	return authID, true
+}
+
 func (c *SessionCache) setAliasesUntil(authID string, expiresAt time.Time, sessionIDs ...string) {
 	if authID == "" || expiresAt.IsZero() {
 		return
