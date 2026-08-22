@@ -1590,3 +1590,24 @@ func TestClaudeExecutorCompatThinkingReplayCrossFormatStream(t *testing.T) {
 		t.Fatalf("cross-format stream did not replay signed thinking: %s", gjson.GetBytes(requestBodies[1], "messages.0.content").Raw)
 	}
 }
+
+func TestClaudeThinkingReplayFindStartIndex_RefusesPartialAnchor(t *testing.T) {
+	assistant := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A-old"}]`),
+		gjson.Parse(`[{"type":"text","text":"X"}]`),
+	}
+	cached := [][]byte{
+		[]byte(`[{"type":"text","text":"A-old"}]`),
+		[]byte(`[{"type":"text","text":"A-new"}]`),
+	}
+	if got := claudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+		t.Fatalf("expected -1 for partial match with unsigned trailing turn, got %d", got)
+	}
+
+	assistantFull := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A-new"}]`),
+	}
+	if got := claudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 {
+		t.Fatalf("expected latest full match start 1, got %d", got)
+	}
+}
