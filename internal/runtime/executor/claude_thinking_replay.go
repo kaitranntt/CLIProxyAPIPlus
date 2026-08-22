@@ -40,11 +40,15 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 	return strings.TrimSpace(apiKey) != "" && !isClaudeOAuthToken(apiKey)
 }
 
-// A missing session identity intentionally disables replay instead of sharing hidden reasoning across callers.
-// When no caller session is available, we fall back to a conversation-scoped
-// key derived from the first user message and system content, so distinct
-// conversations through the same credential cannot see each other's cached
-// signatures.
+// claudeThinkingReplayScopeFromRequest selects a conversation replay scope.
+// It prefers an explicit execution/session metadata or prompt-cache/window key,
+// then a conversation nonce (client_metadata.conversation_id, conversation_id,
+// or X-Conversation-Id), and finally a content-derived fallback keyed by the
+// first user message and system prompt.
+//
+// When the fallback key is content-derived, history compaction changes
+// messages.0 and can orphan the cache. Resolve the original scope through any
+// remaining message aliases, then continue using that key for this request.
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
 	modelFamily := claudeThinkingReplayModelFamily(auth, req.Model)
 	callerHash := claudeThinkingReplayCallerHash(auth, req, opts)
@@ -55,17 +59,14 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	}
 	if sessionKey == "" {
-		sessionKey = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
-		fallback = true
-	}
-	// When the sessionless fallback key is based on messages.0, a compacted
-	// history can change the key and orphan caches. Resolve the original
-	// conversation scope through any remaining message, weighting user
-	// messages and conversation-first-user context more strongly.
-	if fallback && sessionKey != "" {
-		resolvedMessages := claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)
-		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
-			sessionKey = resolved
+		var usedNonce bool
+		sessionKey, usedNonce = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
+		fallback = sessionKey != "" && !usedNonce
+		if fallback {
+			resolvedMessages := claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)
+			if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
+				sessionKey = resolved
+			}
 		}
 	}
 	return claudeThinkingReplayScope{
@@ -245,7 +246,13 @@ func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 			continue
 		}
 		content := message.Get("content")
-		if !content.IsArray() {
+		if content.Type == gjson.String {
+			normalized, err := json.Marshal([]map[string]string{{"type": "text", "text": content.String()}})
+			if err != nil {
+				continue
+			}
+			content = gjson.ParseBytes(normalized)
+		} else if !content.IsArray() {
 			continue
 		}
 		assistantContents = append(assistantContents, content)
@@ -269,6 +276,10 @@ func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 	from := 0
 	if start >= 0 {
 		from = start
+	} else {
+		// No cached suffix matches a contiguous block; refuse partial fallback
+		// that could pair a retained turn with the wrong hidden signature.
+		from = len(cachedContents)
 	}
 
 	for ai, i := range assistantMsgIndices {
@@ -343,35 +354,26 @@ func claudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 	if len(assistantContents) == 0 || len(cachedContents) == 0 {
 		return -1
 	}
-	bestStart := -1
-	bestLen := 0
-	for start := 0; start < len(cachedContents); start++ {
-		j := start
-		prefixLen := 0
-		for i := 0; i < len(assistantContents) && j < len(cachedContents); i++ {
-			matched := false
-			for j < len(cachedContents) {
-				if claudeThinkingReplayContentsMatch(assistantContents[i], gjson.ParseBytes(cachedContents[j])) {
-					matched = true
-					j++
+	maxL := len(assistantContents)
+	if maxL > len(cachedContents) {
+		maxL = len(cachedContents)
+	}
+	for l := maxL; l >= 1; l-- {
+		start := len(cachedContents) - l
+		for off := 0; off <= len(assistantContents)-l; off++ {
+			matched := true
+			for k := 0; k < l; k++ {
+				if !claudeThinkingReplayContentsMatch(assistantContents[off+k], gjson.ParseBytes(cachedContents[start+k])) {
+					matched = false
 					break
 				}
-				j++
 			}
-			if !matched {
-				break
+			if matched {
+				return start
 			}
-			prefixLen++
-		}
-		if prefixLen > bestLen || (prefixLen == bestLen && start > bestStart) {
-			bestLen = prefixLen
-			bestStart = start
 		}
 	}
-	if bestLen == 0 {
-		return -1
-	}
-	return bestStart
+	return -1
 }
 
 // claudeThinkingReplayMessageHashes returns a stable weighted hash for each
@@ -516,7 +518,9 @@ func headerFirstValue(headers http.Header, key string) string {
 	}
 	for k, vv := range headers {
 		if strings.EqualFold(k, key) && len(vv) > 0 {
-			return vv[0]
+			if v := strings.TrimSpace(vv[0]); v != "" {
+				return v
+			}
 		}
 	}
 	return ""
@@ -535,6 +539,26 @@ func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinking
 	}
 }
 
+// claudeThinkingReplayContentIsReplayable reports whether a content array
+// carries a decodable Claude thinking signature. Only provenanced signed turns
+// are cached; unsigned or malformed-signature responses must not evict earlier
+// replay state.
+func claudeThinkingReplayContentIsReplayable(content []byte) bool {
+	root := gjson.ParseBytes(content)
+	if !root.IsArray() {
+		return false
+	}
+	for _, part := range root.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "thinking" {
+			continue
+		}
+		if signature.HasDecodableClaudeThinkingSignature(part.Get("signature").String()) {
+			return true
+		}
+	}
+	return false
+}
+
 func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingReplayScope, content []byte) {
 	if !scope.valid() || !scope.cacheReady {
 		return
@@ -542,7 +566,7 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 	// Unsigned or non-replayable responses must not evict earlier signed turns.
 	// Only append turns that carry signed thinking; prior replay state is retained
 	// for the next request that echoes an earlier assistant message.
-	if kimiThinkingReplayContentIsReplayable(content) {
+	if claudeThinkingReplayContentIsReplayable(content) {
 		if _, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content); errReplace != nil {
 			log.Warnf("claude compatible thinking replay cache replace failed: %v", errReplace)
 		}
