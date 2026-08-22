@@ -55,14 +55,14 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 	firstUserHash := claudeThinkingReplayFirstUserHash(modelFamily, callerHash, req.Payload)
 	sessionKey := codexReasoningReplaySessionKey(ctx, sdktranslator.FormatClaude, req, opts, req.Payload)
 	fallback := false
+	usedNonce := false
 	if sessionKey != "" {
 		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	}
 	if sessionKey == "" {
-		var usedNonce bool
 		sessionKey, usedNonce = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
-		fallback = sessionKey != ""
-		if fallback && !usedNonce {
+		fallback = sessionKey != "" && !usedNonce
+		if fallback {
 			resolvedMessages := claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)
 			if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
 				sessionKey = resolved

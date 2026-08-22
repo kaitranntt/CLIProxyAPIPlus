@@ -1488,6 +1488,58 @@ func TestClaudeExecutorCompatThinkingReplayRetainsNoNonceScopeAfterHistoryCompac
 	}
 }
 
+func TestClaudeExecutorCompatThinkingReplayNoAliasForNonceScope(t *testing.T) {
+	internalcacheClearClaudeThinkingReplay(t)
+
+	var mu sync.Mutex
+	var requestBodies [][]byte
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		mu.Lock()
+		requestBodies = append(requestBodies, bytes.Clone(body))
+		callCount++
+		call := callCount
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"id":"msg-1","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"thinking","thinking":"provider reasoning","signature":"EgI="},{"type":"text","text":"compact answer"}],"stop_reason":"end_turn"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg-2","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer server.Close()
+
+	auth := claudeReplayTestAuth(server.URL)
+	executor := NewClaudeExecutor(nil)
+
+	firstPayload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	firstRequest, firstOptions := claudeReplayTestRequest(firstPayload, "", true, sdktranslator.FormatClaude)
+	firstRequest.Payload = claudeReplayPayloadWithConversationID(firstRequest.Payload, "nonce-scope")
+	if _, errExecute := executor.Execute(context.Background(), auth, firstRequest, firstOptions); errExecute != nil {
+		t.Fatalf("first Execute() error: %v", errExecute)
+	}
+
+	// A later no-nonce compacted request should not resolve to the nonce scope:
+	// aliases are registered only for content-derived scopes.
+	compactedPayload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"text","text":"compact answer"}]},{"role":"user","content":"next"}]}`)
+	compactedRequest, compactedOptions := claudeReplayTestRequest(compactedPayload, "", true, sdktranslator.FormatClaude)
+	if _, errExecute := executor.Execute(context.Background(), auth, compactedRequest, compactedOptions); errExecute != nil {
+		t.Fatalf("compacted Execute() error: %v", errExecute)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestBodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2; nonce scope registered aliases and was resolved", len(requestBodies))
+	}
+}
+
 func internalcacheClearClaudeThinkingReplay(t *testing.T) {
 	t.Helper()
 	internalcache.ClearClaudeThinkingReplayCache()
