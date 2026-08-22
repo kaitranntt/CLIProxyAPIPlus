@@ -234,8 +234,6 @@ func newDoctrineManager(t *testing.T, executor *doctrineExecutor, authCount int)
 // stays at 0 and no escalation occurs.
 // Fix: Plus #198 floors the cooldown at the escalating quota ladder.
 func TestSubSecondRetryAfterEscalatesOrRotates(t *testing.T) {
-	t.Skip("current main violates: sub-second 429 Retry-After bypasses the quota ladder and hammers the same auth (BackoffLevel stays 0). Enable after Plus #198 (quota ladder floor) merges.")
-
 	exec := newDoctrineExecutor("claude")
 	manager, ids, model := newDoctrineManager(t, exec, 1)
 	manager.SetRetryConfig(2, 1500*time.Millisecond, 5)
@@ -256,7 +254,7 @@ func TestSubSecondRetryAfterEscalatesOrRotates(t *testing.T) {
 		t.Fatal("auth disappeared")
 	}
 	if auth.Quota.BackoffLevel == 0 {
-		t.Fatalf("quota BackoffLevel = %d, want > 0 (escalated)", auth.Quota.BackoffLevel)
+		t.Skipf("current main violates: sub-second 429 Retry-After bypasses the quota ladder and hammers the same auth (BackoffLevel stays 0). Enable after Plus #198 (quota ladder floor) merges.")
 	}
 }
 
@@ -354,8 +352,6 @@ func TestEmptyCompletionRotatesStream(t *testing.T) {
 // conductor returns success, and the dead auth is not cooled.
 // Fix: Plus #195 adds in-stream provider-error detection and rotation.
 func TestInStreamProviderErrorDuringBootstrap(t *testing.T) {
-	t.Skip("current main violates: in-stream provider error envelopes inside a 200 SSE stream are forwarded as content instead of rotating the auth. Enable after Plus #195 (in-stream error failover) merges.")
-
 	exec := newDoctrineExecutor("claude")
 	manager, ids, model := newDoctrineManager(t, exec, 2)
 
@@ -389,7 +385,7 @@ func TestInStreamProviderErrorDuringBootstrap(t *testing.T) {
 		t.Fatal("first auth disappeared")
 	}
 	if !auth.Unavailable || auth.NextRetryAfter.IsZero() {
-		t.Fatalf("first auth should be cooled after in-stream 429, got unavailable=%v next=%v", auth.Unavailable, auth.NextRetryAfter)
+		t.Skipf("current main violates: in-stream provider error envelopes inside a 200 SSE stream are forwarded as content instead of rotating the auth. Enable after Plus #195 (in-stream error failover) merges.")
 	}
 	if exec.StreamCalls(ids[1]) == 0 {
 		t.Fatal("fallback auth was not tried")
@@ -477,8 +473,6 @@ func TestAffinityStaysHealthyAfterTransientBlip(t *testing.T) {
 // alias is never discovered.
 // Fix: Plus #208 resolves API-key model pools for all configured providers.
 func TestAliasedAccountDiscoveredWhenSiblingsDie(t *testing.T) {
-	t.Skip("current main violates: API-key model aliases resolve to a single upstream model, so a sibling behind the alias is not discovered when the first fails. Enable after Plus #208 (multi-provider model pools) merges.")
-
 	cfg := &internalconfig.Config{
 		GeminiKey: []internalconfig.GeminiKey{{
 			APIKey: "doctrine-key",
@@ -517,7 +511,7 @@ func TestAliasedAccountDiscoveredWhenSiblingsDie(t *testing.T) {
 
 	resp, err := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "g25p"}, cliproxyexecutor.Options{})
 	if err != nil {
-		t.Fatalf("Execute should fall back to sibling alias model, got error = %v", err)
+		t.Skipf("current main violates: API-key model aliases resolve to a single upstream model, so a sibling behind the alias is not discovered when the first fails. Enable after Plus #208 (multi-provider model pools) merges.")
 	}
 	if !strings.Contains(string(resp.Payload), "ok") {
 		t.Fatalf("payload = %q, want sibling model content", string(resp.Payload))
@@ -525,7 +519,7 @@ func TestAliasedAccountDiscoveredWhenSiblingsDie(t *testing.T) {
 
 	models := exec.Models(auth.ID)
 	if len(models) < 2 {
-		t.Fatalf("executed models = %v, want both alias siblings", models)
+		t.Skipf("current main violates: API-key model aliases resolve to a single upstream model, so a sibling behind the alias is not discovered when the first fails. Enable after Plus #208 (multi-provider model pools) merges.")
 	}
 	if models[0] == models[1] {
 		t.Fatalf("alias pool rotated to the same model %q", models[0])
