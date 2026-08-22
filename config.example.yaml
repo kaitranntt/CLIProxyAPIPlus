@@ -908,3 +908,16 @@ nonstream-keepalive-interval: 0
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+
+# Optional translator configuration
+# translator:
+#   # When true, prior assistant thinking/reasoning content is carried over into
+#   # a labeled "Prior assistant reasoning (unverified context)" system
+#   # instruction when translating to a target protocol (e.g. plain OpenAI chat
+#   # completions) that has no canonical thought field. Default is false.
+#   #
+#   # This is a fallback for non-canonical targets: the most recent 3 blocks are
+#   # kept, each capped at 4000 runes, and older or truncated content is marked.
+#   # Canonical compatibility targets (isCompat / reasoning_content) are not
+#   # affected.
+#   carry-over-thinking-in-system: false
