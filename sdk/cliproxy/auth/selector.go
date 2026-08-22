@@ -890,43 +890,12 @@ func (s *SessionAffinitySelector) rebindAliasGroupCAS(sessionKey string, expecte
 }
 
 // rebindConflictingAliases attempts to rebind the alias group currently bound
-// to expectedAuthID to newAuthID, merging any cold keys that are not already
-// part of the group. It performs a single compare-and-replace: if a concurrent
-// caller already rebound the group away from expectedAuthID, the CAS fails and
-// the cache is left untouched.
+// to expectedAuthID to newAuthID, merging any cold keys and any other alias
+// groups bound to the same auth. If a concurrent caller already rebound the
+// group away from expectedAuthID, the cache is left untouched.
 func (s *SessionAffinitySelector) rebindConflictingAliases(expectedAuthID, newAuthID string, coldKeys []string) bool {
-	var sessionKey string
-	for _, key := range coldKeys {
-		if key == "" {
-			continue
-		}
-		if authID, ok := s.cache.Get(key); ok && authID == expectedAuthID {
-			sessionKey = key
-			break
-		}
-	}
-	if sessionKey == "" {
-		return false
-	}
-	boundAuth, gen, aliases, ok := s.cache.GetWithGeneration(sessionKey)
-	if !ok || boundAuth != expectedAuthID {
-		return false
-	}
-
-	seen := make(map[string]struct{}, len(aliases))
-	for _, a := range aliases {
-		seen[a] = struct{}{}
-	}
-	additional := make([]string, 0, len(coldKeys))
-	for _, key := range coldKeys {
-		if key == "" {
-			continue
-		}
-		if _, exists := seen[key]; !exists {
-			additional = append(additional, key)
-		}
-	}
-	return s.cache.CompareAndReplaceAliases(expectedAuthID, gen, aliases, newAuthID, additional...)
+	_, ok := s.cache.ReplaceAliasesIfUnchanged(expectedAuthID, newAuthID, coldKeys...)
+	return ok
 }
 
 // mergeSplitAliasGroupsCAS reconciles two split session alias groups (a
