@@ -895,6 +895,9 @@ func TestClaudeExecutorCompatThinkingReplayRestoresSignedNonToolResponse(t *test
 
 		w.Header().Set("Content-Type", "application/json")
 		if call == 1 {
+			// Upstream returns a signed thinking block followed by a plain text
+			// answer with no tool_use. This must be cached and restored on the
+			// next user turn.
 			_, _ = w.Write([]byte(`{"id":"msg-1","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"thinking","thinking":"provider reasoning","signature":"opaque-signature-non-tool"},{"type":"text","text":"The answer is 42"}],"stop_reason":"end_turn"}`))
 			return
 		}
@@ -910,6 +913,7 @@ func TestClaudeExecutorCompatThinkingReplayRestoresSignedNonToolResponse(t *test
 		t.Fatalf("first Execute() error: %v", errExecute)
 	}
 
+	// Client echoes the assistant's text block without the thinking part.
 	secondPayload := []byte(`{"messages":[{"role":"user","content":"what is the answer"},{"role":"assistant","content":[{"type":"text","text":"The answer is 42"}]},{"role":"user","content":"thanks"}]}`)
 	secondRequest, secondOptions := claudeReplayTestRequest(secondPayload, "nonstream-replay-non-tool", true, sdktranslator.FormatClaude)
 	if _, errExecute := executor.Execute(context.Background(), auth, secondRequest, secondOptions); errExecute != nil {
@@ -968,6 +972,7 @@ func TestClaudeExecutorCompatThinkingReplayRestoresAfterSensitiveWordObfuscation
 		t.Fatalf("first Execute() error: %v", errExecute)
 	}
 
+	// Client echoes the assistant's text, which contains the sensitive word.
 	secondPayload := []byte(`{"messages":[{"role":"user","content":"what is the secret"},{"role":"assistant","content":[{"type":"text","text":"the secret answer"}]},{"role":"user","content":"thanks"}]}`)
 	secondRequest, secondOptions := claudeReplayTestRequest(secondPayload, "obfuscate-replay", true, sdktranslator.FormatClaude)
 	if _, errExecute := executor.Execute(context.Background(), auth, secondRequest, secondOptions); errExecute != nil {
@@ -1204,6 +1209,38 @@ func TestRestoreClaudeThinkingReplayContents_SkipsUnsignedLeadingAssistant(t *te
 
 	if second[0].Get("thinking").String() == "first" {
 		t.Fatalf("dropped first signed turn leaked into later assistant: %s", gjson.GetBytes(updated, "messages.3.content").Raw)
+	}
+}
+
+func TestRestoreClaudeThinkingReplayContents_AnchorsDuplicateSuffixAfterTruncation(t *testing.T) {
+	// Client dropped an older signed turn whose visible content is identical to
+	// the first retained assistant. The retained duplicate must receive the
+	// newer cached thinking/signature, not the older one.
+	body := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"user","content":"continue"},{"role":"assistant","content":[{"type":"text","text":"same"}]},{"role":"user","content":"again"},{"role":"assistant","content":[{"type":"text","text":"different"}]},{"role":"user","content":"final"}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"old","signature":"sig-old"},{"type":"text","text":"same"}]`),
+		[]byte(`[{"type":"thinking","thinking":"new","signature":"sig-new"},{"type":"text","text":"same"}]`),
+		[]byte(`[{"type":"thinking","thinking":"other","signature":"sig-other"},{"type":"text","text":"different"}]`),
+	}
+
+	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	if !restored {
+		t.Fatal("expected restore")
+	}
+
+	first := gjson.GetBytes(updated, "messages.2.content").Array()
+	if first[0].Get("signature").String() != "sig-new" {
+		t.Fatalf("first retained duplicate matched wrong signature: %s", first[0].Get("signature").String())
+	}
+
+	second := gjson.GetBytes(updated, "messages.4.content").Array()
+	if second[0].Get("signature").String() != "sig-other" {
+		t.Fatalf("second retained assistant matched wrong signature: %s", second[0].Get("signature").String())
+	}
+
+	// The dropped older duplicate must not leak into the retained turns.
+	if first[0].Get("signature").String() == "sig-old" {
+		t.Fatalf("dropped older duplicate leaked into first retained assistant: %s", gjson.GetBytes(updated, "messages").Raw)
 	}
 }
 
