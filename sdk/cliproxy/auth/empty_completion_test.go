@@ -31,6 +31,11 @@ type emptyCompletionTestExecutor struct {
 	// firstStream records the first auth picked for a stream execution.
 	firstStream string
 
+	// emptyPayload/contentPayload override the default first-auth empty payload
+	// and subsequent-auth content payload (used to exercise non-OpenAI formats).
+	emptyPayload   []byte
+	contentPayload []byte
+
 	// emptyStreamPayload/contentStreamPayload override the default first-auth
 	// empty stream and subsequent-auth content stream (used to exercise
 	// non-OpenAI stream formats).
@@ -59,12 +64,20 @@ func (e *emptyCompletionTestExecutor) Execute(ctx context.Context, auth *Auth, _
 	// returns real content. This guarantees the rotation test exercises the
 	// empty-completion failure path regardless of global selector state.
 	if len(e.executePayloads) == 0 && e.firstExecute == auth.ID {
-		return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)}, nil
+		empty := e.emptyPayload
+		if len(empty) == 0 {
+			empty = []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)
+		}
+		return cliproxyexecutor.Response{Payload: empty}, nil
 	}
 	if p, ok := e.executePayloads[auth.ID]; ok {
 		return cliproxyexecutor.Response{Payload: p}, nil
 	}
-	return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":"real"},"finish_reason":"stop"}]}`)}, nil
+	content := e.contentPayload
+	if len(content) == 0 {
+		content = []byte(`{"choices":[{"message":{"content":"real"},"finish_reason":"stop"}]}`)
+	}
+	return cliproxyexecutor.Response{Payload: content}, nil
 }
 
 func (e *emptyCompletionTestExecutor) CountTokens(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -682,6 +695,56 @@ func TestEmptyCompletionPredicateInteractions(t *testing.T) {
 		expected bool
 	}{
 		{
+			name:     "interactions json empty steps is empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[]}`),
+			expected: true,
+		},
+		{
+			name:     "interactions json empty steps zero usage is empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[],"usage":{"output_tokens":0,"total_output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "interactions json with model_output text is not empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"hello"}]}]}`),
+			expected: false,
+		},
+		{
+			name:     "interactions json with function_call is not empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"function_call","name":"get_weather","arguments":{"location":"Paris"}}]}`),
+			expected: false,
+		},
+		{
+			name:     "interactions json with output tokens is not empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[],"usage":{"output_tokens":5}}`),
+			expected: false,
+		},
+		{
+			name:     "interactions sse stream scaffold and empty completion is empty",
+			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\nevent: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"status\":\"completed\",\"steps\":[],\"usage\":{\"output_tokens\":0}}}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "interactions sse stream with step delta is not empty",
+			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.delta\ndata: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"hello\"}}\n\nevent: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"status\":\"completed\",\"steps\":[],\"usage\":{\"output_tokens\":1}}}\n\n"),
+			expected: false,
+		},
+		{
+			name:     "interactions json with media data is not empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/png","data":"iVBORw0KGgo="}]}]}`),
+			expected: false,
+		},
+		{
+			name:     "interactions json with file_uri is not empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"type":"document","file_uri":"files/123"}]}]}`),
+			expected: false,
+		},
+		{
+			name:     "interactions sse stream with media delta is not empty",
+			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.delta\ndata: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"content\",\"content\":{\"type\":\"image\",\"data\":\"iVBORw0KGgo=\"}}}\n\nevent: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"status\":\"completed\",\"steps\":[],\"usage\":{\"output_tokens\":0}}}\n\n"),
+			expected: false,
+		},
+		{
 			name:     "interactions sse stream ending in bare finish with zero output is empty",
 			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\nevent: finish\ndata: {\"event_type\":\"finish\",\"metadata\":{\"total_usage\":{\"total_output_tokens\":0}}}\n\n"),
 			expected: true,
@@ -699,6 +762,132 @@ func TestEmptyCompletionPredicateInteractions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecuteInteractionsMeaningfulOutputNotRotated(t *testing.T) {
+	t.Run("step with text content", func(t *testing.T) {
+		executor := &emptyCompletionTestExecutor{
+			executePayloads: map[string][]byte{},
+			executeCalls:    map[string]int{},
+			emptyPayload:    []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"meaningful text"}]}]}`),
+		}
+		manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+		resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !strings.Contains(string(resp.Payload), "meaningful text") {
+			t.Fatalf("resp.Payload = %s, want meaningful text", string(resp.Payload))
+		}
+		if len(capture.Results()) != 1 || !capture.Results()[0].Success || capture.Results()[0].AuthID != executor.firstExecute {
+			t.Fatalf("first auth should succeed without rotation, results: %+v, first: %s, ids: %v", capture.Results(), executor.firstExecute, ids)
+		}
+	})
+
+	t.Run("step with function_call", func(t *testing.T) {
+		executor := &emptyCompletionTestExecutor{
+			executePayloads: map[string][]byte{},
+			executeCalls:    map[string]int{},
+			emptyPayload:    []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"function_call","name":"get_weather","arguments":{"location":"Tokyo"}}]}`),
+		}
+		manager, _, model, capture := newEmptyCompletionTestManager(t, executor)
+
+		resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !strings.Contains(string(resp.Payload), "get_weather") {
+			t.Fatalf("resp.Payload = %s, want get_weather", string(resp.Payload))
+		}
+		if len(capture.Results()) != 1 || !capture.Results()[0].Success || capture.Results()[0].AuthID != executor.firstExecute {
+			t.Fatalf("first auth should succeed without rotation, results: %+v", capture.Results())
+		}
+	})
+
+	t.Run("non-zero usage with empty steps", func(t *testing.T) {
+		executor := &emptyCompletionTestExecutor{
+			executePayloads: map[string][]byte{},
+			executeCalls:    map[string]int{},
+			emptyPayload:    []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[],"usage":{"output_tokens":3,"total_output_tokens":3}}`),
+		}
+		manager, _, model, capture := newEmptyCompletionTestManager(t, executor)
+
+		resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		_ = resp
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if len(capture.Results()) != 1 || !capture.Results()[0].Success || capture.Results()[0].AuthID != executor.firstExecute {
+			t.Fatalf("first auth should succeed without rotation, results: %+v", capture.Results())
+		}
+	})
+}
+
+func TestStreamBootstrapDetectorInteractionsScaffoldAllowsFailover(t *testing.T) {
+	t.Run("scaffold events do not commit stream and classify as empty on completion", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk1 := []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\n")
+		chunk2 := []byte("event: interaction.status_update\ndata: {\"event_type\":\"interaction.status_update\",\"interaction_id\":\"int_1\",\"status\":\"in_progress\"}\n\n")
+		chunk3 := []byte("event: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\n")
+		chunk4 := []byte("event: step.stop\ndata: {\"event_type\":\"step.stop\",\"index\":0}\n\n")
+		chunk5 := []byte("event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"status\":\"completed\",\"steps\":[],\"usage\":{\"output_tokens\":0}}}\n\n")
+
+		if detector.Observe(chunk1) {
+			t.Fatal("Observe(interaction.created) = true, want false")
+		}
+		if detector.Observe(chunk2) {
+			t.Fatal("Observe(interaction.status_update) = true, want false")
+		}
+		if detector.Observe(chunk3) {
+			t.Fatal("Observe(step.start) = true, want false")
+		}
+		if detector.Observe(chunk4) {
+			t.Fatal("Observe(step.stop) = true, want false")
+		}
+		if detector.Observe(chunk5) {
+			t.Fatal("Observe(interaction.completed empty) = true, want false")
+		}
+		if !detector.Finish() {
+			t.Fatal("detector.Finish() = false, want true (empty completion)")
+		}
+	})
+
+	t.Run("scaffold stream rotates auth when upstream fails over", func(t *testing.T) {
+		executor := &emptyCompletionTestExecutor{
+			streamPayloads: map[string][][]byte{},
+			streamCalls:    map[string]int{},
+			emptyStreamPayload: [][]byte{
+				[]byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\n"),
+				[]byte("event: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\n"),
+				[]byte("event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"status\":\"completed\",\"steps\":[],\"usage\":{\"output_tokens\":0}}}\n\n"),
+			},
+			contentStreamPayload: [][]byte{
+				[]byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_2\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\n"),
+				[]byte("event: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\n"),
+				[]byte("event: step.delta\ndata: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"hello from stream\"}}\n\n"),
+				[]byte("event: step.stop\ndata: {\"event_type\":\"step.stop\",\"index\":0}\n\n"),
+				[]byte("event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_2\",\"status\":\"completed\",\"steps\":[],\"usage\":{\"output_tokens\":5}}}\n\n"),
+			},
+		}
+		manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+		stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+		if err != nil {
+			t.Fatalf("ExecuteStream() error = %v", err)
+		}
+		if stream == nil {
+			t.Fatal("ExecuteStream() returned nil stream")
+		}
+		var got strings.Builder
+		for chunk := range stream.Chunks {
+			got.Write(chunk.Payload)
+		}
+		assertRotatesToContent(t, ids, executor.firstStream, got.String(), "hello from stream", capture)
+	})
 }
 
 func TestEmptyCompletionTolerantUsage(t *testing.T) {
