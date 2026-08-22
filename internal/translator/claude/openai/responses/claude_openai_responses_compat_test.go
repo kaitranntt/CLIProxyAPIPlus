@@ -23,7 +23,7 @@ func TestConvertOpenAIResponsesRequestToClaudeWithCompatPreservesEmptyReasoning(
 	opaquePayload := []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"reason"}],"encrypted_content":"opaque-deepseek-id"}]}`)
 	opaqueCompat := ConvertOpenAIResponsesRequestToClaudeWithCompat("deepseek-v4", opaquePayload, false)
 	opaquePart := gjson.GetBytes(opaqueCompat, "messages.0.content.0")
-	if opaquePart.Get("type").String() != "thinking" || opaquePart.Get("thinking").String() != "reason" || opaquePart.Get("signature").String() != "opaque-deepseek-id" {
-		t.Fatalf("compat translation dropped invalid-signature thinking block: %s", opaqueCompat)
+	if opaquePart.Get("type").String() != "thinking" || opaquePart.Get("thinking").String() != "reason" || opaquePart.Get("signature").String() != "" {
+		t.Fatalf("compat translation must sanitize invalid-signature thinking block but preserve text: %s", opaqueCompat)
 	}
 }

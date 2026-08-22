@@ -568,8 +568,9 @@ func responsesSystemUnsupportedBlock(part gjson.Result) []byte {
 // thought. Anthropic requires a signature on every thinking block and rejects an
 // absent or empty one, so an item whose encrypted_content is missing or belongs
 // to another provider is dropped rather than replayed as an unsigned block.
-// Compatibility mode explicitly keeps the original opaque value as the
-// signature for upstreams that use a provider-specific signature format.
+// Compatibility mode may emit an unsigned thinking block for configured
+// compatibility endpoints that accept one, but it never forwards an opaque or
+// foreign encrypted_content as a valid Claude signature.
 // Anthropic does not verify the text against the signature, which is what makes
 // the summarized text safe to restore alongside it.
 func convertResponsesReasoningToClaudeThinking(item gjson.Result, preserveEmptyThinkingBlocks ...bool) []byte {
@@ -589,7 +590,9 @@ func convertResponsesReasoningToClaudeThinking(item gjson.Result, preserveEmptyT
 		if !preserveEmpty {
 			return nil
 		}
-		signature = encrypted
+		// Compat mode is allowed to emit an unsigned thinking block, but it must
+		// not pass a foreign or opaque encrypted_content through as a signature.
+		signature = ""
 	}
 
 	thinkingText := responsesReasoningText(item)
