@@ -289,7 +289,7 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 		skipPR   string
 		request  []byte
 		response []byte
-		check    func(t *testing.T, out []byte)
+		check    func(out []byte) string
 	}{
 		{
 			name:     "openai_responses_reasoning_fallback",
@@ -298,10 +298,11 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 			skipPR:   "#191",
 			request:  []byte(`{"model":"o3-mini","reasoning":{"summary":"auto"},"messages":[{"role":"user","content":"hi"}]}`),
 			response: []byte(`{"id":"chatcmpl_r","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning":"Let me think"}}]}`),
-			check: func(t *testing.T, out []byte) {
+			check: func(out []byte) string {
 				if !gjson.GetBytes(out, "output.#(type==\"reasoning\")").Exists() {
-					t.Fatalf("reasoning item missing; out=%s", out)
+					return fmt.Sprintf("reasoning item missing; out=%s", out)
 				}
+				return ""
 			},
 		},
 		{
@@ -311,13 +312,14 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 			skipPR:   "#193",
 			request:  []byte(`{"model":"claude-opus-4-6","thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`),
 			response: []byte(`{"id":"msg_123","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"thinking","thinking":"First thought. Second thought.","signature":"sig"},{"type":"text","text":"Here is the solution."}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":20}}`),
-			check: func(t *testing.T, out []byte) {
+			check: func(out []byte) string {
 				if !gjson.GetBytes(out, "choices.0.message.reasoning_content").Exists() {
-					t.Fatalf("canonical reasoning_content missing; out=%s", out)
+					return fmt.Sprintf("canonical reasoning_content missing; out=%s", out)
 				}
 				if gjson.GetBytes(out, "choices.0.message.reasoning").Exists() {
-					t.Fatalf("non-canonical reasoning field leaked; out=%s", out)
+					return fmt.Sprintf("non-canonical reasoning field leaked; out=%s", out)
 				}
+				return ""
 			},
 		},
 		{
@@ -327,10 +329,11 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 			skipPR:   "#190",
 			request:  []byte(`{"model":"gemini-3.5-flash","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
 			response: []byte(`{"responseId":"resp-test","modelVersion":"gemini-test","candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"thinking text","thoughtSignature":"sig-test"},{"text":"hello world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":131,"thoughtsTokenCount":109}}`),
-			check: func(t *testing.T, out []byte) {
+			check: func(out []byte) string {
 				if got := gjson.GetBytes(out, "content.#(type==\"thinking\").signature").String(); got != "sig-test" {
-					t.Fatalf("thinking signature = %q, want sig-test; out=%s", got, out)
+					return fmt.Sprintf("thinking signature = %q, want sig-test; out=%s", got, out)
 				}
+				return ""
 			},
 		},
 		{
@@ -340,13 +343,14 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 			skipPR:   "#190",
 			request:  []byte(`{"model":"gemini-3.5-flash","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
 			response: []byte(`{"responseId":"resp-test","modelVersion":"gemini-test","candidates":[{"content":{"role":"model","parts":[{"text":"hello world","thoughtSignature":"sig-carrier"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":131}}`),
-			check: func(t *testing.T, out []byte) {
+			check: func(out []byte) string {
 				if !gjson.GetBytes(out, "content.#(type==\"text\")").Exists() {
-					t.Fatalf("visible text block missing; out=%s", out)
+					return fmt.Sprintf("visible text block missing; out=%s", out)
 				}
 				if gjson.GetBytes(out, "content.#(type==\"thinking\")").Exists() {
-					t.Fatalf("visible text misrouted to thinking; out=%s", out)
+					return fmt.Sprintf("visible text misrouted to thinking; out=%s", out)
 				}
+				return ""
 			},
 		},
 	}
@@ -355,9 +359,6 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			name := fmt.Sprintf("%s/stream=%v", tc.name, stream)
 			t.Run(name, func(t *testing.T) {
-				if tc.skipPR != "" {
-					t.Skipf("current main violates this doctrine; fix is %s", tc.skipPR)
-				}
 				fromF := sdktranslator.FromString(tc.from)
 				toF := sdktranslator.FromString(tc.to)
 				if !sdktranslator.HasResponseTransformer(fromF, toF) {
@@ -369,7 +370,11 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 					var param any
 					chunks := sdktranslator.TranslateStream(context.Background(), fromF, toF, "doctrine-model", tc.request, tc.request, tc.response, &param)
 					if len(chunks) == 0 {
-						t.Fatal("no response chunks")
+						if tc.skipPR != "" {
+							t.Skipf("current main violates this doctrine; fix is %s: no response chunks", tc.skipPR)
+						} else {
+							t.Fatal("no response chunks")
+						}
 					}
 					out = []byte(strings.Join(func() []string {
 						var s []string
@@ -381,7 +386,13 @@ func TestDegradationResponseDoctrines(t *testing.T) {
 				} else {
 					out = sdktranslator.TranslateNonStream(context.Background(), fromF, toF, "doctrine-model", tc.request, tc.request, tc.response, nil)
 				}
-				tc.check(t, out)
+				if msg := tc.check(out); msg != "" {
+					if tc.skipPR != "" {
+						t.Skipf("current main violates this doctrine; fix is %s: %s", tc.skipPR, msg)
+					} else {
+						t.Fatal(msg)
+					}
+				}
 			})
 		}
 	}
