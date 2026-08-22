@@ -1107,6 +1107,103 @@ func TestSessionAffinitySelector_RebindsFullAliasGroupWhenConflictingAuthUnavail
 	}
 }
 
+func TestRebindConflictingAliases_LeavesNewerBindingUntouched(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	seedKey := "claude::conv:existing-session::claude-3"
+	otherAlias := "claude::conv:other-session::claude-3"
+	selector.cache.SetAliases("auth-unavailable", seedKey, otherAlias)
+
+	coldKeys := []string{
+		"claude::pck:rebind-test::claude-3",
+		seedKey,
+	}
+
+	// First rebinding wins.
+	if ok := selector.rebindConflictingAliases("auth-unavailable", "auth-a", coldKeys); !ok {
+		t.Fatal("first rebind should succeed")
+	}
+
+	// A later rebind must not overwrite the winning auth-a binding.
+	if ok := selector.rebindConflictingAliases("auth-unavailable", "auth-b", coldKeys); ok {
+		t.Fatal("second rebind should fail because the group is already rebound")
+	}
+
+	if got, ok := selector.cache.Get(otherAlias); !ok || got != "auth-a" {
+		t.Fatalf("other alias should follow winner: got %q, want auth-a", got)
+	}
+}
+
+func TestSessionAffinitySelector_ConcurrentRebindConflictingAliases_NoOverwrite(t *testing.T) {
+	t.Parallel()
+
+	const attempts = 100
+	for i := 0; i < attempts; i++ {
+		func() {
+			fallback := &RoundRobinSelector{}
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+				Fallback: fallback,
+				TTL:      time.Minute,
+			})
+			defer selector.Stop()
+
+			seedKey := "claude::conv:existing-session::claude-3"
+			otherAlias := "claude::conv:other-session::claude-3"
+			selector.cache.SetAliases("auth-unavailable", seedKey, otherAlias)
+
+			coldKeys := []string{
+				"claude::pck:rebind-test::claude-3",
+				seedKey,
+			}
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			oks := make([]bool, 2)
+			for j := 0; j < 2; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					<-start
+					newAuth := "auth-a"
+					if idx == 1 {
+						newAuth = "auth-b"
+					}
+					oks[idx] = selector.rebindConflictingAliases("auth-unavailable", newAuth, coldKeys)
+				}(j)
+			}
+			close(start)
+			wg.Wait()
+
+			if oks[0] == oks[1] {
+				t.Fatalf("iteration %d: exactly one rebind should succeed: %v", i, oks)
+			}
+
+			got, ok := selector.cache.Get(otherAlias)
+			if !ok {
+				t.Fatalf("iteration %d: other alias should be bound", i)
+			}
+			if got != "auth-a" && got != "auth-b" {
+				t.Fatalf("iteration %d: unexpected winner %q", i, got)
+			}
+
+			// Cache should be consistent: both cold keys point to the same winner.
+			if got2, ok2 := selector.cache.Get(coldKeys[0]); !ok2 || got2 != got {
+				t.Fatalf("iteration %d: cold key %q = %q, want %q", i, coldKeys[0], got2, got)
+			}
+			if got2, ok2 := selector.cache.Get(seedKey); !ok2 || got2 != got {
+				t.Fatalf("iteration %d: seed key %q = %q, want %q", i, seedKey, got2, got)
+			}
+		}()
+	}
+}
+
 func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	t.Parallel()
 

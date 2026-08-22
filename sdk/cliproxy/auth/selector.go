@@ -843,10 +843,30 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return a, nil
 			}
 		}
-		// The conflicting auth is no longer available; rebind the full alias
-		// group to the winning auth so the entire group follows it.
-		s.cache.SetAliases(auth.ID, coldKeys...)
-		entry.Infof("session-affinity: cache miss, conflicting auth unavailable, rebinding group | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		// The conflicting auth is no longer available. Rebind the full alias
+		// group to the winning auth only if the group is still bound to the
+		// unavailable auth, so a concurrent caller that already rebound it is not
+		// overwritten by the loser.
+		if rebound := s.rebindConflictingAliases(boundAuth, auth.ID, coldKeys); rebound {
+			entry.Infof("session-affinity: cache miss, conflicting auth unavailable, rebinding group | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		} else if currentAuth, ok := s.cache.GetAndRefresh(cacheKey); ok {
+			for _, a := range available {
+				if a.ID == currentAuth {
+					entry.Infof("session-affinity: cache miss, alias rebound concurrently to %s | session=%s provider=%s model=%s", a.ID, truncateSessionID(primaryID), provider, model)
+					return a, nil
+				}
+			}
+			if fallbackKey != "" {
+				if currentAuth, ok := s.cache.Get(fallbackKey); ok {
+					for _, a := range available {
+						if a.ID == currentAuth {
+							entry.Infof("session-affinity: cache miss, alias rebound concurrently to %s | session=%s provider=%s model=%s", a.ID, truncateSessionID(primaryID), provider, model)
+							return a, nil
+						}
+					}
+				}
+			}
+		}
 	}
 	return auth, nil
 }
@@ -867,6 +887,46 @@ func (s *SessionAffinitySelector) rebindAliasGroupCAS(sessionKey string, expecte
 		expectedAuthID, expectedGen, expectedAliases = authID, gen, aliases
 	}
 	return false
+}
+
+// rebindConflictingAliases attempts to rebind the alias group currently bound
+// to expectedAuthID to newAuthID, merging any cold keys that are not already
+// part of the group. It performs a single compare-and-replace: if a concurrent
+// caller already rebound the group away from expectedAuthID, the CAS fails and
+// the cache is left untouched.
+func (s *SessionAffinitySelector) rebindConflictingAliases(expectedAuthID, newAuthID string, coldKeys []string) bool {
+	var sessionKey string
+	for _, key := range coldKeys {
+		if key == "" {
+			continue
+		}
+		if authID, ok := s.cache.Get(key); ok && authID == expectedAuthID {
+			sessionKey = key
+			break
+		}
+	}
+	if sessionKey == "" {
+		return false
+	}
+	boundAuth, gen, aliases, ok := s.cache.GetWithGeneration(sessionKey)
+	if !ok || boundAuth != expectedAuthID {
+		return false
+	}
+
+	seen := make(map[string]struct{}, len(aliases))
+	for _, a := range aliases {
+		seen[a] = struct{}{}
+	}
+	additional := make([]string, 0, len(coldKeys))
+	for _, key := range coldKeys {
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; !exists {
+			additional = append(additional, key)
+		}
+	}
+	return s.cache.CompareAndReplaceAliases(expectedAuthID, gen, aliases, newAuthID, additional...)
 }
 
 // mergeSplitAliasGroupsCAS reconciles two split session alias groups (a
