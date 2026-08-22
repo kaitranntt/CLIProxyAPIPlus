@@ -6,9 +6,7 @@
 package gemini
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"strconv"
 	"strings"
 
@@ -43,6 +41,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	root := gjson.ParseBytes(rawJSON)
 	inputItems := translatorcommon.NewRawArrayItems(root.Get("contents.#").Int())
+	supportsCache := translatorcommon.ModelSupportsExplicitPromptCache(modelName)
 
 	// Pre-compute tool name shortening map from declared functionDeclarations
 	shortMap := map[string]string{}
@@ -65,23 +64,12 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		}
 	}
 
-	// helper for generating paired call IDs in the form: call_<alphanum>
+	// helper for generating paired call IDs in the form: call_<number>
 	// Gemini uses sequential pairing across possibly multiple in-flight
 	// functionCalls, so we keep a FIFO queue of generated call IDs and
 	// consume them in order when functionResponses arrive.
 	var pendingCallIDs []string
-
-	// genCallID creates a random call id like: call_<8chars>
-	genCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 8 chars random suffix
-		for i := 0; i < 24; i++ {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "call_" + b.String()
-	}
+	callIDCounter := 0
 
 	getGeminiCallID := func(value gjson.Result) string {
 		if callID := strings.TrimSpace(value.Get("id").String()); callID != "" {
@@ -102,10 +90,52 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		return ids
 	}
 
+	usedCallIDs := make(map[string]bool)
+	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
+		contents.ForEach(func(_, content gjson.Result) bool {
+			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					if id := getGeminiCallID(part.Get("functionCall")); id != "" {
+						usedCallIDs[id] = true
+					}
+					if id := getGeminiCallID(part.Get("functionResponse")); id != "" {
+						usedCallIDs[id] = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
+	generateCallID := func() string {
+		for {
+			callIDCounter++
+			id := fmt.Sprintf("call_%d", callIDCounter)
+			if !usedCallIDs[id] {
+				usedCallIDs[id] = true
+				return id
+			}
+		}
+	}
+
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
-	if serviceTier := normalizeGeminiCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
+	serviceTier := translatorcommon.NormalizeCodexServiceTier(root.Get("service_tier"))
+	if speed := root.Get("speed"); speed.Type == gjson.String && strings.ToLower(strings.TrimSpace(speed.String())) == "fast" {
+		serviceTier = "priority"
+	}
+	if serviceTier != "" {
 		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+	}
+	if v := root.Get("prompt_cache_key"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "prompt_cache_key", v.String())
+	}
+	if v := root.Get("prompt_cache_retention"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "prompt_cache_retention", v.String())
+	}
+	if v := root.Get("prompt_cache_options"); v.Exists() && supportsCache {
+		out, _ = sjson.SetRawBytes(out, "prompt_cache_options", []byte(v.Raw))
 	}
 
 	// System instruction -> as a user message with input_text parts
@@ -198,7 +228,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 					id := getGeminiCallID(fc)
 					if id == "" {
-						id = genCallID()
+						id = generateCallID()
 					}
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
 					pendingCallIDs = append(pendingCallIDs, id)
@@ -227,7 +257,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						// pop the first element
 						pendingCallIDs = pendingCallIDs[1:]
 					} else {
-						id = genCallID()
+						id = generateCallID()
 					}
 					fno, _ = sjson.SetBytes(fno, "call_id", id)
 					inputItems = append(inputItems, fno)
@@ -401,14 +431,7 @@ func codexMessageWithPart(role string, part []byte) []byte {
 }
 
 func normalizeGeminiCodexServiceTier(serviceTier gjson.Result) string {
-	if !serviceTier.Exists() || serviceTier.Type != gjson.String {
-		return ""
-	}
-	switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
-	case "priority", "fast":
-		return "priority"
-	}
-	return ""
+	return translatorcommon.NormalizeCodexServiceTier(serviceTier)
 }
 
 func codexContentPartFromGeminiInlineData(part gjson.Result) ([]byte, bool) {

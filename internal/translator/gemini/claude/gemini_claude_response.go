@@ -21,15 +21,16 @@ import (
 
 // Params holds parameters for response conversion.
 type Params struct {
-	IsGlAPIKey       bool
-	HasFirstResponse bool
-	ResponseType     int
-	ResponseIndex    int
-	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
-	ToolNameMap      map[string]string
-	SanitizedNameMap map[string]string
-	SawToolCall      bool
-	HasFinalEvents   bool
+	IsGlAPIKey            bool
+	HasFirstResponse      bool
+	ResponseType          int
+	ResponseIndex         int
+	CurrentThinkingSigned bool
+	HasContent            bool // Tracks whether any content (text, thinking, or tool use) has been output
+	ToolNameMap           map[string]string
+	SanitizedNameMap      map[string]string
+	SawToolCall           bool
+	HasFinalEvents        bool
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -76,13 +77,42 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
+	closeCurrentBlock := func() {
+		if (*param).(*Params).ResponseType == 0 {
+			return
+		}
+		appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
+		(*param).(*Params).ResponseIndex++
+		(*param).(*Params).ResponseType = 0
+		(*param).(*Params).CurrentThinkingSigned = false
+	}
+	startEmptyThinkingBlock := func() {
+		appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, (*param).(*Params).ResponseIndex))
+		(*param).(*Params).ResponseType = 2
+		(*param).(*Params).CurrentThinkingSigned = false
+		(*param).(*Params).HasContent = true
+	}
 	appendSignatureDelta := func(signature string) {
 		if signature == "" || (*param).(*Params).ResponseType != 2 {
 			return
 		}
 		data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, (*param).(*Params).ResponseIndex)), "delta.signature", signature)
 		appendEvent("content_block_delta", string(data))
+		(*param).(*Params).CurrentThinkingSigned = true
 		(*param).(*Params).HasContent = true
+	}
+	appendPartSignature := func(signature string) bool {
+		if signature == "" {
+			return false
+		}
+		if (*param).(*Params).ResponseType == 2 && !(*param).(*Params).CurrentThinkingSigned {
+			appendSignatureDelta(signature)
+			return false
+		}
+		closeCurrentBlock()
+		startEmptyThinkingBlock()
+		appendSignatureDelta(signature)
+		return true
 	}
 
 	// Initialize the streaming session with a message_start event
@@ -121,18 +151,21 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			}
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
 
-			if hasThoughtSignature && !partTextResult.Exists() && !functionCallResult.Exists() {
-				appendSignatureDelta(thoughtSignatureResult.String())
+			if hasThoughtSignature && (!partTextResult.Exists() || partTextResult.String() == "") && !functionCallResult.Exists() {
+				appendPartSignature(thoughtSignatureResult.String())
 				continue
 			}
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() || hasThoughtSignature {
+				if partResult.Get("thought").Bool() {
 					if hasThoughtSignature && partTextResult.String() == "" {
-						appendSignatureDelta(thoughtSignatureResult.String())
+						appendPartSignature(thoughtSignatureResult.String())
 						continue
+					}
+					if (*param).(*Params).ResponseType == 2 && (*param).(*Params).CurrentThinkingSigned && partTextResult.String() != "" {
+						closeCurrentBlock()
 					}
 					// Continue existing thinking block
 					if (*param).(*Params).ResponseType == 2 {
@@ -141,27 +174,24 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						(*param).(*Params).HasContent = true
 					} else {
 						// Transition from another state to thinking
-						// First, close any existing content block
-						if (*param).(*Params).ResponseType != 0 {
-							if (*param).(*Params).ResponseType == 2 {
-								// output = output + "event: content_block_delta\n"
-								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, (*param).(*Params).ResponseIndex)
-								// output = output + "\n\n\n"
-							}
-							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-							(*param).(*Params).ResponseIndex++
-						}
+						closeCurrentBlock()
 
 						// Start a new thinking content block
 						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, (*param).(*Params).ResponseIndex))
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
+						(*param).(*Params).CurrentThinkingSigned = false
 						(*param).(*Params).HasContent = true
 					}
-					appendSignatureDelta(thoughtSignatureResult.String())
+					if hasThoughtSignature {
+						appendSignatureDelta(thoughtSignatureResult.String())
+					}
 				} else {
 					// Process regular text content (user-visible output)
+					if hasThoughtSignature {
+						appendPartSignature(thoughtSignatureResult.String())
+					}
 					// Continue existing text block
 					if (*param).(*Params).ResponseType == 1 {
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex)), "delta.text", partTextResult.String())
@@ -169,16 +199,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						(*param).(*Params).HasContent = true
 					} else {
 						// Transition from another state to text content
-						// First, close any existing content block
-						if (*param).(*Params).ResponseType != 0 {
-							if (*param).(*Params).ResponseType == 2 {
-								// output = output + "event: content_block_delta\n"
-								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, (*param).(*Params).ResponseIndex)
-								// output = output + "\n\n\n"
-							}
-							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-							(*param).(*Params).ResponseIndex++
-						}
+						closeCurrentBlock()
 
 						// Start a new text content block
 						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, (*param).(*Params).ResponseIndex))
@@ -189,6 +210,9 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					}
 				}
 			} else if functionCallResult.Exists() {
+				if hasThoughtSignature {
+					appendPartSignature(thoughtSignatureResult.String())
+				}
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude API compatibility
 				(*param).(*Params).SawToolCall = true
@@ -207,26 +231,8 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					continue
 				}
 
-				// Handle state transitions when switching to function calls
-				// Close any existing function call block first
-				if (*param).(*Params).ResponseType == 3 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-					(*param).(*Params).ResponseIndex++
-					(*param).(*Params).ResponseType = 0
-				}
-
-				// Special handling for thinking state transition
-				if (*param).(*Params).ResponseType == 2 {
-					// output = output + "event: content_block_delta\n"
-					// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, (*param).(*Params).ResponseIndex)
-					// output = output + "\n\n\n"
-				}
-
-				// Close any other existing content block
-				if (*param).(*Params).ResponseType != 0 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-					(*param).(*Params).ResponseIndex++
-				}
+				// Close any existing content block
+				closeCurrentBlock()
 
 				// Start a new tool use content block
 				// This creates the structure for a function call in Claude format
@@ -318,20 +324,39 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		textBuilder.Reset()
 	}
 
+	var thinkingSignature string
 	flushThinking := func() {
 		if thinkingBuilder.Len() == 0 {
+			thinkingSignature = ""
 			return
 		}
 		block := []byte(`{"type":"thinking","thinking":""}`)
 		block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+		if thinkingSignature != "" {
+			block, _ = sjson.SetBytes(block, "signature", thinkingSignature)
+		}
 		blocks = append(blocks, block)
 		thinkingBuilder.Reset()
+		thinkingSignature = ""
 	}
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			thoughtSignatureResult := part.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = part.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			isThought := part.Get("thought").Bool()
+			if isThought && hasThoughtSignature {
+				if thinkingSignature != "" {
+					flushThinking()
+				}
+				thinkingSignature = thoughtSignatureResult.String()
+			}
+
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
-				if part.Get("thought").Bool() {
+				if isThought {
 					flushText()
 					thinkingBuilder.WriteString(text.String())
 					continue

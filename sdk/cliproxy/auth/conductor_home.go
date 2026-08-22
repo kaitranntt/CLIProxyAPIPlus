@@ -372,7 +372,7 @@ func (m *Manager) predictedHomeConcurrencyModel(auth *Auth, routeModel string) (
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequested(auth, requestedModel)
 	upstreamModel := executionAliasPoolModel(auth, requestedModel, aliasResult)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) != 0 {
+	if pool := m.resolveAPIKeyUpstreamModelPool(auth, upstreamModel); len(pool) != 0 {
 		if len(pool) != 1 {
 			return "", false
 		}
@@ -1120,6 +1120,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
+				}
+				if isTransientRateLimitError(errExec) {
+					result.TransientRateLimit = true
 				}
 				if isCredentialScopedError(errExec) {
 					result.CredentialScope = true

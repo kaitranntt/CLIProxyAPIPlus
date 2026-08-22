@@ -72,6 +72,14 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
+	// QuotaCooldownFloorSeconds is the minimum base for the quota cooldown ladder.
+	// Sub-second Retry-After hints are never allowed below this floor. Default 1.
+	QuotaCooldownFloorSeconds int `yaml:"quota-cooldown-floor-seconds" json:"quota-cooldown-floor-seconds"`
+
+	// TransientCooldownByStatus lets operators override the transient cooldown per HTTP status.
+	// Statuses not listed fall back to TransientErrorCooldownSeconds.
+	TransientCooldownByStatus []TransientCooldownByStatusRule `yaml:"transient-cooldown-by-status,omitempty" json:"transient-cooldown-by-status,omitempty"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
@@ -177,8 +185,17 @@ type Config struct {
 	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthRequestScopedErrors defines per-provider request-scoped error rules applied to OAuth/file-backed auth entries.
+	// Supported channels include: vertex, aistudio, antigravity, claude, codex, kimi, xai, and OAuth plugin provider keys.
+	//
+	// NOTE: This applies only to OAuth credentials and does not affect per-credential request-scoped-errors under *-api-key.
+	OAuthRequestScopedErrors map[string][]RequestScopedErrorRule `yaml:"oauth-request-scoped-errors,omitempty" json:"oauth-request-scoped-errors,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// Translator controls cross-format request translation behavior.
+	Translator TranslatorConfig `yaml:"translator" json:"translator"`
 
 	// IncognitoBrowser opens OAuth URLs in an incognito/private browser window.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`

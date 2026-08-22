@@ -65,11 +65,41 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		return ids
 	}
 
+	usedToolIDs := make(map[string]bool)
+	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
+		contents.ForEach(func(_, content gjson.Result) bool {
+			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					if id := getGeminiToolID(part.Get("functionCall")); id != "" {
+						usedToolIDs[id] = true
+					}
+					if id := getGeminiToolID(part.Get("functionResponse")); id != "" {
+						usedToolIDs[id] = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
 	// FIFO queue to store tool call IDs for matching with tool results
 	// Gemini uses sequential pairing across possibly multiple in-flight
 	// functionCalls, so we keep a FIFO queue of generated tool IDs and
 	// consume them in order when functionResponses arrive.
 	var pendingToolIDs []string
+	toolIDCounter := 0
+
+	generateToolID := func() string {
+		for {
+			toolIDCounter++
+			id := fmt.Sprintf("toolu_%d", toolIDCounter)
+			if !usedToolIDs[id] {
+				usedToolIDs[id] = true
+				return id
+			}
+		}
+	}
 
 	// Model mapping to specify which Claude Code model to use
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -206,6 +236,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				// Create system message in Claude Code format.
 				systemMessage := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
 				systemMessage, _ = sjson.SetBytes(systemMessage, "content.0.text", systemText.String())
+				systemMessage = translatorcommon.AttachMessageCacheControl(systemMessage, sysInstr)
 				messageAccumulator.Append(systemMessage)
 				messageAccumulator.Flush()
 			}
@@ -240,6 +271,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					if text := part.Get("text"); text.Exists() {
 						textContent := []byte(`{"type":"text","text":""}`)
 						textContent, _ = sjson.SetBytes(textContent, "text", text.String())
+						textContent = translatorcommon.AttachCacheControl(textContent, part)
 						contentItems = append(contentItems, textContent)
 						return true
 					}
@@ -251,7 +283,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 						toolID := getGeminiToolID(fc)
 						if toolID == "" {
-							toolID = translatorcommon.GenerateClaudeToolCallID()
+							toolID = generateToolID()
 						}
 						pendingToolIDs = append(pendingToolIDs, toolID)
 						toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
@@ -262,6 +294,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						if args := fc.Get("args"); args.Exists() && args.IsObject() {
 							toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(args.Raw))
 						}
+						toolUse = translatorcommon.AttachCacheControl(toolUse, part)
 						contentItems = append(contentItems, toolUse)
 						return true
 					}
@@ -282,7 +315,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							pendingToolIDs = pendingToolIDs[1:]
 						} else {
 							// Fallback: generate new ID if no pending tool_use found
-							toolID = translatorcommon.GenerateClaudeToolCallID()
+							toolID = generateToolID()
 						}
 						toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", toolID)
 
@@ -292,6 +325,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						} else if response := fr.Get("response"); response.Exists() {
 							toolResult, _ = sjson.SetBytes(toolResult, "content", response.Raw)
 						}
+						toolResult = translatorcommon.AttachCacheControl(toolResult, part)
 						contentItems = append(contentItems, toolResult)
 						return true
 					}
@@ -299,6 +333,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					// Inline data conversion to Claude Code content format
 					if inlineData := geminiClaudeInlineData(part); inlineData.Exists() {
 						if contentPart, ok := claudeContentPartFromGeminiInlineData(inlineData); ok {
+							contentPart = translatorcommon.AttachCacheControl(contentPart, part)
 							contentItems = append(contentItems, contentPart)
 						}
 						return true
@@ -307,6 +342,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					// File data conversion to Claude Code content format
 					if fileData := geminiClaudeFileData(part); fileData.Exists() {
 						if contentPart, ok := claudeContentPartFromGeminiFileData(fileData); ok {
+							contentPart = translatorcommon.AttachCacheControl(contentPart, part)
 							contentItems = append(contentItems, contentPart)
 						}
 						return true
@@ -321,6 +357,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
 				msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+				msg = translatorcommon.AttachMessageCacheControl(msg, content)
 				messageAccumulator.Append(msg)
 			}
 
@@ -352,6 +389,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", cleaned)
 					}
 
+					anthropicTool = translatorcommon.AttachCacheControl(anthropicTool, funcDecl)
 					anthropicTool = lowercaseClaudeToolSchemaTypes(anthropicTool)
 					anthropicTools = append(anthropicTools, gjson.ParseBytes(anthropicTool).Value())
 					return true

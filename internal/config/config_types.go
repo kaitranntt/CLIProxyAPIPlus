@@ -69,9 +69,20 @@ type KiroRateLimitConfig struct {
 	SuspendCooldown   string  `yaml:"suspend-cooldown,omitempty" json:"suspend-cooldown,omitempty"`
 }
 
+// TransientCooldownByStatusRule overrides the transient cooldown duration for a single HTTP status.
+// Statuses not listed fall back to the global TransientErrorCooldownSeconds.
+type TransientCooldownByStatusRule struct {
+	// Status is the HTTP status code to match (e.g. 408, 500, 502, 503, 504).
+	Status int `yaml:"status" json:"status"`
+	// CooldownSeconds is the cooldown applied when this status is seen.
+	// 0 keeps the legacy default for this status; negative values disable the cooldown.
+	CooldownSeconds int `yaml:"cooldown-seconds" json:"cooldown-seconds"`
+}
+
 // RequestScopedErrorRule configures custom classification and handling for upstream errors.
 type RequestScopedErrorRule struct {
 	// Status matches the HTTP status code of the upstream response (e.g. 400).
+	// Zero or omitted matches any status, so the rule is evaluated by body patterns only.
 	Status int `yaml:"status,omitempty" json:"status,omitempty"`
 	// Match matches substrings in the upstream error body.
 	Match []string `yaml:"match,omitempty" json:"match,omitempty"`
@@ -364,6 +375,15 @@ type PayloadModelRule struct {
 	Exist []string `yaml:"exist" json:"exist"`
 	// NotExist requires payload JSON paths to be missing or null.
 	NotExist []string `yaml:"not-exist" json:"not-exist"`
+}
+
+// TranslatorConfig controls cross-format request translation behavior.
+type TranslatorConfig struct {
+	// CarryOverThinkingInSystem moves prior assistant reasoning/thinking into a
+	// labeled system instruction when the target protocol has no canonical thought
+	// field (e.g. plain OpenAI chat completions). Default false preserves strict
+	// protocol behavior.
+	CarryOverThinkingInSystem bool `yaml:"carry-over-thinking-in-system" json:"carry-over-thinking-in-system"`
 }
 
 // CloakConfig configures request cloaking for non-Claude-Code clients.

@@ -168,7 +168,22 @@ save-cooldown-status: false
 
 # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504).
 # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
+# After PR #205 (fix/auth-lower-transient-cooldown), 0 means 10 s.
 transient-error-cooldown-seconds: 0
+
+# Per-status overrides for transient error cooldowns.
+# Statuses not listed fall back to transient-error-cooldown-seconds.
+# Example:
+# transient-cooldown-by-status:
+#   - status: 408
+#     cooldown-seconds: 2
+#   - status: 503
+#     cooldown-seconds: 10
+
+# Minimum base in seconds for the quota cooldown ladder.
+# Sub-second Retry-After hints are never allowed below this floor. Default 1.
+# Stacks on PR #198 (fix/quota-backoff-hint-floor) / router-for-me/CLIProxyAPI#5130.
+quota-cooldown-floor-seconds: 1
 
 # When true, globally disable Claude request cloaking (the Claude Code CLI disguise and
 # system prompt replacement), so the original system prompt is passed through to Claude as-is.
@@ -306,7 +321,7 @@ nonstream-keepalive-interval: 0
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
-#       - status: 400        # HTTP status code to match
+#       - status: 400        # HTTP status code to match; omit or set to 0 to match any status (body-only rule)
 #         match:             # optional: string contains matching
 #           - "maximum_context_length"
 #           - "context_length_exceeded"
@@ -653,6 +668,49 @@ nonstream-keepalive-interval: 0
 #   kilo:
 #     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
 #     - "*:free"                # wildcard matching suffix (e.g. all free models)
+
+# OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
+# Supported actions: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
+# The status field is optional; omit it or set it to 0 to match any HTTP status (body-only rule).
+# oauth-request-scoped-errors:
+#   vertex:
+#     - status: 400
+#       match:
+#         - "maximum_context_length"
+#         - "context_length_exceeded"
+#       match-regexr:
+#         - "maximum_context_length$"
+#         - "^context_length_exceeded"
+#       action: "stop"
+#   aistudio:
+#     - status: 400
+#       match:
+#         - "invalid_argument"
+#       action: "stop"
+#   antigravity:
+#     - status: 500
+#       match:
+#         - "internal_server_error"
+#       action: "stop-and-cooldown"
+#   claude:
+#     - match:
+#         - "prompt is too long"
+#       action: "stop"
+#   codex:
+#     - status: 400
+#       match:
+#         - "context_window_exceeded"
+#       action: "stop"
+#   kimi:
+#     - status: 400
+#       match:
+#         - "length_limit"
+#       action: "stop"
+#   xai:
+#     - status: 400
+#       match:
+#         - "max_tokens_exceeded"
+#       action: "stop"
 
 # OpenAI compatibility providers
 # openai-compatibility:

@@ -19,6 +19,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func transientCooldownByStatusEqual(a, b []config.TransientCooldownByStatusRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[int]int, len(a))
+	for _, r := range a {
+		m[r.Status] = r.CooldownSeconds
+	}
+	for _, r := range b {
+		if m[r.Status] != r.CooldownSeconds {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 	if s == nil || s.accessManager == nil || newCfg == nil {
 		return false
@@ -110,6 +126,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	}
 	if oldCfg == nil || oldCfg.TransientErrorCooldownSeconds != cfg.TransientErrorCooldownSeconds {
 		auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
+	}
+	if oldCfg == nil || oldCfg.QuotaCooldownFloorSeconds != cfg.QuotaCooldownFloorSeconds {
+		auth.SetQuotaCooldownFloorSeconds(cfg.QuotaCooldownFloorSeconds)
+	}
+	if oldCfg == nil || !transientCooldownByStatusEqual(oldCfg.TransientCooldownByStatus, cfg.TransientCooldownByStatus) {
+		auth.SetTransientCooldownByStatus(cfg.TransientCooldownByStatus)
 	}
 
 	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
