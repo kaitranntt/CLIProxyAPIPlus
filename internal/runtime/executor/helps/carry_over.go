@@ -251,11 +251,7 @@ func carryOverClaudeSource(payload []byte) []byte {
 		}
 
 		updated := []byte(msg.Raw)
-		if len(keptParts) == 0 {
-			updated, _ = sjson.SetRawBytes(updated, "content", []byte("[]"))
-		} else {
-			updated, _ = sjson.SetRawBytes(updated, "content", translatorcommon.JoinRawArray(keptParts))
-		}
+		updated, _ = sjson.SetRawBytes(updated, "content", translatorcommon.JoinRawArray(keptParts))
 		keptMessages = append(keptMessages, updated)
 		return true
 	})
