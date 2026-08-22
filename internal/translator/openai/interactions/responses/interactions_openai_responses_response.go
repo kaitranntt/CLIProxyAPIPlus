@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -237,7 +238,7 @@ func interactionsStepStartToResponses(root gjson.Result, st *interactionsToRespo
 		added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 		added, _ = sjson.SetBytes(added, "output_index", index)
 		added, _ = sjson.SetBytes(added, "item.id", itemID)
-		if signature := st.ReasoningEncrypted[index]; signature != "" {
+		if signature := interactionsReasoningEncryptedContent(st.ReasoningEncrypted[index]); signature != "" {
 			added, _ = sjson.SetBytes(added, "item.encrypted_content", signature)
 		}
 		return [][]byte{emitResponsesEvent("response.output_item.added", added)}
@@ -283,7 +284,7 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 		return [][]byte{emitResponsesEvent("response.reasoning_summary_text.delta", payload)}
 	case "thought_signature":
 		if signature := delta.Get("signature").String(); signature != "" {
-			st.ReasoningEncrypted[index] = signature
+			st.ReasoningEncrypted[index] = interactionsReasoningEncryptedContent(signature)
 		}
 		return nil
 	case "arguments_delta":
@@ -403,6 +404,16 @@ func responsesCompletedEvent(modelName string, root gjson.Result, st *interactio
 	return emitResponsesEvent("response.completed", payload)
 }
 
+func interactionsReasoningEncryptedContent(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if _, err := signature.InspectGPTReasoningSignature(raw); err != nil {
+		return ""
+	}
+	return raw
+}
+
 func interactionsThoughtSignature(step gjson.Result) string {
 	for _, path := range []string{
 		"encrypted_content",
@@ -411,23 +422,25 @@ func interactionsThoughtSignature(step gjson.Result) string {
 		"thoughtSignature",
 		"extra_content.google.thought_signature",
 	} {
-		if signature := step.Get(path).String(); signature != "" {
-			return signature
+		if raw := step.Get(path).String(); raw != "" {
+			if enc := interactionsReasoningEncryptedContent(raw); enc != "" {
+				return enc
+			}
 		}
 	}
 	content := step.Get("content")
 	if content.IsArray() {
-		var signature string
+		var raw string
 		content.ForEach(func(_, part gjson.Result) bool {
-			signature = firstNonEmpty(
+			raw = firstNonEmpty(
 				part.Get("signature").String(),
 				part.Get("thought_signature").String(),
 				part.Get("thoughtSignature").String(),
 				part.Get("extra_content.google.thought_signature").String(),
 			)
-			return signature == ""
+			return raw == ""
 		})
-		return signature
+		return interactionsReasoningEncryptedContent(raw)
 	}
 	return ""
 }
@@ -510,7 +523,7 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 func responsesReasoningItem(index int, st *interactionsToResponsesStreamState) []byte {
 	item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
 	item, _ = sjson.SetBytes(item, "id", st.ItemIDs[index])
-	if signature := st.ReasoningEncrypted[index]; signature != "" {
+	if signature := interactionsReasoningEncryptedContent(st.ReasoningEncrypted[index]); signature != "" {
 		item, _ = sjson.SetBytes(item, "encrypted_content", signature)
 	}
 	summaries := st.ReasoningSummaries[index]

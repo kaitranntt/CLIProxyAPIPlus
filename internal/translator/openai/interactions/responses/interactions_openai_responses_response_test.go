@@ -3,6 +3,7 @@ package responses
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -223,9 +224,18 @@ data: {"index":0,"event_type":"step.stop"}
 	}
 }
 
+func testGPTReasoningSignatureForInteractions() string {
+	payload := make([]byte, 1+8+16+16+32)
+	payload[0] = 0x80
+	for i := 9; i < len(payload); i++ {
+		payload[i] = byte(i)
+	}
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
 func TestConvertInteractionsResponseToOpenAIResponsesStreamPreservesThoughtSignature(t *testing.T) {
 	var param any
-	signature := "EtoRtestThoughtSignature"
+	signature := testGPTReasoningSignatureForInteractions()
 	var out [][]byte
 	for _, raw := range [][]byte{
 		[]byte(`event: step.start
@@ -269,6 +279,48 @@ data: {"interaction":{"id":"interaction_1","status":"completed","object":"intera
 	completedPayload := findResponsesEventPayload(out, "response.completed")
 	if got := gjson.GetBytes(completedPayload, "response.output.0.encrypted_content").String(); got != signature {
 		t.Fatalf("completed encrypted_content = %q, want %q. Payload: %s", got, signature, string(completedPayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStreamDropsInvalidThoughtSignature(t *testing.T) {
+	var param any
+	signature := "foreign-thought-signature"
+	var out [][]byte
+	for _, raw := range [][]byte{
+		[]byte(`event: step.start
+data: {"index":0,"step":{"type":"thought"},"event_type":"step.start"}
+
+`),
+		[]byte(`event: step.delta
+data: {"index":0,"delta":{"content":{"text":"thinking","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}
+
+`),
+		[]byte(`event: step.delta
+data: {"index":0,"delta":{"signature":"` + signature + `","type":"thought_signature"},"event_type":"step.delta"}
+
+`),
+		[]byte(`event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+`),
+		[]byte(`event: interaction.completed
+data: {"interaction":{"id":"interaction_1","status":"completed","object":"interaction","model":"gpt-test"},"event_type":"interaction.completed"}
+
+`),
+	} {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, raw, &param)...)
+	}
+
+	donePayload := findResponsesEventPayload(out, "response.output_item.done")
+	if gjson.GetBytes(donePayload, "item.encrypted_content").Exists() && gjson.GetBytes(donePayload, "item.encrypted_content").String() != "" {
+		t.Fatalf("invalid encrypted_content should be dropped, got %s", string(donePayload))
+	}
+	if got := gjson.GetBytes(donePayload, "item.summary.0.text").String(); got != "thinking" {
+		t.Fatalf("done summary = %q, want thinking. Payload: %s", got, string(donePayload))
+	}
+	completedPayload := findResponsesEventPayload(out, "response.completed")
+	if gjson.GetBytes(completedPayload, "response.output.0.encrypted_content").Exists() && gjson.GetBytes(completedPayload, "response.output.0.encrypted_content").String() != "" {
+		t.Fatalf("completed invalid encrypted_content should be dropped, got %s", string(completedPayload))
 	}
 }
 
