@@ -42,6 +42,11 @@ const (
 	// aliases kept in the local fallback map.
 	ClaudeThinkingReplayCacheMaxAliases = 102400
 
+	// ClaudeThinkingReplayCacheMaxAliasBytes bounds the aggregate byte size of
+	// the local alias map so a caller with very large model names cannot exhaust
+	// process memory under the count cap.
+	ClaudeThinkingReplayCacheMaxAliasBytes = 64 << 20
+
 	// ClaudeThinkingReplayCacheMaxAliasesPerKey bounds how many distinct
 	// conversation scopes a single message can map to in the local alias map.
 	ClaudeThinkingReplayCacheMaxAliasesPerKey = 8
@@ -84,6 +89,10 @@ var (
 	// messages resolve to the same session and breaks ties by recency.
 	claudeThinkingReplayAliases    = make(map[string][]claudeThinkingReplayAliasEntry)
 	claudeThinkingReplayAliasBytes int
+	claudeThinkingReplayAliasCount int
+
+	claudeThinkingReplayAliasPurgeInterval = 1 * time.Minute
+	claudeThinkingReplayLastAliasPurge     time.Time
 )
 
 type claudeThinkingReplayAliasEntry struct {
@@ -323,6 +332,8 @@ func ClearClaudeThinkingReplayCache() {
 	claudeThinkingReplayAliasMu.Lock()
 	claudeThinkingReplayAliases = make(map[string][]claudeThinkingReplayAliasEntry)
 	claudeThinkingReplayAliasBytes = 0
+	claudeThinkingReplayAliasCount = 0
+	claudeThinkingReplayLastAliasPurge = time.Time{}
 	claudeThinkingReplayAliasMu.Unlock()
 }
 
@@ -351,7 +362,10 @@ func RegisterClaudeThinkingReplayAlias(ctx context.Context, modelFamily, session
 	claudeThinkingReplayAliasMu.Lock()
 	defer claudeThinkingReplayAliasMu.Unlock()
 	now := time.Now()
-	purgeExpiredClaudeThinkingReplayAliasesLocked(now)
+	if now.Sub(claudeThinkingReplayLastAliasPurge) >= claudeThinkingReplayAliasPurgeInterval {
+		purgeExpiredClaudeThinkingReplayAliasesLocked(now)
+		claudeThinkingReplayLastAliasPurge = now
+	}
 	claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash, now)
 	enforceClaudeThinkingReplayAliasLimitsLocked()
 }
@@ -423,12 +437,23 @@ func claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash string
 		}
 	}
 	list = append(list, claudeThinkingReplayAliasEntry{sessionKey: sessionKey, firstUserHash: firstUserHash, timestamp: now})
+	if len(list) == 1 {
+		claudeThinkingReplayAliasBytes += len(key)
+	}
+	claudeThinkingReplayAliasCount++
+	claudeThinkingReplayAliasBytes += len(sessionKey) + len(firstUserHash)
 	if len(list) > ClaudeThinkingReplayCacheMaxAliasesPerKey {
-		claudeThinkingReplayAliasBytes -= len(list[0].sessionKey) + len(list[0].firstUserHash)
-		list = list[1:]
+		oldest := 0
+		for i := 1; i < len(list); i++ {
+			if list[i].timestamp.Before(list[oldest].timestamp) {
+				oldest = i
+			}
+		}
+		claudeThinkingReplayAliasBytes -= len(list[oldest].sessionKey) + len(list[oldest].firstUserHash)
+		list = append(list[:oldest], list[oldest+1:]...)
+		claudeThinkingReplayAliasCount--
 	}
 	claudeThinkingReplayAliases[key] = list
-	claudeThinkingReplayAliasBytes += len(key) + len(sessionKey) + len(firstUserHash)
 }
 
 func claudeThinkingReplayResolveBestAliasLocked(modelFamily string, messages []ClaudeThinkingReplayAliasMessage, requestFirstUserHash string, now time.Time) (string, bool) {
@@ -491,10 +516,12 @@ func purgeExpiredClaudeThinkingReplayAliasesLocked(now time.Time) {
 			if now.Sub(entry.timestamp) <= ClaudeThinkingReplayCacheTTL {
 				kept = append(kept, entry)
 			} else {
-				claudeThinkingReplayAliasBytes -= len(key) + len(entry.sessionKey) + len(entry.firstUserHash)
+				claudeThinkingReplayAliasBytes -= len(entry.sessionKey) + len(entry.firstUserHash)
+				claudeThinkingReplayAliasCount--
 			}
 		}
 		if len(kept) == 0 {
+			claudeThinkingReplayAliasBytes -= len(key)
 			delete(claudeThinkingReplayAliases, key)
 		} else {
 			claudeThinkingReplayAliases[key] = kept
@@ -503,11 +530,7 @@ func purgeExpiredClaudeThinkingReplayAliasesLocked(now time.Time) {
 }
 
 func enforceClaudeThinkingReplayAliasLimitsLocked() {
-	total := 0
-	for _, list := range claudeThinkingReplayAliases {
-		total += len(list)
-	}
-	for total > ClaudeThinkingReplayCacheMaxAliases {
+	for claudeThinkingReplayAliasCount > ClaudeThinkingReplayCacheMaxAliases || claudeThinkingReplayAliasBytes > ClaudeThinkingReplayCacheMaxAliasBytes {
 		type candidate struct {
 			key       string
 			index     int
@@ -529,22 +552,32 @@ func enforceClaudeThinkingReplayAliasLimitsLocked() {
 		if batch > len(candidates) {
 			batch = len(candidates)
 		}
-		if batch > total-ClaudeThinkingReplayCacheMaxAliases {
-			batch = total - ClaudeThinkingReplayCacheMaxAliases
-		}
 		for i := 0; i < batch; i++ {
 			c := candidates[i]
 			list := claudeThinkingReplayAliases[c.key]
-			if c.index < len(list) {
-				claudeThinkingReplayAliasBytes -= len(c.key) + len(list[c.index].sessionKey) + len(list[c.index].firstUserHash)
-				list = append(list[:c.index], list[c.index+1:]...)
-				if len(list) == 0 {
-					delete(claudeThinkingReplayAliases, c.key)
-				} else {
-					claudeThinkingReplayAliases[c.key] = list
-				}
-				total--
+			if c.index >= len(list) {
+				continue
 			}
+			sessionKey := list[c.index].sessionKey
+			found := -1
+			for j, e := range list {
+				if e.sessionKey == sessionKey {
+					found = j
+					break
+				}
+			}
+			if found < 0 {
+				continue
+			}
+			claudeThinkingReplayAliasBytes -= len(list[found].sessionKey) + len(list[found].firstUserHash)
+			list = append(list[:found], list[found+1:]...)
+			if len(list) == 0 {
+				claudeThinkingReplayAliasBytes -= len(c.key)
+				delete(claudeThinkingReplayAliases, c.key)
+			} else {
+				claudeThinkingReplayAliases[c.key] = list
+			}
+			claudeThinkingReplayAliasCount--
 		}
 	}
 }
