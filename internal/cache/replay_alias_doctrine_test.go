@@ -159,13 +159,13 @@ func TestReplayAliasDoctrineAtomicEvictionWithIndexUpdate(t *testing.T) {
 	// should be observable.
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHashFor(max), "first")
 
-	if _, ok := base.values[oldestAliasKey]; !ok {
+	if !aliasValueIsLive(base.values[oldestAliasKey]) {
 		t.Fatalf("evicted alias %q deleted before index CAS succeeded", oldestAliasKey)
 	}
 
-	// The new alias value must not be left unindexed.
+	// The new alias value must not be left unindexed (or only as a tombstone).
 	newAliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(max))
-	if _, ok := base.values[newAliasKey]; ok {
+	if aliasValueIsLive(base.values[newAliasKey]) {
 		t.Fatalf("unindexed alias value %q left behind after failed index CAS", newAliasKey)
 	}
 

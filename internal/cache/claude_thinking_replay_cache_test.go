@@ -146,6 +146,17 @@ func TestResolveClaudeThinkingReplayAliasIgnoresExpiredEntries(t *testing.T) {
 	}
 }
 
+func aliasValueIsLive(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return true
+	}
+	return len(value.Sessions) > 0
+}
+
 func TestClaudeThinkingReplayAliasHomeCappedPerCredential(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
 	defer ClearClaudeThinkingReplayCache()
@@ -170,10 +181,10 @@ func TestClaudeThinkingReplayAliasHomeCappedPerCredential(t *testing.T) {
 		t.Fatalf("credential alias cap exceeded: %d > %d", len(index.Aliases), max)
 	}
 
-	// The oldest entries should have been deleted.
+	// The oldest entries should have been deleted or tombstoned.
 	live := 0
-	for k := range client.values {
-		if k != indexKey {
+	for k, v := range client.values {
+		if k != indexKey && aliasValueIsLive(v) {
 			live++
 		}
 	}
@@ -363,8 +374,8 @@ func TestClaudeThinkingReplayAliasHomeCappedAcrossModelsPerCredential(t *testing
 	}
 
 	live := 0
-	for k := range client.values {
-		if k != indexKey {
+	for k, v := range client.values {
+		if k != indexKey && aliasValueIsLive(v) {
 			live++
 		}
 	}
@@ -432,7 +443,7 @@ func TestClaudeThinkingReplayAliasHomeEvictionIsAtomicWithIndexCAS(t *testing.T)
 	// forced to fail. The evicted alias value must NOT be deleted.
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHashFor(max), "first")
 
-	if _, ok := client.values[oldestAliasKey]; !ok {
+	if !aliasValueIsLive(client.values[oldestAliasKey]) {
 		t.Fatalf("oldest alias %q deleted before successful index CAS", oldestAliasKey)
 	}
 }
@@ -456,7 +467,7 @@ func TestClaudeThinkingReplayAliasHomeRollbackOnIndexFailure(t *testing.T) {
 
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
 
-	if _, ok := client.values[aliasKey]; ok {
+	if aliasValueIsLive(client.values[aliasKey]) {
 		t.Fatalf("alias %q was committed but not indexed; expected rollback", aliasKey)
 	}
 }
@@ -618,8 +629,66 @@ func TestClaudeThinkingReplayAliasHomeRollbackConditionalOnCommittedValue(t *tes
 
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
 
-	if _, ok := client.values[aliasKey]; ok {
+	if aliasValueIsLive(client.values[aliasKey]) {
 		t.Fatalf("alias %q was committed but not indexed; expected rollback conditional on committed value", aliasKey)
+	}
+}
+
+func TestClaudeThinkingReplayAliasHomeRollbackRejectsStaleIndexRecord(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	now := time.Now()
+	committed := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{{SessionKey: "session", FirstUserHash: "first", Timestamp: now}}}
+	committedRaw, _ := json.Marshal(committed)
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	client.values[aliasKey] = append([]byte(nil), committedRaw...)
+	index, _ := json.Marshal(claudeThinkingReplayAliasIndex{Aliases: []claudeThinkingReplayAliasIndexRecord{{
+		AliasKey:  aliasKey,
+		Timestamp: now.Add(-time.Minute),
+	}}})
+	client.values[indexKey] = index
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, now)
+
+	if aliasValueIsLive(client.values[aliasKey]) {
+		t.Fatalf("stale index record left alias value live; expected rollback")
+	}
+}
+
+func TestClaudeThinkingReplayAliasHomeRollbackKeepsFreshIndexRecord(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	now := time.Now()
+	committed := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{{SessionKey: "session", FirstUserHash: "first", Timestamp: now}}}
+	committedRaw, _ := json.Marshal(committed)
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	client.values[aliasKey] = append([]byte(nil), committedRaw...)
+	index, _ := json.Marshal(claudeThinkingReplayAliasIndex{Aliases: []claudeThinkingReplayAliasIndexRecord{{
+		AliasKey:  aliasKey,
+		Timestamp: now,
+	}}})
+	client.values[indexKey] = index
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw, now)
+
+	if !aliasValueIsLive(client.values[aliasKey]) {
+		t.Fatalf("fresh index record allowed value to be rolled back")
 	}
 }
 
@@ -659,7 +728,7 @@ func TestClaudeThinkingReplayAliasHomeRollBackOnFailedRegistration(t *testing.T)
 
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
 
-	if _, ok := client.values[aliasKey]; ok {
+	if aliasValueIsLive(client.values[aliasKey]) {
 		t.Fatalf("alias %q was left after a failed CAS; expected rollback", aliasKey)
 	}
 }
@@ -748,6 +817,47 @@ func TestGetClaudeThinkingReplayWithSnapshotIfExistsDoesNotReserve(t *testing.T)
 	}
 	if !found || len(contents) != 1 {
 		t.Fatalf("expected cached content, found=%v len=%d", found, len(contents))
+	}
+}
+
+func TestReplaceClaudeThinkingReplayIfUnchangedCASAvoidsOverwrite(t *testing.T) {
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	const sessionKey = "concurrent-fallback"
+
+	_, snapshot, _, err := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if err != nil {
+		t.Fatalf("GetIfExists error: %v", err)
+	}
+	if !snapshot.loaded || snapshot.found {
+		t.Fatalf("expected loaded not-found snapshot, got loaded=%v found=%v", snapshot.loaded, snapshot.found)
+	}
+
+	// Another request wins the race and writes first.
+	other := []byte(`[{"type":"thinking","thinking":"other","signature":"EgI="}]`)
+	if !CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, sessionKey, other) {
+		t.Fatal("concurrent cache write failed")
+	}
+
+	// The original replace must fail and must not overwrite the winner.
+	content := []byte(`[{"type":"thinking","thinking":"loser","signature":"EgI="}]`)
+	ok, err := ReplaceClaudeThinkingReplayIfUnchanged(ctx, modelFamily, sessionKey, snapshot, content)
+	if err != nil {
+		t.Fatalf("Replace error: %v", err)
+	}
+	if ok {
+		t.Fatal("Replace should lose when another writer created the value")
+	}
+
+	got, _, found, err := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if err != nil || !found {
+		t.Fatalf("expected winner value, found=%v err=%v", found, err)
+	}
+	if string(got[0]) != string(other) {
+		t.Fatalf("winner value was overwritten: got %q, want %q", got[0], other)
 	}
 }
 
