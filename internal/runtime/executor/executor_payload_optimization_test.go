@@ -40,8 +40,8 @@ func TestNormalizeKimiToolMessageLinksPreservesLargeArguments(t *testing.T) {
 	if got := gjson.GetBytes(output, "messages.1.tool_call_id").String(); got != "call_1" {
 		t.Fatalf("tool_call_id = %q, want call_1", got)
 	}
-	if got := gjson.GetBytes(output, "messages.0.reasoning_content").String(); got != "lookup" {
-		t.Fatalf("reasoning_content = %q, want lookup", got)
+	if got := gjson.GetBytes(output, "messages.0.reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("reasoning_content = %q, want [reasoning unavailable]", got)
 	}
 }
 
