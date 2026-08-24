@@ -754,6 +754,46 @@ func TestEmptyCompletionPredicateInteractions(t *testing.T) {
 			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"model_output\"}}\n\nevent: finish\ndata: {\"event_type\":\"finish\",\"metadata\":{\"total_usage\":{\"total_output_tokens\":7}}}\n\n"),
 			expected: false,
 		},
+		{
+			name:     "interactions json thoughtSignature only zero usage is empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","thoughtSignature":"opaque-dead-upstream"}],"usage":{"output_tokens":0,"total_output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "interactions json thought_signature only zero usage is empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","thought_signature":"opaque-dead-upstream"}],"usage":{"output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "interactions json encrypted_content only zero usage is empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","encrypted_content":"gAAAA_dead"}],"usage":{"output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "interactions json extra_content google thought_signature only is empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","extra_content":{"google":{"thought_signature":"opaque-dead-upstream"}}}],"usage":{"output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "interactions json content thoughtSignature only is empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"thoughtSignature":"opaque-dead-upstream"}]}],"usage":{"output_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "interactions json thoughtSignature with text is not empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","thoughtSignature":"opaque","content":[{"type":"text","text":"hello"}]}]}`),
+			expected: false,
+		},
+		{
+			name:     "interactions json thoughtSignature with positive usage is not empty",
+			payload:  []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","thoughtSignature":"opaque"}],"usage":{"output_tokens":3}}`),
+			expected: false,
+		},
+		{
+			name:     "interactions sse thoughtSignature delta only zero usage is empty",
+			payload:  []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\nevent: step.delta\ndata: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"thoughtSignature\":\"opaque-dead-upstream\"}}\n\nevent: finish\ndata: {\"event_type\":\"finish\",\"metadata\":{\"total_usage\":{\"total_output_tokens\":0}}}\n\n"),
+			expected: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -825,6 +865,22 @@ func TestExecuteInteractionsMeaningfulOutputNotRotated(t *testing.T) {
 			t.Fatalf("first auth should succeed without rotation, results: %+v", capture.Results())
 		}
 	})
+}
+
+func TestExecuteInteractionsSignatureOnlyRotatesAuth(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		executePayloads: map[string][]byte{},
+		executeCalls:    map[string]int{},
+		emptyPayload:    []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","thoughtSignature":"opaque-dead-upstream"}],"usage":{"output_tokens":0,"total_output_tokens":0}}`),
+		contentPayload:  []byte(`{"id":"interaction_2","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"rotated-live"}]}]}`),
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertRotatesToContent(t, ids, executor.firstExecute, string(resp.Payload), "rotated-live", capture)
 }
 
 func TestStreamBootstrapDetectorInteractionsScaffoldAllowsFailover(t *testing.T) {

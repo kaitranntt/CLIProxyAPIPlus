@@ -491,25 +491,6 @@ type interactionsExtraContent struct {
 	} `json:"google"`
 }
 
-// hasSignature reports whether the step carries a reasoning signature. A step
-// that only carries a signature is still a meaningful upstream answer: dropping
-// it makes the turn look empty and costs the signature on the next request.
-func (s *interactionsStep) hasSignature() bool {
-	if s == nil {
-		return false
-	}
-	if strings.TrimSpace(s.Signature) != "" ||
-		strings.TrimSpace(s.ThoughtSignature) != "" ||
-		strings.TrimSpace(s.ThoughtSignatureCamel) != "" ||
-		strings.TrimSpace(s.EncryptedContent) != "" {
-		return true
-	}
-	if s.ExtraContent != nil && s.ExtraContent.Google != nil {
-		return strings.TrimSpace(s.ExtraContent.Google.ThoughtSignature) != ""
-	}
-	return false
-}
-
 type interactionsContent struct {
 	Type                  string `json:"type"`
 	Text                  string `json:"text"`
@@ -535,11 +516,8 @@ func (c *interactionsContent) hasMeaningfulContent() bool {
 		strings.TrimSpace(c.URL) != "" {
 		return true
 	}
-	if strings.TrimSpace(c.Signature) != "" ||
-		strings.TrimSpace(c.ThoughtSignature) != "" ||
-		strings.TrimSpace(c.ThoughtSignatureCamel) != "" {
-		return true
-	}
+	// thoughtSignature / signature / encrypted_content alone is replay
+	// metadata, not a usable completion.
 	return false
 }
 
@@ -1236,11 +1214,6 @@ func (a *emptyCompletionAccum) evalInteractions(data []byte) bool {
 		if chunk.Delta.Content != nil && chunk.Delta.Content.hasMeaningfulContent() {
 			a.hasContent = true
 		}
-		if strings.TrimSpace(chunk.Delta.Signature) != "" ||
-			strings.TrimSpace(chunk.Delta.ThoughtSignature) != "" ||
-			strings.TrimSpace(chunk.Delta.ThoughtSignatureCamel) != "" {
-			a.hasContent = true
-		}
 		if strings.TrimSpace(chunk.Delta.Name) != "" || hasMeaningfulInteractionsArguments(chunk.Delta.Arguments) {
 			a.hasToolCalls = true
 		}
@@ -1290,9 +1263,10 @@ func (a *emptyCompletionAccum) evalInteractionsSteps(steps []interactionsStep) {
 				a.hasContent = true
 			}
 		}
-		if step.hasSignature() {
-			a.hasContent = true
-		}
+		// A signature-only step is not a usable completion: thoughtSignature
+		// / encrypted_content can be replay metadata on an upstream that
+		// returned nothing. Visible text, a tool call, or positive token
+		// usage still keep the completion from being classified as empty.
 		for _, content := range step.Content {
 			if content.hasMeaningfulContent() {
 				a.hasContent = true
