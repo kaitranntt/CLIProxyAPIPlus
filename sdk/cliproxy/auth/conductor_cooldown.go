@@ -110,10 +110,12 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		return
 	}
 	m.configCooldownMu.Lock()
-	defer m.configCooldownMu.Unlock()
-	if m.setConfigSnapshotLocked(cfg) {
+	cleared := m.setConfigSnapshotLocked(cfg)
+	if cleared {
 		m.persistCooldownStatesLocked(context.Background())
 	}
+	m.configCooldownMu.Unlock()
+	m.restartProber(cfg)
 }
 
 // SetConfigSnapshot updates only in-memory configuration state. It reports whether
@@ -123,8 +125,10 @@ func (m *Manager) SetConfigSnapshot(cfg *internalconfig.Config) bool {
 		return false
 	}
 	m.configCooldownMu.Lock()
-	defer m.configCooldownMu.Unlock()
-	return m.setConfigSnapshotLocked(cfg)
+	cleared := m.setConfigSnapshotLocked(cfg)
+	m.configCooldownMu.Unlock()
+	m.restartProber(cfg)
+	return cleared
 }
 
 func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
@@ -153,7 +157,6 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 		m.clearHomeRuntimeAuths()
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	m.restartProberLocked(cfg)
 	return clearedCooldowns
 }
 
@@ -172,26 +175,31 @@ func (m *Manager) ApplyConfigWithCooldownStateStore(ctx context.Context, cfg *in
 	}
 
 	m.configCooldownMu.Lock()
-	defer m.configCooldownMu.Unlock()
 	m.mu.RLock()
 	oldStore := m.cooldownStore
 	m.mu.RUnlock()
 	m.setConfigSnapshotLocked(cfg)
 	if oldStore != nil && !m.persistCooldownStatesToLocked(ctx, oldStore) {
+		m.configCooldownMu.Unlock()
 		return false
 	}
 	if errContext := ctx.Err(); errContext != nil {
+		m.configCooldownMu.Unlock()
 		return false
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.cooldownStore != oldStore {
+		m.mu.Unlock()
+		m.configCooldownMu.Unlock()
 		return false
 	}
 	if m.pendingCooldownStateStore == oldStore {
 		m.pendingCooldownStateStore = nil
 	}
 	m.cooldownStore = store
+	m.mu.Unlock()
+	m.configCooldownMu.Unlock()
+	m.restartProber(cfg)
 	return true
 }
 

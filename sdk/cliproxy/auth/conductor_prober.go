@@ -92,7 +92,7 @@ func (m *Manager) StopProber() {
 	}
 }
 
-func (m *Manager) restartProberLocked(cfg *internalconfig.Config) {
+func (m *Manager) restartProber(cfg *internalconfig.Config) {
 	if m == nil || cfg == nil {
 		return
 	}
@@ -197,10 +197,12 @@ func (l *authProberLoop) snapshotAuths() []*Auth {
 }
 
 func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
-	l.manager.mu.RLock()
-	exec := l.manager.executors[auth.Provider]
-	l.manager.mu.RUnlock()
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return
+	}
 
+	exec := l.manager.executorFor(providerKey)
 	if exec == nil {
 		return
 	}
@@ -210,7 +212,14 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
 	if baseURL == "" {
-		return
+		switch providerKey {
+		case "claude":
+			baseURL = "https://api.anthropic.com"
+		case "gemini":
+			baseURL = "https://generativelanguage.googleapis.com"
+		default:
+			return
+		}
 	}
 
 	path := strings.TrimSpace(l.cfg.DefaultProbePath)
@@ -228,6 +237,18 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		return
 	}
 
+	if providerKey == "claude" {
+		if req.Header.Get("Anthropic-Version") == "" {
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		}
+		isAPIKey := auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+		if !isAPIKey {
+			if req.Header.Get("Anthropic-Beta") == "" {
+				req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
+			}
+		}
+	}
+
 	timeout := l.cfg.Timeout
 	if timeout <= 0 {
 		timeout = proberTimeout
@@ -237,9 +258,8 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 	req = req.WithContext(ctx)
 
 	resp, errExec := exec.HttpRequest(ctx, auth, req)
-	var bodyBytes int64
 	if resp != nil && resp.Body != nil {
-		bodyBytes, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
+		_, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
 		_ = resp.Body.Close()
 	}
 
@@ -255,13 +275,6 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		resultErr = &Error{
 			Code:       ErrorCodeForceCooldown,
 			Message:    "prober: empty upstream response",
-			HTTPStatus: http.StatusServiceUnavailable,
-			Retryable:  true,
-		}
-	} else if resp.StatusCode == http.StatusNoContent || (resp.StatusCode == http.StatusOK && bodyBytes == 0) {
-		resultErr = &Error{
-			Code:       ErrorCodeForceCooldown,
-			Message:    "prober: empty 200/204 response",
 			HTTPStatus: http.StatusServiceUnavailable,
 			Retryable:  true,
 		}
