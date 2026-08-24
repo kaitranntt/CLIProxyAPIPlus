@@ -1,0 +1,305 @@
+package auth
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	proberCheckInterval  = 60 * time.Second
+	proberMaxConcurrency = 4
+	proberRatePerMinute  = 60
+	proberTimeout        = 10 * time.Second
+	proberBackoffBase    = 5 * time.Second
+	proberBackoffMax     = 5 * time.Minute
+	proberDefaultPath    = "/v1/models"
+	proberMaxBodyBytes   = 1024
+)
+
+// authProberLoop runs periodic lightweight health probes for registered auths.
+// Failures are fed back into the existing MarkResult/cooldown path.
+type authProberLoop struct {
+	manager *Manager
+	cfg     internalconfig.CredentialProberConfig
+}
+
+func newAuthProberLoop(manager *Manager, cfg internalconfig.CredentialProberConfig) *authProberLoop {
+	if cfg.Interval <= 0 {
+		cfg.Interval = proberCheckInterval
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = proberTimeout
+	}
+	if cfg.MaxConcurrency <= 0 {
+		cfg.MaxConcurrency = proberMaxConcurrency
+	}
+	if cfg.RateLimitPerMinute <= 0 {
+		cfg.RateLimitPerMinute = proberRatePerMinute
+	}
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = proberBackoffBase
+	}
+	if cfg.BackoffMax <= 0 {
+		cfg.BackoffMax = proberBackoffMax
+	}
+	if strings.TrimSpace(cfg.DefaultProbePath) == "" {
+		cfg.DefaultProbePath = proberDefaultPath
+	}
+	return &authProberLoop{manager: manager, cfg: cfg}
+}
+
+// StartProber launches a background credential health prober.
+// Only one loop is kept alive; starting a new one cancels the previous run.
+func (m *Manager) StartProber(parent context.Context, cfg internalconfig.CredentialProberConfig) {
+	if m == nil {
+		return
+	}
+
+	m.StopProber()
+
+	ctx, cancel := context.WithCancel(parent)
+	loop := newAuthProberLoop(m, cfg)
+
+	m.mu.Lock()
+	m.proberCancel = cancel
+	m.proberLoop = loop
+	m.mu.Unlock()
+
+	go loop.run(ctx)
+}
+
+// StopProber cancels the background prober loop, if running.
+func (m *Manager) StopProber() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	cancel := m.proberCancel
+	m.proberCancel = nil
+	m.proberLoop = nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (m *Manager) restartProber(cfg *internalconfig.Config) {
+	if m == nil || cfg == nil {
+		return
+	}
+	if cfg.CredentialProber.Enabled {
+		m.StartProber(context.Background(), cfg.CredentialProber)
+	} else {
+		m.StopProber()
+	}
+}
+
+func (l *authProberLoop) run(ctx context.Context) {
+	if l == nil || l.manager == nil {
+		return
+	}
+
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			l.sweep(ctx)
+			interval := l.cfg.Interval
+			if interval <= 0 {
+				interval = proberCheckInterval
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+func (l *authProberLoop) sweep(ctx context.Context) {
+	auths := l.snapshotAuths()
+	if len(auths) == 0 {
+		return
+	}
+
+	concurrency := l.cfg.MaxConcurrency
+	if concurrency <= 0 {
+		concurrency = proberMaxConcurrency
+	}
+
+	ratePerMinute := l.cfg.RateLimitPerMinute
+	if ratePerMinute <= 0 {
+		ratePerMinute = proberRatePerMinute
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+
+	var ticker *time.Ticker
+	if ratePerMinute > 0 {
+		ticker = time.NewTicker(time.Minute / time.Duration(ratePerMinute))
+		defer ticker.Stop()
+	}
+
+	for _, auth := range auths {
+		if ctx.Err() != nil {
+			break
+		}
+		if ticker != nil {
+			select {
+			case <-ctx.Done():
+				break
+			case <-ticker.C:
+			}
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(a *Auth) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			l.probe(ctx, a)
+		}(auth)
+	}
+
+	wg.Wait()
+}
+
+func (l *authProberLoop) snapshotAuths() []*Auth {
+	l.manager.mu.RLock()
+	defer l.manager.mu.RUnlock()
+
+	now := time.Now()
+	out := make([]*Auth, 0, len(l.manager.auths))
+	for _, auth := range l.manager.auths {
+		if auth == nil {
+			continue
+		}
+		if auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		if auth.Unavailable && auth.NextRetryAfter.After(now) {
+			continue
+		}
+		out = append(out, auth)
+	}
+	return out
+}
+
+func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return
+	}
+
+	exec := l.manager.executorFor(providerKey)
+	if exec == nil {
+		return
+	}
+
+	baseURL := ""
+	if auth.Attributes != nil {
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	if baseURL == "" {
+		switch providerKey {
+		case "claude":
+			baseURL = "https://api.anthropic.com"
+		case "gemini":
+			baseURL = "https://generativelanguage.googleapis.com"
+		default:
+			return
+		}
+	}
+
+	path := strings.TrimSpace(l.cfg.DefaultProbePath)
+	if path == "" {
+		path = proberDefaultPath
+	}
+
+	probeURL, errParse := url.Parse(strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(path, "/"))
+	if errParse != nil {
+		return
+	}
+
+	req, errReq := http.NewRequestWithContext(parent, http.MethodGet, probeURL.String(), nil)
+	if errReq != nil {
+		return
+	}
+
+	if providerKey == "claude" {
+		if req.Header.Get("Anthropic-Version") == "" {
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		}
+		isAPIKey := auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+		if !isAPIKey {
+			if req.Header.Get("Anthropic-Beta") == "" {
+				req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
+			}
+		}
+	}
+
+	timeout := l.cfg.Timeout
+	if timeout <= 0 {
+		timeout = proberTimeout
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, errExec := exec.HttpRequest(ctx, auth, req)
+	if resp != nil && resp.Body != nil {
+		_, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
+		_ = resp.Body.Close()
+	}
+
+	var resultErr *Error
+	if errExec != nil {
+		resultErr = &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    "prober: " + errExec.Error(),
+			HTTPStatus: http.StatusServiceUnavailable,
+			Retryable:  true,
+		}
+	} else if resp == nil {
+		resultErr = &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    "prober: empty upstream response",
+			HTTPStatus: http.StatusServiceUnavailable,
+			Retryable:  true,
+		}
+	} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resultErr = &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    fmt.Sprintf("prober: upstream returned %d", resp.StatusCode),
+			HTTPStatus: resp.StatusCode,
+			Retryable:  resp.StatusCode >= 500 || resp.StatusCode == 429,
+		}
+	}
+
+	if resultErr == nil {
+		return
+	}
+
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.Debugf("credential prober failure for %s: %s", auth.ID, resultErr.Message)
+	}
+
+	l.manager.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		CredentialScope: true,
+		Error:           resultErr,
+	})
+}
