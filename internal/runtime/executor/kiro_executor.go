@@ -1590,6 +1590,7 @@ var kiroVersionAliases = [...]struct {
 	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
 	{"claude-opus-4-5", "claude-opus-4.5"},
 	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"claude-opus-4-8", "claude-opus-4.8"},
 	{"claude-haiku-4-5", "claude-haiku-4.5"},
 	// Other Kiro backend families
 	{"minimax-m2-1", "minimax-m2.1"},
