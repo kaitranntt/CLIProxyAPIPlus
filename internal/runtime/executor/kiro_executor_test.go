@@ -471,6 +471,11 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "claude-opus-4.5",
 		},
 		{
+			name:     "claude opus 4.8 hyphenated alias",
+			model:    "kiro-claude-opus-4-8",
+			expected: "claude-opus-4.8",
+		},
+		{
 			name:     "claude haiku 4.5 hyphenated alias",
 			model:    "kiro-claude-haiku-4-5",
 			expected: "claude-haiku-4.5",
