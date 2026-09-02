@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -423,6 +424,27 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "qoder") {
+		if storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage); ok {
+			if info := storage.GetUsageInfo(); info != nil {
+				usage := map[string]any{
+					"total":                  info.UserQuota.Total,
+					"used":                   info.UserQuota.Used,
+					"remaining":              info.UserQuota.Remaining,
+					"percentage":             info.UserQuota.Percentage,
+					"unit":                   info.UserQuota.Unit,
+					"total_usage_percentage": info.TotalUsagePercentage,
+					"is_quota_exceeded":      info.IsQuotaExceeded,
+					"expires_at":             info.ExpiresAt,
+				}
+				org := info.OrgResourcePackage
+				if org.Unit != "" || org.Total != 0 || org.Used != 0 || org.Remaining != 0 || org.Percentage != 0 {
+					usage["org_resource_remaining"] = org.Remaining
+				}
+				entry["usage"] = usage
+			}
+		}
 	}
 	return entry
 }
