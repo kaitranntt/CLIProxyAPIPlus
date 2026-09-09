@@ -3,7 +3,6 @@ package responses
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -14,6 +13,8 @@ import (
 
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
+
+	supportsExplicitCache := translatorcommon.ModelSupportsExplicitPromptCache(modelName)
 
 	inputResult := util.GetGJSONBytesNoCopy(rawJSON, "input")
 	if inputResult.Type == gjson.String {
@@ -29,7 +30,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON = deleteCodexRequestFields(rawJSON, "max_output_tokens", "max_completion_tokens", "temperature", "top_p")
 	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
-		if normalized := normalizeCodexServiceTier(serviceTier); normalized != "" {
+		if normalized := translatorcommon.NormalizeCodexServiceTier(serviceTier); normalized != "" {
 			if normalized != serviceTier.String() {
 				rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", normalized)
 			}
@@ -38,8 +39,16 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		}
 	}
 
-	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options")
-	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
+	// prompt_cache_options and per-item prompt_cache_breakpoint are only safe to
+	// forward for model families that explicitly support them (gpt-5.6+ / daybreak).
+	// Earlier Codex models reject prompt_cache_breakpoint with a 400, so we strip
+	// it unless the target is known to accept it.
+	fieldsToDelete := []string{"truncation"}
+	if !supportsExplicitCache {
+		fieldsToDelete = append(fieldsToDelete, "prompt_cache_options")
+	}
+	rawJSON = deleteCodexRequestFields(rawJSON, fieldsToDelete...)
+	rawJSON = maybeStripCodexResponsesCacheBreakpoints(rawJSON, !supportsExplicitCache)
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
@@ -50,18 +59,6 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
 	return rawJSON
-}
-
-func normalizeCodexServiceTier(result gjson.Result) string {
-	if !result.Exists() || result.Type != gjson.String {
-		return ""
-	}
-	switch strings.ToLower(strings.TrimSpace(result.String())) {
-	case "fast", "priority":
-		return "priority"
-	default:
-		return ""
-	}
 }
 
 func setCodexRequiredBool(rawJSON []byte, path string, value bool) []byte {
@@ -105,14 +102,17 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
 	return rawJSON
 }
 
-// stripCodexResponsesCacheBreakpoints removes any "prompt_cache_breakpoint" hint
-// attached to individual input[].content[] items. Some clients (e.g. GitHub
-// Copilot CLI) attach this field per content item when targeting the OpenAI
-// Responses format. Codex Responses rejects it outright:
-// {"error":{"message":"prompt_cache_breakpoint is not supported on this model", ...}}.
-// The top-level prompt_cache_options strip above does not cover this nested case.
-func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
-	if !bytes.Contains(rawJSON, []byte(`"prompt_cache_breakpoint"`)) {
+// maybeStripCodexResponsesCacheBreakpoints removes any "prompt_cache_breakpoint"
+// hint attached to individual input[].content[] items when shouldStrip is true.
+// Some clients (e.g. GitHub Copilot CLI) attach this field per content item
+// when targeting the OpenAI Responses format. Earlier Codex models reject it
+// outright with:
+//
+//	{"error":{"message":"prompt_cache_breakpoint is not supported on this model", ...}}.
+//
+// gpt-5.6 and later support explicit breakpoints; keep them when shouldStrip is false.
+func maybeStripCodexResponsesCacheBreakpoints(rawJSON []byte, shouldStrip bool) []byte {
+	if !shouldStrip || !bytes.Contains(rawJSON, []byte(`"prompt_cache_breakpoint"`)) {
 		return rawJSON
 	}
 

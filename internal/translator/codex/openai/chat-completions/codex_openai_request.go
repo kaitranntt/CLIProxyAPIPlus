@@ -72,6 +72,24 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
+	// Carry cache hints and service tier when present. prompt_cache_options is
+	// only valid for gpt-5.6+ / daybreak; strip it for earlier models.
+	supportsExplicitCache := translatorcommon.ModelSupportsExplicitPromptCache(modelName)
+	if v := root.Get("prompt_cache_key"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "prompt_cache_key", v.String())
+	}
+	if v := root.Get("prompt_cache_retention"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "prompt_cache_retention", v.String())
+	}
+	if v := root.Get("prompt_cache_options"); v.Exists() && supportsExplicitCache {
+		out, _ = sjson.SetRawBytes(out, "prompt_cache_options", []byte(v.Raw))
+	}
+	if v := root.Get("service_tier"); v.Exists() {
+		if normalized := translatorcommon.NormalizeCodexServiceTier(v); normalized != "" {
+			out, _ = sjson.SetBytes(out, "service_tier", normalized)
+		}
+	}
+
 	// Build request-local tool metadata and name shortening map.
 	originalToolNameMap := map[string]string{}
 	customToolNames := map[string]struct{}{}
@@ -238,6 +256,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 							part := []byte(`{}`)
 							part, _ = sjson.SetBytes(part, "type", partType)
 							part, _ = sjson.SetBytes(part, "text", it.Get("text").String())
+							if supportsExplicitCache {
+								part = translatorcommon.CopyPromptCacheBreakpoint(part, it)
+							}
 							contentItems = append(contentItems, part)
 						case "image_url":
 							// Map image inputs to input_image for Responses API
@@ -246,6 +267,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								part, _ = sjson.SetBytes(part, "type", "input_image")
 								if u := it.Get("image_url.url"); u.Exists() {
 									part, _ = sjson.SetBytes(part, "image_url", u.String())
+								}
+								if supportsExplicitCache {
+									part = translatorcommon.CopyPromptCacheBreakpoint(part, it)
 								}
 								contentItems = append(contentItems, part)
 							}
@@ -260,6 +284,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 									if filename != "" {
 										part, _ = sjson.SetBytes(part, "filename", filename)
 									}
+									if supportsExplicitCache {
+										part = translatorcommon.CopyPromptCacheBreakpoint(part, it)
+									}
 									contentItems = append(contentItems, part)
 								}
 							}
@@ -273,6 +300,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 									part, _ = sjson.SetBytes(part, "data", audioData)
 									if audioFormat != "" {
 										part, _ = sjson.SetBytes(part, "format", audioFormat)
+									}
+									if supportsExplicitCache {
+										part = translatorcommon.CopyPromptCacheBreakpoint(part, it)
 									}
 									contentItems = append(contentItems, part)
 								}

@@ -241,7 +241,7 @@ func TestConvertOpenAIResponsesRequestToCodexReusesNormalizedPayload(t *testing.
 
 func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing.T) {
 	inputJSON := []byte(`{
-		"model":"gpt-5.6",
+		"model":"gpt-5.4",
 		"stream":"true",
 		"store":true,
 		"parallel_tool_calls":false,
@@ -250,14 +250,14 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 		"max_completion_tokens":4096,
 		"temperature":0.2,
 		"top_p":0.9,
-		"service_tier":"standard",
+		"service_tier":"unknown",
 		"truncation":"auto",
 		"prompt_cache_options":{"mode":"implicit"},
 		"user":"request-owner",
 		"input":[{"type":"message","role":"system","content":"hello"}]
 	}`)
 
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, true)
 
 	if stream := gjson.GetBytes(output, "stream"); stream.Type != gjson.True {
 		t.Fatalf("stream = %s, want true", stream.Raw)
@@ -299,7 +299,11 @@ func TestConvertOpenAIResponsesRequestToCodex_ServiceTier(t *testing.T) {
 	}{
 		{name: "priority passes through", serviceTier: "priority", want: "priority"},
 		{name: "fast normalizes to priority", serviceTier: "fast", want: "priority"},
-		{name: "invalid tier is stripped", serviceTier: "default", want: ""},
+		{name: "auto passes through", serviceTier: "auto", want: "auto"},
+		{name: "default passes through", serviceTier: "default", want: "default"},
+		{name: "flex passes through", serviceTier: "flex", want: "flex"},
+		{name: "standard maps to default", serviceTier: "standard", want: "default"},
+		{name: "unknown tier is stripped", serviceTier: "unknown", want: ""},
 	}
 
 	for _, tt := range tests {

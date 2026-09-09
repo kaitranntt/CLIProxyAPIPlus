@@ -38,6 +38,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Model mapping
 	out, _ = sjson.SetBytes(out, "model", modelName)
+	supportsCache := translatorcommon.ModelSupportsExplicitPromptCache(modelName)
 
 	// Max tokens
 	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
@@ -129,7 +130,11 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		if content.IsArray() {
 			content.ForEach(func(_, item gjson.Result) bool {
 				if contentItem, ok := convertClaudeContentPart(item); ok {
-					systemContentItems = append(systemContentItems, []byte(contentItem))
+					part := []byte(contentItem)
+					if supportsCache {
+						part = translatorcommon.AttachPromptCacheBreakpoint(part, item)
+					}
+					systemContentItems = append(systemContentItems, part)
 				}
 				return true
 			})
@@ -155,6 +160,9 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentResult); ok {
 					msgJSON := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
 					msgJSON, _ = sjson.SetBytes(msgJSON, "content.0.text", reminderText)
+					if supportsCache {
+						msgJSON = translatorcommon.AttachMessagePromptCacheBreakpoint(msgJSON, message)
+					}
 					messageItems = append(messageItems, msgJSON)
 				}
 				return true
@@ -190,7 +198,11 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 					case "text", "image":
 						if contentItem, ok := convertClaudeContentPart(part); ok {
-							contentItems = append(contentItems, []byte(contentItem))
+							item := []byte(contentItem)
+							if supportsCache {
+								item = translatorcommon.AttachPromptCacheBreakpoint(item, part)
+							}
+							contentItems = append(contentItems, item)
 						}
 
 					case "tool_use":
@@ -265,6 +277,9 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							msgJSON, _ = sjson.SetBytes(msgJSON, "tool_calls", toolCalls)
 						}
 
+						if supportsCache {
+							msgJSON = translatorcommon.AttachMessagePromptCacheBreakpoint(msgJSON, message)
+						}
 						messageItems = append(messageItems, msgJSON)
 					}
 				} else {
@@ -275,6 +290,9 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						msgJSON, _ = sjson.SetBytes(msgJSON, "role", role)
 
 						msgJSON, _ = sjson.SetRawBytes(msgJSON, "content", translatorcommon.JoinRawArray(contentItems))
+						if supportsCache {
+							msgJSON = translatorcommon.AttachMessagePromptCacheBreakpoint(msgJSON, message)
+						}
 						messageItems = append(messageItems, msgJSON)
 					} else if hasToolResults && !hasContent {
 						// tool_results already emitted above, no additional user message needed
@@ -286,6 +304,9 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				msgJSON := []byte(`{"role":"","content":""}`)
 				msgJSON, _ = sjson.SetBytes(msgJSON, "role", role)
 				msgJSON, _ = sjson.SetBytes(msgJSON, "content", contentResult.String())
+				if supportsCache {
+					msgJSON = translatorcommon.AttachMessagePromptCacheBreakpoint(msgJSON, message)
+				}
 				messageItems = append(messageItems, msgJSON)
 			}
 

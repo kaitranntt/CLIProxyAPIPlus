@@ -204,8 +204,10 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 			wantExists:      true,
 		},
 		{
-			name:            "Unsupported tier is omitted",
+			name:            "Default tier passes through",
 			serviceTierJSON: `"default"`,
+			want:            "default",
+			wantExists:      true,
 		},
 		{
 			name:            "Non-string tier is omitted",
@@ -226,7 +228,7 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 			speedJSON: `true`,
 		},
 		{
-			name:            "Fast speed overrides unsupported Anthropic tier",
+			name:            "Fast speed overrides auto tier",
 			serviceTierJSON: `"auto"`,
 			speedJSON:       `"fast"`,
 			want:            "priority",
