@@ -455,3 +455,65 @@ func TestConvertOpenAIRequestToAntigravityTranslatesVideoURL(t *testing.T) {
 		t.Fatalf("inlineData.data = %q, want AAAAIGZ0eXBtcDQy. Output: %s", got, out)
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityMapsMaxTokens(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantSet    bool
+		wantTokens int64
+	}{
+		{
+			name:       "only max_tokens",
+			body:       `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}],"max_tokens":30}`,
+			wantSet:    true,
+			wantTokens: 30,
+		},
+		{
+			name:       "only max_completion_tokens",
+			body:       `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":40}`,
+			wantSet:    true,
+			wantTokens: 40,
+		},
+		{
+			name:       "max_tokens preferred over max_completion_tokens",
+			body:       `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}],"max_tokens":30,"max_completion_tokens":40}`,
+			wantSet:    true,
+			wantTokens: 30,
+		},
+		{
+			name:    "neither present",
+			body:    `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`,
+			wantSet: false,
+		},
+		{
+			name:    "non-numeric max_tokens ignored",
+			body:    `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}],"max_tokens":"30"}`,
+			wantSet: false,
+		},
+		{
+			name:    "non-numeric max_completion_tokens ignored",
+			body:    `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":"40"}`,
+			wantSet: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToAntigravity("gemini-2.5-pro", []byte(tt.body), false)
+			res := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens")
+			if !tt.wantSet {
+				if res.Exists() {
+					t.Fatalf("expected maxOutputTokens to not be set, got %v. Output: %s", res.Value(), out)
+				}
+				return
+			}
+			if !res.Exists() {
+				t.Fatalf("expected maxOutputTokens to be set, but it was missing. Output: %s", out)
+			}
+			if got := res.Int(); got != tt.wantTokens {
+				t.Fatalf("maxOutputTokens = %d, want %d. Output: %s", got, tt.wantTokens, out)
+			}
+		})
+	}
+}
