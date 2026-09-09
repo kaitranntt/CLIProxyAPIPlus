@@ -271,9 +271,6 @@ func isMeaningfulToolCall(raw json.RawMessage) bool {
 		}
 		return false
 	}
-	if strings.TrimSpace(call.ID) != "" {
-		return true
-	}
 	if strings.TrimSpace(call.Function.Name) != "" || hasMeaningfulJSONArguments(call.Function.Arguments) {
 		return true
 	}
@@ -384,6 +381,7 @@ type openAIResponseOutputItem struct {
 	Text             string                      `json:"text"`
 	Arguments        string                      `json:"arguments"`
 	Result           string                      `json:"result"`
+	Action           json.RawMessage             `json:"action"`
 	Content          []openAIResponseContentPart `json:"content"`
 	EncryptedContent string                      `json:"encrypted_content"`
 	Summary          json.RawMessage             `json:"summary"`
@@ -774,12 +772,11 @@ func (a *emptyCompletionAccum) evalOpenAIResponseRawOutput(raw json.RawMessage) 
 }
 
 func hasMeaningfulResponsesCallItem(item openAIResponseOutputItem) bool {
-	return strings.TrimSpace(item.ID) != "" ||
-		strings.TrimSpace(item.CallID) != "" ||
-		strings.TrimSpace(item.Name) != "" ||
+	return strings.TrimSpace(item.Name) != "" ||
 		hasMeaningfulJSONArguments(item.Arguments) ||
 		strings.TrimSpace(item.Input) != "" ||
-		strings.TrimSpace(item.Result) != ""
+		strings.TrimSpace(item.Result) != "" ||
+		nonEmptyJSONPayload(item.Action)
 }
 
 func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOutputItem) {

@@ -192,7 +192,27 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		},
 		{
 			name:     "tool calls are not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\",\"function\":{\"name\":\"lookup\"}}]},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "openai sse semantically empty tool_calls id only",
 			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty tool_calls id only",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"call_123"}]},"finish_reason":"tool_calls"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai sse meaningful tool_calls name only",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"\",\"function\":{\"name\":\"lookup\"}}]},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "openai json meaningful tool_calls name only",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":"tool_calls"}]}`),
 			expected: false,
 		},
 		{
@@ -606,6 +626,31 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "codex responses-api non-stream in_progress with function_call id only is empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"in_progress","output":[{"type":"function_call","id":"call_123","call_id":"call_123","name":"","arguments":""}]}`),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api sse with function_call id only is empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"output\":{\"type\":\"function_call\",\"id\":\"call_123\",\"call_id\":\"call_123\",\"name\":\"\",\"arguments\":\"\"}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api non-stream with function_call name only is not empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"completed","output":[{"type":"function_call","name":"get_weather","arguments":""}],"usage":{"output_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse with function_call name only is not empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"get_weather\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api custom_tool_call id only is empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"id\":\"call_123\",\"call_id\":\"call_123\",\"name\":\"\",\"input\":\"\"}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
 			name:     "codex responses-api non-stream with custom_tool_call is not empty",
 			payload:  []byte(`{"object":"response","status":"completed","output":[{"type":"custom_tool_call","name":"shell","input":"pwd"}],"usage":{"output_tokens":0}}`),
 			expected: false,
@@ -614,6 +659,51 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			name:     "codex responses-api sse with custom_tool_call is not empty",
 			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"shell\",\"input\":\"pwd\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
 			expected: false,
+		},
+		{
+			name:     "codex responses-api non-stream in_progress with web_search_call action is not empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"in_progress","output":[{"type":"web_search_call","action":{"query":"golang testing"}}]}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse with web_search_call action is not empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"action\":{\"query\":\"golang testing\"}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api non-stream in_progress with computer_call action is not empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"in_progress","output":[{"type":"computer_call","action":{"type":"click","x":100,"y":200}}]}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse with computer_call action is not empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"computer_call\",\"action\":{\"type\":\"click\",\"x\":100,\"y\":200}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api non-stream web_search_call with empty object action is empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"in_progress","output":[{"type":"web_search_call","id":"call_123","action":{}}]}`),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api sse web_search_call with empty object action is empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"call_123\",\"call_id\":\"call_123\",\"action\":{}}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api non-stream computer_call with null action is empty",
+			payload:  []byte(`{"object":"response","id":"r","status":"in_progress","output":[{"type":"computer_call","id":"call_123","action":null}]}`),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api sse computer_call with null action is empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"computer_call\",\"id\":\"call_123\",\"call_id\":\"call_123\",\"action\":null}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "codex responses-api sse web_search_call id only is empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"call_123\",\"call_id\":\"call_123\"}}\n\ndata: [DONE]\n\n"),
+			expected: true,
 		},
 		{
 			name:     "codex responses-api non-stream with image_generation_call is not empty",
@@ -2781,6 +2871,9 @@ func TestResponsesEmptyToolCallScaffold(t *testing.T) {
 	funcWithName := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"\",\"name\":\"lookup\"}}\n\n")
 	funcWithArgs := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"{\\\"q\\\":\\\"search\\\"}\",\"call_id\":\"\",\"name\":\"\"}}\n\n")
 	customToolWithInput := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"custom_tool_call\",\"status\":\"in_progress\",\"input\":\"{\\\"cmd\\\":\\\"run\\\"}\",\"call_id\":\"\",\"name\":\"\"}}\n\n")
+	webSearchWithAction := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"web_search_call\",\"status\":\"in_progress\",\"action\":{\"query\":\"test\"},\"call_id\":\"\",\"name\":\"\"}}\n\n")
+	computerCallWithAction := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"computer_call\",\"status\":\"in_progress\",\"action\":{\"type\":\"click\"},\"call_id\":\"\",\"name\":\"\"}}\n\n")
+	webSearchWithEmptyAction := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"call_123\",\"type\":\"web_search_call\",\"status\":\"in_progress\",\"action\":{},\"call_id\":\"\",\"name\":\"\"}}\n\n")
 
 	t.Run("empty function_call scaffold does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
 		var detector StreamBootstrapDetector
@@ -2818,23 +2911,55 @@ func TestResponsesEmptyToolCallScaffold(t *testing.T) {
 		}
 	})
 
-	t.Run("scaffold with non-empty id marks meaningful and forwards", func(t *testing.T) {
+	t.Run("scaffold with non-empty id does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
 		var detector StreamBootstrapDetector
-		if !detector.Observe(funcWithID) {
-			t.Fatal("detector.Observe() = false for function_call with id, want true")
+		if detector.Observe(funcWithID) {
+			t.Fatal("detector.Observe() = true for function_call with id, want false")
 		}
-		if !detector.HasMeaningfulOutput() {
-			t.Fatal("detector.HasMeaningfulOutput() = false for function_call with id, want true")
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for function_call with id, want false")
+		}
+
+		errUpstream := errors.New("upstream failed immediately after function_call id scaffold")
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: funcWithID}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v for failover", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("readStreamBootstrap buffered = %d, want 0 on failover error", len(buffered))
+		}
+		if closed {
+			t.Fatal("readStreamBootstrap returned closed = true, want false on error")
 		}
 	})
 
-	t.Run("scaffold with non-empty call_id marks meaningful and forwards", func(t *testing.T) {
+	t.Run("scaffold with non-empty call_id does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
 		var detector StreamBootstrapDetector
-		if !detector.Observe(funcWithCallID) {
-			t.Fatal("detector.Observe() = false for function_call with call_id, want true")
+		if detector.Observe(funcWithCallID) {
+			t.Fatal("detector.Observe() = true for function_call with call_id, want false")
 		}
-		if !detector.HasMeaningfulOutput() {
-			t.Fatal("detector.HasMeaningfulOutput() = false for function_call with call_id, want true")
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for function_call with call_id, want false")
+		}
+
+		errUpstream := errors.New("upstream failed immediately after function_call call_id scaffold")
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: funcWithCallID}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v for failover", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("readStreamBootstrap buffered = %d, want 0 on failover error", len(buffered))
+		}
+		if closed {
+			t.Fatal("readStreamBootstrap returned closed = true, want false on error")
 		}
 	})
 
@@ -2868,12 +2993,44 @@ func TestResponsesEmptyToolCallScaffold(t *testing.T) {
 		}
 	})
 
+	t.Run("web_search_call with non-empty action marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(webSearchWithAction) {
+			t.Fatal("detector.Observe() = false for web_search_call with action, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for web_search_call with action, want true")
+		}
+	})
+
+	t.Run("computer_call with non-empty action marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(computerCallWithAction) {
+			t.Fatal("detector.Observe() = false for computer_call with action, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for computer_call with action, want true")
+		}
+	})
+
+	t.Run("web_search_call with empty action does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe(webSearchWithEmptyAction) {
+			t.Fatal("detector.Observe() = true for web_search_call with empty action, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for web_search_call with empty action, want false")
+		}
+	})
+
 	t.Run("output_item.done with empty function_call does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
 		emptyDoneFuncItems := [][]byte{
 			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\"}}\n\n"),
 			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"completed\",\"arguments\":\"\",\"call_id\":\"\",\"name\":\"\"}}\n\n"),
 			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"output\":{\"type\":\"function_call\"}}\n\n"),
 			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\"}}\n\n"),
+			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"call_123\",\"type\":\"web_search_call\",\"status\":\"completed\",\"action\":{}}}\n\n"),
+			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"call_123\",\"type\":\"computer_call\",\"status\":\"completed\",\"action\":null}}\n\n"),
 		}
 		for i, payload := range emptyDoneFuncItems {
 			var detector StreamBootstrapDetector
@@ -3111,4 +3268,112 @@ func TestEmptyCompletionResponsesImageGenerationCallResult(t *testing.T) {
 	if got := wsDetector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"   \"}}\n\n")); got != false {
 		t.Fatalf("StreamBootstrapDetector.Observe(whitespace result) = %v, want false", got)
 	}
+}
+
+func TestToolCallIDOnlyRegression(t *testing.T) {
+	t.Run("openai tool_call id only is empty and not meaningful", func(t *testing.T) {
+		payloadSSE := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_abc123\"}]}}]}\n\n")
+		var detector StreamBootstrapDetector
+		if detector.Observe(payloadSSE) {
+			t.Fatal("StreamBootstrapDetector.Observe() = true for id-only tool_call, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for id-only tool_call, want false")
+		}
+
+		payloadTerm := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_abc123\"}]},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		if !IsEmptyCompletionPayload(payloadTerm) {
+			t.Fatal("IsEmptyCompletionPayload() = false for id-only tool_call, want true")
+		}
+
+		payloadJSON := []byte(`{"choices":[{"message":{"tool_calls":[{"id":"call_abc123"}]},"finish_reason":"tool_calls"}]}`)
+		if !IsEmptyCompletionPayload(payloadJSON) {
+			t.Fatal("IsEmptyCompletionPayload() = false for id-only tool_call JSON, want true")
+		}
+	})
+
+	t.Run("openai tool_call with name is meaningful and forwards", func(t *testing.T) {
+		payloadSSE := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_abc123\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n")
+		var detector StreamBootstrapDetector
+		if !detector.Observe(payloadSSE) {
+			t.Fatal("StreamBootstrapDetector.Observe() = false for tool_call with name, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for tool_call with name, want true")
+		}
+
+		payloadJSON := []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":"tool_calls"}]}`)
+		if IsEmptyCompletionPayload(payloadJSON) {
+			t.Fatal("IsEmptyCompletionPayload() = true for tool_call with name, want false")
+		}
+	})
+
+	t.Run("openai tool_call with name and empty object arguments is meaningful and forwards", func(t *testing.T) {
+		payloadSSE := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_abc123\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n")
+		var detector StreamBootstrapDetector
+		if !detector.Observe(payloadSSE) {
+			t.Fatal("StreamBootstrapDetector.Observe() = false for tool_call with name and empty object args, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for tool_call with name and empty object args, want true")
+		}
+
+		payloadJSON := []byte(`{"choices":[{"message":{"tool_calls":[{"id":"call_abc123","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+		if IsEmptyCompletionPayload(payloadJSON) {
+			t.Fatal("IsEmptyCompletionPayload() = true for tool_call with name and empty object args, want false")
+		}
+	})
+
+	t.Run("responses api function_call id only is empty and not meaningful", func(t *testing.T) {
+		payloadSSE := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"call_123\",\"call_id\":\"call_123\",\"name\":\"\",\"arguments\":\"\"}}\n\n")
+		var detector StreamBootstrapDetector
+		if detector.Observe(payloadSSE) {
+			t.Fatal("StreamBootstrapDetector.Observe() = true for Responses function_call id only, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for Responses function_call id only, want false")
+		}
+
+		payloadTerm := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"call_123\",\"call_id\":\"call_123\",\"name\":\"\",\"arguments\":\"\"}}\n\ndata: [DONE]\n\n")
+		if !IsEmptyCompletionPayload(payloadTerm) {
+			t.Fatal("IsEmptyCompletionPayload() = false for Responses function_call id only, want true")
+		}
+
+		payloadJSON := []byte(`{"object":"response","id":"r","status":"in_progress","output":[{"type":"function_call","id":"call_123","call_id":"call_123","name":"","arguments":""}]}`)
+		if !IsEmptyCompletionPayload(payloadJSON) {
+			t.Fatal("IsEmptyCompletionPayload() = false for Responses function_call id only JSON, want true")
+		}
+	})
+
+	t.Run("responses api function_call with name is meaningful and forwards", func(t *testing.T) {
+		payloadSSE := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"get_weather\"}}\n\n")
+		var detector StreamBootstrapDetector
+		if !detector.Observe(payloadSSE) {
+			t.Fatal("StreamBootstrapDetector.Observe() = false for Responses function_call with name, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for Responses function_call with name, want true")
+		}
+
+		payloadJSON := []byte(`{"object":"response","id":"r","status":"completed","output":[{"type":"function_call","name":"get_weather","arguments":""}],"usage":{"output_tokens":0}}`)
+		if IsEmptyCompletionPayload(payloadJSON) {
+			t.Fatal("IsEmptyCompletionPayload() = true for Responses function_call with name, want false")
+		}
+	})
+
+	t.Run("responses api function_call with name and empty object arguments is meaningful and forwards", func(t *testing.T) {
+		payloadSSE := []byte("data: {\"type\":\"response.output_item.done\",\"output\":{\"type\":\"function_call\",\"name\":\"get_weather\",\"arguments\":\"{}\",\"call_id\":\"call_1\"}}\n\n")
+		var detector StreamBootstrapDetector
+		if !detector.Observe(payloadSSE) {
+			t.Fatal("StreamBootstrapDetector.Observe() = false for Responses function_call with name and empty object args, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for Responses function_call with name and empty object args, want true")
+		}
+
+		payloadJSON := []byte(`{"object":"response","id":"r","status":"completed","output":[{"type":"function_call","name":"get_weather","arguments":"{}","call_id":"call_1"}],"usage":{"output_tokens":5}}`)
+		if IsEmptyCompletionPayload(payloadJSON) {
+			t.Fatal("IsEmptyCompletionPayload() = true for Responses function_call with name and empty object args, want false")
+		}
+	})
 }
