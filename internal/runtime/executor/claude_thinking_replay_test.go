@@ -172,8 +172,10 @@ func TestClaudeExecutorCompatThinkingReplayRestoresOmittedBlock(t *testing.T) {
 	if got := content[0].Get("type").String(); got != "thinking" {
 		t.Fatalf("restored first content type = %q, want thinking", got)
 	}
-	if got := content[0].Get("signature").String(); got != "EgI=" {
-		t.Fatalf("restored signature = %q, want EgI=", got)
+	// Cache-born EgI= is not a Claude envelope. Restore the omitted block;
+	// sanitizer must clear the signature before the compat upstream sees it.
+	if got := content[0].Get("signature").String(); got != "" {
+		t.Fatalf("restored signature = %q, want empty", got)
 	}
 }
 
@@ -240,8 +242,8 @@ func TestClaudeExecutorCompatThinkingReplayRestoresOmittedBlockInStream(t *testi
 	if len(content) != 2 || content[0].Get("type").String() != "thinking" {
 		t.Fatalf("second streamed assistant content = %s, want restored thinking and tool_use", gjson.GetBytes(requestBodies[1], "messages.1.content").Raw)
 	}
-	if got := content[0].Get("signature").String(); got != "EgI=" {
-		t.Fatalf("restored streamed signature = %q, want EgI=", got)
+	if got := content[0].Get("signature").String(); got != "" {
+		t.Fatalf("restored streamed signature = %q, want empty", got)
 	}
 }
 
@@ -359,11 +361,17 @@ func TestClaudeExecutorCompatThinkingReplayRestoresMultipleOmittedBlocks(t *test
 	}
 	firstContent := gjson.GetBytes(requestBodies[2], "messages.1.content").Array()
 	secondContent := gjson.GetBytes(requestBodies[2], "messages.3.content").Array()
-	if len(firstContent) != 2 || firstContent[0].Get("type").String() != "thinking" || firstContent[0].Get("signature").String() != "EgI=" {
+	if len(firstContent) != 2 || firstContent[0].Get("type").String() != "thinking" {
 		t.Fatalf("first omitted turn was not restored: %s", gjson.GetBytes(requestBodies[2], "messages.1.content").Raw)
 	}
-	if len(secondContent) != 2 || secondContent[0].Get("type").String() != "thinking" || secondContent[0].Get("signature").String() != "EgM=" {
+	if got := firstContent[0].Get("signature").String(); got != "" {
+		t.Fatalf("first restored signature = %q, want empty", got)
+	}
+	if len(secondContent) != 2 || secondContent[0].Get("type").String() != "thinking" {
 		t.Fatalf("second omitted turn was not restored: %s", gjson.GetBytes(requestBodies[2], "messages.3.content").Raw)
+	}
+	if got := secondContent[0].Get("signature").String(); got != "" {
+		t.Fatalf("second restored signature = %q, want empty", got)
 	}
 }
 
