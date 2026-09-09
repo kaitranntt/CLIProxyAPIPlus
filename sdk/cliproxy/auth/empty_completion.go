@@ -8,8 +8,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -1025,21 +1027,33 @@ func isEmptyCompletionError(err error) bool {
 // streamBootstrapState incrementally evaluates chunks so a metadata-heavy
 // prefix is processed once instead of reparsing the entire prefix per chunk.
 type streamBootstrapState struct {
-	acc       emptyCompletionAccum
-	bytes     int
-	pending   []byte
-	dataLines [][]byte
-	forward   bool
-	sawSSE    bool
-	sawDone   bool
+	acc          emptyCompletionAccum
+	bytes        int
+	pending      []byte
+	dataLines    [][]byte
+	forward      bool
+	sawSSE       bool
+	sawDone      bool
+	currentEvent string
+	streamErr    *Error
+}
+
+func (s *streamBootstrapState) streamError() error {
+	if s == nil || s.streamErr == nil {
+		return nil
+	}
+	return s.streamErr
 }
 
 func (s *streamBootstrapState) flushData() {
 	if len(s.dataLines) == 0 {
+		s.currentEvent = ""
 		return
 	}
 	data := bytes.Join(s.dataLines, []byte("\n"))
 	s.dataLines = s.dataLines[:0]
+	currentEvent := s.currentEvent
+	s.currentEvent = ""
 	if bytes.Equal(data, []byte("[DONE]")) {
 		s.acc.recognized = true
 		s.acc.terminal = true
@@ -1048,7 +1062,13 @@ func (s *streamBootstrapState) flushData() {
 		return
 	}
 	if len(data) == 0 {
-		s.acc.sawMetadataOnly = true
+		if currentEvent != "error" {
+			s.acc.sawMetadataOnly = true
+		}
+		return
+	}
+	if err := evalProviderError(data, currentEvent); err != nil {
+		s.streamErr = err
 		return
 	}
 	if !s.acc.evalJSON(data) {
@@ -1091,12 +1111,15 @@ func (s *streamBootstrapState) processSingleLine(line []byte) {
 	switch {
 	case bytes.HasPrefix(line, []byte("event:")):
 		s.sawSSE = true
-		event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
-		if bytes.Equal(event, []byte("message_stop")) {
+		event := strings.TrimSpace(string(bytes.TrimPrefix(line, []byte("event:"))))
+		s.currentEvent = event
+		if event == "message_stop" {
 			s.acc.recognized = true
 			s.acc.terminal = true
 			s.acc.sawMessageData = true
 			s.sawDone = true
+		} else if event == "error" {
+			// Do not mark metadata only as success signal on error event
 		} else {
 			s.acc.sawMetadataOnly = true
 		}
@@ -1120,7 +1143,9 @@ func (s *streamBootstrapState) processSingleLine(line []byte) {
 		s.dataLines = append(s.dataLines, line)
 	default:
 		if classify := classifyJSONBuffer(line); classify == jsonBufComplete || classify == jsonBufIncomplete {
-			if !s.acc.evalJSON(line) {
+			if err := evalProviderError(line, ""); err != nil {
+				s.streamErr = err
+			} else if !s.acc.evalJSON(line) {
 				s.acc.sawUnknownData = true
 			}
 		} else {
@@ -1176,7 +1201,9 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 	}
 	switch classifyJSONBuffer(trimmed) {
 	case jsonBufComplete:
-		if !s.acc.evalJSON(trimmed) {
+		if err := evalProviderError(trimmed, ""); err != nil {
+			s.streamErr = err
+		} else if !s.acc.evalJSON(trimmed) {
 			s.acc.sawUnknownData = true
 		}
 		s.pending = s.pending[:0]
@@ -1215,6 +1242,9 @@ func (s *streamBootstrapState) hasMeaningfulOutput() bool {
 	if s.acc.hasContent || s.acc.hasToolCalls || s.acc.blocked || (s.acc.sawUsage && s.acc.completionTokens > 0) || s.acc.sawUnknownData {
 		return true
 	}
+	if s.streamErr != nil {
+		return false
+	}
 	if !s.acc.recognized && !s.sawSSE && s.bytes > 0 {
 		return true
 	}
@@ -1222,7 +1252,238 @@ func (s *streamBootstrapState) hasMeaningfulOutput() bool {
 }
 
 func (s *streamBootstrapState) shouldForward() bool {
+	if s.streamErr != nil {
+		return false
+	}
 	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.blocked || (s.acc.sawUsage && s.acc.completionTokens > 0) || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
+}
+
+type streamErrorEnvelope struct {
+	Type    string          `json:"type"`
+	Error   json.RawMessage `json:"error"`
+	Message string          `json:"message"`
+	Code    json.RawMessage `json:"code"`
+	Status  string          `json:"status"`
+}
+
+func inferHTTPStatus(typeStr, codeStr, statusStr string) int {
+	if statusStr != "" {
+		switch strings.ToUpper(strings.TrimSpace(statusStr)) {
+		case "RESOURCE_EXHAUSTED":
+			return http.StatusTooManyRequests
+		case "UNAUTHENTICATED":
+			return http.StatusUnauthorized
+		case "PERMISSION_DENIED":
+			return http.StatusForbidden
+		case "UNAVAILABLE":
+			return http.StatusServiceUnavailable
+		case "DEADLINE_EXCEEDED":
+			return http.StatusGatewayTimeout
+		case "INTERNAL":
+			return http.StatusInternalServerError
+		case "INVALID_ARGUMENT", "FAILED_PRECONDITION":
+			return http.StatusBadRequest
+		case "NOT_FOUND":
+			return http.StatusNotFound
+		case "ALREADY_EXISTS":
+			return http.StatusConflict
+		}
+	}
+	for _, s := range []string{typeStr, codeStr} {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "overloaded_error", "overloaded":
+			return http.StatusServiceUnavailable
+		case "rate_limit_error", "rate_limit_exceeded", "insufficient_quota", "quota_exceeded", "requests":
+			return http.StatusTooManyRequests
+		case "authentication_error", "invalid_api_key", "unauthorized":
+			return http.StatusUnauthorized
+		case "permission_error", "forbidden":
+			return http.StatusForbidden
+		case "not_found_error":
+			return http.StatusNotFound
+		case "invalid_request_error", "bad_request_error", "invalid_prompt", "cyber_policy", "context_length_exceeded":
+			return http.StatusBadRequest
+		case "api_error", "internal_server_error":
+			return http.StatusInternalServerError
+		}
+	}
+	return 0
+}
+
+func parseStreamErrorFromEnvelope(data []byte, envelope streamErrorEnvelope) *Error {
+	var detail struct {
+		Message string          `json:"message"`
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+		Status  string          `json:"status"`
+	}
+
+	var rawErrorString string
+	if len(envelope.Error) > 0 {
+		trimmedErr := bytes.TrimSpace(envelope.Error)
+		if bytes.HasPrefix(trimmedErr, []byte("{")) {
+			_ = json.Unmarshal(trimmedErr, &detail)
+		} else if bytes.HasPrefix(trimmedErr, []byte("\"")) {
+			_ = json.Unmarshal(trimmedErr, &rawErrorString)
+		}
+	}
+
+	message := detail.Message
+	if message == "" {
+		message = envelope.Message
+	}
+	if message == "" {
+		message = rawErrorString
+	}
+	if message == "" && detail.Type != "" {
+		message = detail.Type
+	}
+	if message == "" && detail.Status != "" {
+		message = detail.Status
+	}
+	if message == "" && len(data) > 0 && !bytes.HasPrefix(data, []byte("{")) {
+		message = string(data)
+	}
+	if message == "" {
+		message = "upstream stream error"
+	}
+
+	code := ""
+	var rawCodeInt int
+
+	extractCode := func(raw json.RawMessage) {
+		if len(raw) == 0 {
+			return
+		}
+		var strCode string
+		if json.Unmarshal(raw, &strCode) == nil && strings.TrimSpace(strCode) != "" {
+			code = strings.TrimSpace(strCode)
+			if num, err := strconv.Atoi(code); err == nil && num > 0 {
+				rawCodeInt = num
+			}
+			return
+		}
+		var num json.Number
+		if json.Unmarshal(raw, &num) == nil {
+			if n, err := num.Int64(); err == nil && n > 0 {
+				rawCodeInt = int(n)
+				code = strconv.Itoa(rawCodeInt)
+			}
+		}
+	}
+
+	extractCode(detail.Code)
+	if code == "" {
+		extractCode(envelope.Code)
+	}
+	if code == "" && detail.Type != "" {
+		code = detail.Type
+	}
+	if code == "" && detail.Status != "" {
+		code = detail.Status
+	}
+	if code == "" && envelope.Type != "" && !strings.EqualFold(envelope.Type, "error") {
+		code = envelope.Type
+	}
+
+	status := rawCodeInt
+	statusStr := strings.TrimSpace(detail.Status)
+	if statusStr == "" {
+		statusStr = strings.TrimSpace(envelope.Status)
+	}
+	typeStr := strings.TrimSpace(detail.Type)
+	if typeStr == "" {
+		typeStr = strings.TrimSpace(envelope.Type)
+	}
+
+	if status == 0 {
+		status = inferHTTPStatus(typeStr, code, statusStr)
+	}
+
+	if status == 0 {
+		lowerMsg := strings.ToLower(message)
+		switch {
+		case strings.Contains(lowerMsg, "rate limit") || strings.Contains(lowerMsg, "resource exhausted") || strings.Contains(lowerMsg, "too many requests") || strings.Contains(lowerMsg, "quota"):
+			status = http.StatusTooManyRequests
+		case strings.Contains(lowerMsg, "overloaded"):
+			status = http.StatusServiceUnavailable
+		case strings.Contains(lowerMsg, "unauthorized") || strings.Contains(lowerMsg, "invalid api key") || strings.Contains(lowerMsg, "invalid x-api-key") || strings.Contains(lowerMsg, "unauthenticated"):
+			status = http.StatusUnauthorized
+		case strings.Contains(lowerMsg, "permission denied") || strings.Contains(lowerMsg, "forbidden"):
+			status = http.StatusForbidden
+		default:
+			status = http.StatusBadGateway
+		}
+	}
+
+	err := &Error{
+		Code:       code,
+		Message:    message,
+		HTTPStatus: status,
+	}
+
+	if isRequestInvalidError(err) || clienterror.IsRequestFault(status, errors.New(string(data))) {
+		err.Retryable = false
+	} else {
+		err.Retryable = true
+	}
+
+	return err
+}
+
+func evalProviderError(data []byte, sseEvent string) *Error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil
+	}
+
+	var envelope streamErrorEnvelope
+	isError := strings.EqualFold(sseEvent, "error")
+
+	if bytes.HasPrefix(trimmed, []byte("{")) {
+		if err := json.Unmarshal(trimmed, &envelope); err == nil {
+			if len(envelope.Error) > 0 && !bytes.Equal(envelope.Error, []byte("null")) {
+				isError = true
+			} else if strings.EqualFold(envelope.Type, "error") {
+				isError = true
+			}
+		}
+	}
+
+	if !isError {
+		return nil
+	}
+
+	return parseStreamErrorFromEnvelope(trimmed, envelope)
+}
+
+func detectStreamPayloadError(payload []byte) *Error {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if isSSEPayload(trimmed) {
+		var currentEvent string
+		for _, line := range bytes.Split(trimmed, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				currentEvent = ""
+				continue
+			}
+			if bytes.HasPrefix(line, []byte("event:")) {
+				currentEvent = strings.TrimSpace(string(bytes.TrimPrefix(line, []byte("event:"))))
+				continue
+			}
+			if bytes.HasPrefix(line, []byte("data:")) {
+				data := parseSSEDataLine(line)
+				if err := evalProviderError(data, currentEvent); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return evalProviderError(trimmed, "")
 }
 
 type jsonBufferStatus int

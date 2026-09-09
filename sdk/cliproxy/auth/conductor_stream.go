@@ -281,6 +281,13 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			chunk, ok = <-ch
 		}
 		if !ok {
+			// A final frame without its blank-line delimiter is only parsed by
+			// finish(): without it a provider error carried by that last frame stays
+			// pending and the stream looks like a clean close.
+			bootstrap.finish()
+			if err := bootstrap.streamError(); err != nil && !bootstrap.hasMeaningfulOutput() {
+				return nil, false, err
+			}
 			return buffered, true, nil
 		}
 		if chunk.Err != nil {
@@ -298,6 +305,12 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		buffered = append(buffered, chunk)
 		if bootstrap.observe(chunk.Payload) {
 			return buffered, false, nil
+		}
+		if err := bootstrap.streamError(); err != nil {
+			if bootstrap.hasMeaningfulOutput() {
+				return buffered, false, nil
+			}
+			return nil, false, err
 		}
 		if bootstrap.isTerminalEmpty() {
 			return buffered, true, nil
@@ -328,6 +341,16 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: opts}
 				applyRequestScopedActionToResult(action, okAction, &result)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			}
+			if !failed && len(chunk.Payload) > 0 {
+				if streamErr := detectStreamPayloadError(chunk.Payload); streamErr != nil {
+					failed = true
+					rerr := resultErrorFromError(streamErr)
+					action, okAction := matchRequestScopedErrorAction(auth, streamErr, m.runtimeConfigSnapshot())
+					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: opts}
+					applyRequestScopedActionToResult(action, okAction, &result)
+					m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				}
 			}
 			if !forward {
 				return false
