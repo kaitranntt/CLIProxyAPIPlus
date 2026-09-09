@@ -822,7 +822,7 @@ func TestSessionAffinitySelector_ThinkingSuffixVariantsPreserveBindingAndRelease
 		t.Fatalf("third Pick() auth.ID = %q, want %q (thinking suffix variant should keep session stickiness)", third.ID, first.ID)
 	}
 
-	// Failure on a thinking-suffix variant (with explicit metadata) should properly release the session binding
+	// Terminal failure on a thinking-suffix variant (with explicit metadata) should properly release the session binding
 	optsWithMetadata := cliproxyexecutor.Options{
 		OriginalRequest: payload,
 		Metadata: map[string]any{
@@ -835,7 +835,7 @@ func TestSessionAffinitySelector_ThinkingSuffixVariantsPreserveBindingAndRelease
 		Model:    "claude-sonnet-4-5(high)",
 		AuthID:   first.ID,
 		Success:  false,
-		Error:    &Error{Code: "rate_limited", Message: "rate limited"},
+		Error:    &Error{Code: "unauthorized", HTTPStatus: http.StatusUnauthorized, Message: "invalid api key"},
 		Options:  optsWithMetadata,
 	})
 
@@ -864,7 +864,6 @@ func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t 
 	if errFirst != nil {
 		t.Fatalf("first Pick() error = %v", errFirst)
 	}
-	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 	if first.ID != authA.ID {
 		t.Fatalf("first Pick() auth.ID = %q, want %q", first.ID, authA.ID)
 	}
@@ -874,7 +873,6 @@ func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t 
 	if errSecond != nil {
 		t.Fatalf("Pick() after weight update error = %v", errSecond)
 	}
-	selector.OnResult(Result{AuthID: second.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 	if second.ID != authB.ID {
 		t.Fatalf("Pick() after weight update auth.ID = %q, want %q", second.ID, authB.ID)
 	}
@@ -882,10 +880,21 @@ func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t 
 	authA.Attributes[AttributeWeight] = "10"
 	third, errThird := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
 	if errThird != nil {
-		t.Fatalf("Pick() after rebind error = %v", errThird)
+		t.Fatalf("Pick() after weight restored error = %v", errThird)
 	}
-	if third.ID != authB.ID {
-		t.Fatalf("Pick() after rebind auth.ID = %q, want sticky auth %q", third.ID, authB.ID)
+	if third.ID != authA.ID {
+		t.Fatalf("Pick() after weight restored auth.ID = %q, want original bound auth %q", third.ID, authA.ID)
+	}
+
+	// When authA is invalidated while remaining weight 0, session permanently rebinds to authB
+	authA.Attributes[AttributeWeight] = "0"
+	selector.InvalidateAuth(authA.ID)
+	fourth, errFourth := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errFourth != nil {
+		t.Fatalf("Pick() after invalidation error = %v", errFourth)
+	}
+	if fourth.ID != authB.ID {
+		t.Fatalf("Pick() after invalidation auth.ID = %q, want %q", fourth.ID, authB.ID)
 	}
 }
 
@@ -1008,9 +1017,8 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
-	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
-	// Remove the bound auth from available list (simulating rate limit)
+	// Remove the bound auth from available list (simulating rate limit / transient exclusion)
 	availableWithoutFirst := make([]*Auth, 0, len(auths)-1)
 	for _, a := range auths {
 		if a.ID != first.ID {
@@ -1018,7 +1026,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 		}
 	}
 
-	// With failover enabled, should pick a new auth
+	// While original auth is temporarily unavailable, should pick a fallback auth
 	second, err := selector.Pick(context.Background(), "claude", "claude-3", opts, availableWithoutFirst)
 	if err != nil {
 		t.Fatalf("Pick() after failover error = %v", err)
@@ -1026,13 +1034,29 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	if second.ID == first.ID {
 		t.Fatalf("Pick() after failover returned same auth %q, expected different", first.ID)
 	}
-	selector.OnResult(Result{AuthID: second.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
-	// Subsequent picks should consistently return the new binding
+	// When original bound auth becomes available again, affinity is retained (returns to warm cache)
+	recovered, errRecovered := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errRecovered != nil {
+		t.Fatalf("Pick() after recovery error = %v", errRecovered)
+	}
+	if recovered.ID != first.ID {
+		t.Fatalf("Pick() after recovery = %q, want original bound auth %q", recovered.ID, first.ID)
+	}
+
+	// When original auth is explicitly invalidated (permanent failover), session rebinds
+	selector.InvalidateAuth(first.ID)
+	third, errThird := selector.Pick(context.Background(), "claude", "claude-3", opts, availableWithoutFirst)
+	if errThird != nil {
+		t.Fatalf("Pick() after invalidation error = %v", errThird)
+	}
+	if third.ID == first.ID {
+		t.Fatalf("Pick() after invalidation returned invalidated auth %q", first.ID)
+	}
 	for i := 0; i < 5; i++ {
 		got, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, availableWithoutFirst)
-		if got.ID != second.ID {
-			t.Fatalf("Pick() #%d after failover inconsistent: got %q, want %q", i, got.ID, second.ID)
+		if got.ID != third.ID {
+			t.Fatalf("Pick() #%d after permanent rebind inconsistent: got %q, want %q", i, got.ID, third.ID)
 		}
 	}
 }
@@ -1559,43 +1583,6 @@ func TestSessionAffinitySelectorCombinedIdentifiersBindConversationFallback(t *t
 	}
 	if second.ID != first.ID {
 		t.Fatalf("dropping prompt_cache_key changed auth from %q to %q", first.ID, second.ID)
-	}
-}
-
-func TestSessionAffinitySelectorFailureQuarantinesAllAliases(t *testing.T) {
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Minute,
-	})
-	defer selector.Stop()
-	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
-	provider := "responses-alias-group-failure"
-	model := "gpt-test"
-
-	combined := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`), Metadata: map[string]any{}}
-	first, err := selector.Pick(context.Background(), provider, model, combined, auths)
-	if err != nil {
-		t.Fatalf("combined-identifier Pick() error = %v", err)
-	}
-	selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: model, Options: combined, Success: true})
-
-	promptOnly := cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"shared-cache-bucket"}`), Metadata: map[string]any{}}
-	failed, err := selector.Pick(context.Background(), provider, model, promptOnly, auths)
-	if err != nil {
-		t.Fatalf("prompt-only Pick() error = %v", err)
-	}
-	if failed.ID != first.ID {
-		t.Fatalf("prompt-only alias selected %q, want %q", failed.ID, first.ID)
-	}
-	selector.OnResult(Result{AuthID: failed.ID, Provider: provider, Model: model, Options: promptOnly, Error: &Error{Code: "upstream_failed", Message: "upstream failed", Retryable: true}})
-
-	conversationOnly := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversation":{"id":"conversation-session"}}`), Metadata: map[string]any{}}
-	next, err := selector.Pick(context.Background(), provider, model, conversationOnly, auths)
-	if err != nil {
-		t.Fatalf("conversation-only Pick() error = %v", err)
-	}
-	if next.ID == failed.ID {
-		t.Fatalf("conversation alias reused failed auth %q", failed.ID)
 	}
 }
 
@@ -2857,7 +2844,7 @@ func TestSessionAffinitySelector_FallbackReselectReceivesOnlyAvailable(t *testin
 // threads the request-scoped set of failed auth IDs through to the selector so a
 // failed auth is never re-picked for the remainder of that request, even though
 // it is still locally "available".
-func TestSessionAffinitySelector_RequestScopedExclusionBreaksCarousel(t *testing.T) {
+func TestSessionAffinitySelector_RequestScopedExclusionBreaksCarouselWithRecording(t *testing.T) {
 	t.Parallel()
 
 	rec := &recordingFallbackSelector{inner: &RoundRobinSelector{}}

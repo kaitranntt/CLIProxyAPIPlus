@@ -95,7 +95,7 @@ func TestSessionAffinity_RetryableFailureInvalidatesMatchingBinding(t *testing.T
 		t.Fatalf("precondition failed: cache key should be bound")
 	}
 
-	// Retryable failure (429 Rate Limit)
+	// Retryable/transient failure (429 Rate Limit) must RETAIN the binding.
 	selector.OnResult(Result{
 		AuthID:   authA.ID,
 		Provider: "provider",
@@ -105,8 +105,9 @@ func TestSessionAffinity_RetryableFailureInvalidatesMatchingBinding(t *testing.T
 		Options:  opts,
 	})
 
-	if bound, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("expected cacheKey %q to be invalidated on 429 failure, but still bound to %q", cacheKey, bound)
+	bound, ok := selector.cache.Get(cacheKey)
+	if !ok || bound != authA.ID {
+		t.Fatalf("expected cacheKey %q to be retained on 429 failure; got bound=%q ok=%v", cacheKey, bound, ok)
 	}
 }
 
@@ -159,8 +160,9 @@ func TestSessionAffinity_ExhaustedRequestDoesNotLeaveLastFailedAuthBound(t *test
 	opts := cliproxyexecutor.Options{
 		Headers: http.Header{"X-Session-Id": []string{"sess-exhausted-123"}},
 	}
+	cacheKey := "provider::header:sess-exhausted-123::model"
 
-	// Attempt 1: picks Auth A, fails 429
+	// Attempt 1: picks Auth A, fails 429 (transient - binding retained)
 	picked1, _ := selector.Pick(context.Background(), "provider", "model", opts, auths)
 	selector.OnResult(Result{
 		AuthID:   picked1.ID,
@@ -170,8 +172,11 @@ func TestSessionAffinity_ExhaustedRequestDoesNotLeaveLastFailedAuthBound(t *test
 		Error:    &Error{HTTPStatus: http.StatusTooManyRequests},
 		Options:  opts,
 	})
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != picked1.ID {
+		t.Fatalf("primary binding should be retained after transient 429; bound=%q ok=%v", bound, ok)
+	}
 
-	// Attempt 2 within request: excludes Auth A, picks Auth B, fails 429
+	// Attempt 2 within request: excludes Auth A, picks Auth B as sticky fallback, fails 429
 	opts2 := cliproxyexecutor.Options{
 		Headers: http.Header{"X-Session-Id": []string{"sess-exhausted-123"}},
 		Metadata: map[string]any{
@@ -179,6 +184,9 @@ func TestSessionAffinity_ExhaustedRequestDoesNotLeaveLastFailedAuthBound(t *test
 		},
 	}
 	picked2, _ := selector.Pick(context.Background(), "provider", "model", opts2, auths)
+	if picked2.ID == picked1.ID {
+		t.Fatalf("fallback pick returned excluded auth %q", picked1.ID)
+	}
 	selector.OnResult(Result{
 		AuthID:   picked2.ID,
 		Provider: "provider",
@@ -188,10 +196,21 @@ func TestSessionAffinity_ExhaustedRequestDoesNotLeaveLastFailedAuthBound(t *test
 		Options:  opts2,
 	})
 
-	// Verify session cache is left clean (unbound)
-	cacheKey := "provider::header:sess-exhausted-123::model"
-	if bound, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("exhausted request left last failed auth bound=%q in cache", bound)
+	// Primary binding must still be the original auth; fallback is stored temporarily.
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != picked1.ID {
+		t.Fatalf("primary binding should be retained after fallback transient 429; bound=%q ok=%v", bound, ok)
+	}
+	if fb, ok := selector.fallbackCache.Get(cacheKey); !ok || fb != picked2.ID {
+		t.Fatalf("fallback cache should hold %q after fallback failure; got %q ok=%v", picked2.ID, fb, ok)
+	}
+
+	// Once the primary auth is available again, the session returns to it and clears the fallback.
+	second, _ := selector.Pick(context.Background(), "provider", "model", opts, auths)
+	if second.ID != picked1.ID {
+		t.Fatalf("exhausted request should return to original binding %q, got %q", picked1.ID, second.ID)
+	}
+	if _, ok := selector.fallbackCache.Get(cacheKey); ok {
+		t.Fatalf("temporary fallback should be cleared when primary recovers")
 	}
 }
 
@@ -291,9 +310,12 @@ func TestSessionAffinity_CachedAuthUnavailableRebindsFallback(t *testing.T) {
 		t.Fatalf("Pick = %v/%v, want B", picked, err)
 	}
 
-	bound, ok := selector.cache.Get(cacheKey)
-	if !ok || bound != authB.ID {
-		t.Fatalf("expected stale A to be replaced by pre-bound B; cache=%q ok=%v", bound, ok)
+	// Primary binding stays with the original auth; the fallback is sticky but temporary.
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != authA.ID {
+		t.Fatalf("expected primary binding to remain %q after fallback; got %q ok=%v", authA.ID, bound, ok)
+	}
+	if fb, ok := selector.fallbackCache.Get(cacheKey); !ok || fb != authB.ID {
+		t.Fatalf("expected fallback cache to hold %q; got %q ok=%v", authB.ID, fb, ok)
 	}
 }
 
@@ -316,22 +338,27 @@ func TestSessionAffinity_FallbackBFailsLeavesCacheEmpty(t *testing.T) {
 	if picked.ID != authB.ID {
 		t.Fatalf("Pick = %q, want B", picked.ID)
 	}
-	// B fails with retryable error.
+	// B fails with a transient 429. The primary binding is retained and B is stored temporarily.
 	selector.OnResult(Result{AuthID: picked.ID, Provider: "provider", Model: "model", Success: false, Error: &Error{HTTPStatus: http.StatusTooManyRequests}, Options: opts})
 
-	// Cache must be empty (no stale A, no B).
-	if bound, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("cache should be empty after B failure, got %q", bound)
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != authA.ID {
+		t.Fatalf("primary binding should be retained after fallback failure; got %q ok=%v", bound, ok)
+	}
+	if fb, ok := selector.fallbackCache.Get(cacheKey); !ok || fb != authB.ID {
+		t.Fatalf("fallback cache should hold %q after transient failure; got %q ok=%v", authB.ID, fb, ok)
 	}
 
-	// Immediate second request starts from normal fallback (A), not stale B affinity.
+	// Once A is available again, the session returns to it and clears the temporary fallback.
 	second, _ := selector.Pick(context.Background(), "provider", "model", opts, []*Auth{authA, authB})
 	if second.ID != authA.ID {
-		t.Fatalf("second request should reselect from fallback, got %q", second.ID)
+		t.Fatalf("second request should return to primary binding %q, got %q", authA.ID, second.ID)
+	}
+	if _, ok := selector.fallbackCache.Get(cacheKey); ok {
+		t.Fatalf("temporary fallback should be cleared when primary recovers")
 	}
 }
 
-func TestSessionAffinity_FallbackBSucceedsBindsB(t *testing.T) {
+func TestSessionAffinity_FallbackBSucceedsBindsTemporaryFallback(t *testing.T) {
 	authA := &Auth{ID: "auth-a"}
 	authB := &Auth{ID: "auth-b"}
 
@@ -349,11 +376,23 @@ func TestSessionAffinity_FallbackBSucceedsBindsB(t *testing.T) {
 	if picked.ID != authB.ID {
 		t.Fatalf("Pick = %q, want B", picked.ID)
 	}
+	// Fallback success must not overwrite the primary binding; it is stored as a sticky temporary fallback.
 	selector.OnResult(Result{AuthID: picked.ID, Provider: "provider", Model: "model", Success: true, Options: opts})
 
-	bound, ok := selector.cache.Get(cacheKey)
-	if !ok || bound != authB.ID {
-		t.Fatalf("B should be bound after success; bound=%q ok=%v", bound, ok)
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != authA.ID {
+		t.Fatalf("primary binding should remain %q after fallback success; got %q ok=%v", authA.ID, bound, ok)
+	}
+	if fb, ok := selector.fallbackCache.Get(cacheKey); !ok || fb != authB.ID {
+		t.Fatalf("fallback cache should hold %q after success; got %q ok=%v", authB.ID, fb, ok)
+	}
+
+	// When the primary auth is available again, the session returns to it.
+	second, _ := selector.Pick(context.Background(), "provider", "model", opts, []*Auth{authA, authB})
+	if second.ID != authA.ID {
+		t.Fatalf("second request should return to primary binding %q, got %q", authA.ID, second.ID)
+	}
+	if _, ok := selector.fallbackCache.Get(cacheKey); ok {
+		t.Fatalf("temporary fallback should be cleared when primary recovers")
 	}
 }
 
@@ -404,14 +443,14 @@ func TestSessionAffinity_StreamFailureThroughWrapperInvalidates(t *testing.T) {
 		t.Fatalf("precondition: bound")
 	}
 
-	// Stream fails with retryable upstream error (503).
+	// Stream fails with a transient upstream error (503). The binding must be retained.
 	errChunk := cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable}}
 	res := manager.wrapStreamResult(ctx, auth, "stream-provider", "stream-model", opts, nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
 	for range res.Chunks {
 	}
 
-	if bound, ok := affinity.cache.Get(cacheKey); ok {
-		t.Fatalf("stream failure should invalidate affinity; still bound=%q", bound)
+	if bound, ok := affinity.cache.Get(cacheKey); !ok || bound != auth.ID {
+		t.Fatalf("stream failure should retain affinity; bound=%q ok=%v", bound, ok)
 	}
 }
 func optsWithMixedNamespace(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
@@ -460,7 +499,7 @@ func TestSessionAffinity_MixedNamespace_PickRecordsAndOnResultBindsCanonicalKey(
 	}
 }
 
-func TestSessionAffinity_MixedNamespace_FailureLeavesCacheEmpty(t *testing.T) {
+func TestSessionAffinity_MixedNamespace_FailureRetainsBinding(t *testing.T) {
 	gemini := &Auth{ID: "gemini-auth", Provider: "gemini"}
 	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
 		return available[0], nil
@@ -471,10 +510,11 @@ func TestSessionAffinity_MixedNamespace_FailureLeavesCacheEmpty(t *testing.T) {
 	cacheKey := "mixed::header:mixed-fail-12345::model"
 
 	picked, _ := selector.Pick(context.Background(), "mixed", "model", opts, []*Auth{gemini})
+	// A 429 is transient: the canonical binding must be retained.
 	selector.OnResult(Result{AuthID: picked.ID, Provider: "gemini", Model: "model", Success: false, Error: &Error{HTTPStatus: http.StatusTooManyRequests}, Options: opts})
 
-	if bound, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("mixed cache should be empty after failure; still bound=%q", bound)
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != picked.ID {
+		t.Fatalf("mixed cache should retain binding after transient failure; bound=%q ok=%v", bound, ok)
 	}
 }
 
@@ -494,9 +534,13 @@ func TestSessionAffinity_MixedNamespace_StaleAuthRebindsFallback(t *testing.T) {
 	if picked.ID != authB.ID {
 		t.Fatalf("Pick = %q, want B", picked.ID)
 	}
-	bound, ok := selector.cache.Get(cacheKey)
-	if !ok || bound != authB.ID {
-		t.Fatalf("expected stale A to be replaced by pre-bound B; cache=%q ok=%v", bound, ok)
+
+	// The primary binding stays with A; the fallback is sticky but temporary.
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != authA.ID {
+		t.Fatalf("expected primary binding to remain %q; got %q ok=%v", authA.ID, bound, ok)
+	}
+	if fb, ok := selector.fallbackCache.Get(cacheKey); !ok || fb != authB.ID {
+		t.Fatalf("expected fallback cache to hold %q; got %q ok=%v", authB.ID, fb, ok)
 	}
 }
 
@@ -522,7 +566,7 @@ func TestSessionAffinity_MixedNamespace_StaleFailureCannotDeleteNewerSuccess(t *
 	}
 }
 
-func TestSessionAffinity_MixedNamespace_StreamBindsAndInvalidatesCanonicalKey(t *testing.T) {
+func TestSessionAffinity_MixedNamespace_StreamBindsAndRetainsCanonicalKey(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, nil, nil)
 	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &RoundRobinSelector{}, TTL: time.Hour})
@@ -547,13 +591,13 @@ func TestSessionAffinity_MixedNamespace_StreamBindsAndInvalidatesCanonicalKey(t 
 		t.Fatalf("stream mixed success should bind canonical key; bound=%q ok=%v", bound, ok)
 	}
 
-	// Failure invalidates the same canonical key.
+	// A 503 stream failure is transient: the canonical binding must be retained.
 	errChunk := cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable}}
 	res2 := manager.wrapStreamResult(ctx, auth, "gemini", "stream-model", opts, nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
 	for range res2.Chunks {
 	}
-	if bound, ok := affinity.cache.Get(cacheKey); ok {
-		t.Fatalf("stream mixed failure should invalidate canonical key; still bound=%q", bound)
+	if bound, ok := affinity.cache.Get(cacheKey); !ok || bound != auth.ID {
+		t.Fatalf("stream mixed failure should retain canonical key; bound=%q ok=%v", bound, ok)
 	}
 }
 
@@ -577,7 +621,7 @@ func TestSessionAffinity_SingleProviderStillUsesActualProviderKey(t *testing.T) 
 	}
 }
 
-func TestSessionAffinity_MixedNamespace_SecondRequestSkipsUnavailable(t *testing.T) {
+func TestSessionAffinity_MixedNamespace_SecondRequestReturnsToPrimary(t *testing.T) {
 	authA := &Auth{ID: "auth-a", Provider: "gemini"}
 	authB := &Auth{ID: "auth-b", Provider: "gemini"}
 	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
@@ -591,20 +635,27 @@ func TestSessionAffinity_MixedNamespace_SecondRequestSkipsUnavailable(t *testing
 	// Bind A under the canonical key.
 	selector.OnResult(Result{AuthID: authA.ID, Provider: "gemini", Model: "model", Success: true, Options: opts})
 
-	// A deterministic-unavailable (only B in list) -> Pick skips A, gets B; B fails -> cache empty.
+	// A is unavailable (only B in list) -> Pick selects B as sticky fallback.
 	picked, _ := selector.Pick(context.Background(), "mixed", "model", opts, []*Auth{authB})
 	if picked.ID != authB.ID {
 		t.Fatalf("Pick = %q, want B", picked.ID)
 	}
+	// B fails with a transient 503. The primary binding to A is retained.
 	selector.OnResult(Result{AuthID: picked.ID, Provider: "gemini", Model: "model", Success: false, Error: &Error{HTTPStatus: http.StatusServiceUnavailable}, Options: opts})
-	if _, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("cache should be empty after B failure")
+	if bound, ok := selector.cache.Get(cacheKey); !ok || bound != authA.ID {
+		t.Fatalf("primary binding should be retained after fallback failure; got %q ok=%v", bound, ok)
+	}
+	if fb, ok := selector.fallbackCache.Get(cacheKey); !ok || fb != authB.ID {
+		t.Fatalf("fallback cache should hold %q; got %q ok=%v", authB.ID, fb, ok)
 	}
 
-	// Immediate second request with both available reselects from fallback (A), not stale B.
+	// Once A is available again, the session returns to it and clears the temporary fallback.
 	second, _ := selector.Pick(context.Background(), "mixed", "model", opts, []*Auth{authA, authB})
 	if second.ID != authA.ID {
-		t.Fatalf("second request should reselect from fallback, got %q", second.ID)
+		t.Fatalf("second request should return to primary binding %q, got %q", authA.ID, second.ID)
+	}
+	if _, ok := selector.fallbackCache.Get(cacheKey); ok {
+		t.Fatalf("temporary fallback should be cleared when primary recovers")
 	}
 }
 func optsWithAffinityNamespaces(opts cliproxyexecutor.Options, provider, model string) cliproxyexecutor.Options {
@@ -675,7 +726,7 @@ func TestSessionAffinity_ModelNamespace_SingleProviderAliasRewrite(t *testing.T)
 	}
 }
 
-func TestSessionAffinity_ModelNamespace_FailureClearsRouteBinding(t *testing.T) {
+func TestSessionAffinity_ModelNamespace_FailureRetainsRouteBinding(t *testing.T) {
 	auth := &Auth{ID: "auth-a", Provider: "gemini"}
 	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
 		return available[0], nil
@@ -691,10 +742,10 @@ func TestSessionAffinity_ModelNamespace_FailureClearsRouteBinding(t *testing.T) 
 		t.Fatalf("precondition: route binding should exist")
 	}
 
-	// Failure with a rewritten Result model clears the canonical route binding.
+	// 503 is transient: the canonical route binding must be retained.
 	selector.OnResult(Result{AuthID: auth.ID, Provider: "gemini", Model: "gemini-3.5-flash-lite", Success: false, Error: &Error{HTTPStatus: http.StatusServiceUnavailable}, Options: opts})
-	if bound, ok := selector.cache.Get(routeKey); ok {
-		t.Fatalf("route binding not cleared after failure; bound=%q", bound)
+	if bound, ok := selector.cache.Get(routeKey); !ok || bound != auth.ID {
+		t.Fatalf("route binding should be retained after transient failure; bound=%q ok=%v", bound, ok)
 	}
 }
 
@@ -720,7 +771,7 @@ func TestSessionAffinity_ModelNamespace_StaleFailureCannotDeleteNewerSuccess(t *
 	}
 }
 
-func TestSessionAffinity_ModelNamespace_StreamRewriteBindsRouteKey(t *testing.T) {
+func TestSessionAffinity_ModelNamespace_StreamRewriteBindsAndRetainsRouteKey(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, nil, nil)
 	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &RoundRobinSelector{}, TTL: time.Hour})
@@ -745,13 +796,13 @@ func TestSessionAffinity_ModelNamespace_StreamRewriteBindsRouteKey(t *testing.T)
 		t.Fatalf("stream rewrite should bind route key; bound=%q ok=%v", bound, ok)
 	}
 
-	// Stream failure with rewritten model clears the route key.
+	// A 503 stream failure is transient: the route key binding must be retained.
 	errChunk := cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable}}
 	res2 := manager.wrapStreamResult(ctx, auth, "gemini", "gemini-3.5-flash-lite", opts, nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
 	for range res2.Chunks {
 	}
-	if bound, ok := affinity.cache.Get(routeKey); ok {
-		t.Fatalf("stream failure should clear route key; still bound=%q", bound)
+	if bound, ok := affinity.cache.Get(routeKey); !ok || bound != auth.ID {
+		t.Fatalf("stream failure should retain route key; bound=%q ok=%v", bound, ok)
 	}
 }
 
@@ -770,145 +821,6 @@ func TestSessionAffinity_ModelNamespace_MetadataAbsentUsesResultModel(t *testing
 	bound, ok := selector.cache.Get(cacheKey)
 	if !ok || bound != auth.ID {
 		t.Fatalf("metadata-absent should key by Result.Provider/Model; bound=%q ok=%v", bound, ok)
-	}
-}
-
-func TestSessionAffinity_QuarantinesRetryAfterForSameSessionOnly(t *testing.T) {
-	authA := &Auth{ID: "auth-a", Provider: "gemini"}
-	authB := &Auth{ID: "auth-b", Provider: "gemini"}
-	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
-		return available[0], nil
-	})
-	selector := NewSessionAffinitySelector(fallback)
-	defer selector.Stop()
-
-	opts := optsWithAffinityNamespaces(cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"cooldown-session-one"}}}, "mixed", ".gemini-flash")
-	first, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB})
-	if err != nil || first.ID != authA.ID {
-		t.Fatalf("first Pick = %v/%v, want auth-a", first, err)
-	}
-
-	retryAfter := 53 * time.Second
-	selector.OnResult(Result{
-		AuthID:     authA.ID,
-		Provider:   "gemini",
-		Model:      "gemini-3.6-flash",
-		Success:    false,
-		Error:      &Error{HTTPStatus: http.StatusTooManyRequests},
-		RetryAfter: &retryAfter,
-		Options:    opts,
-	})
-
-	second, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB})
-	if err != nil || second.ID != authB.ID {
-		t.Fatalf("same-session retry Pick = %v/%v, want auth-b", second, err)
-	}
-
-	otherOpts := optsWithAffinityNamespaces(cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"cooldown-session-two"}}}, "mixed", ".gemini-flash")
-	other, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", otherOpts, []*Auth{authA, authB})
-	if err != nil || other.ID != authA.ID {
-		t.Fatalf("other-session Pick = %v/%v, want auth-a", other, err)
-	}
-}
-
-func TestSessionAffinity_QuarantinesMultipleFailedAuths(t *testing.T) {
-	authA := &Auth{ID: "auth-a", Provider: "gemini"}
-	authB := &Auth{ID: "auth-b", Provider: "gemini"}
-	authC := &Auth{ID: "auth-c", Provider: "gemini"}
-	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
-		return available[0], nil
-	})
-	selector := NewSessionAffinitySelector(fallback)
-	defer selector.Stop()
-
-	opts := optsWithAffinityNamespaces(cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"cooldown-multiple"}}}, "mixed", ".gemini-flash")
-	retryAfter := 53 * time.Second
-	for _, auth := range []*Auth{authA, authB} {
-		picked, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB, authC})
-		if err != nil || picked.ID != auth.ID {
-			t.Fatalf("Pick before failing %s = %v/%v", auth.ID, picked, err)
-		}
-		selector.OnResult(Result{
-			AuthID:     auth.ID,
-			Provider:   "gemini",
-			Model:      "gemini-3.6-flash",
-			Success:    false,
-			Error:      &Error{HTTPStatus: http.StatusTooManyRequests},
-			RetryAfter: &retryAfter,
-			Options:    opts,
-		})
-	}
-
-	third, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB, authC})
-	if err != nil || third.ID != authC.ID {
-		t.Fatalf("third Pick = %v/%v, want auth-c", third, err)
-	}
-}
-
-func TestSessionAffinity_QuarantineExpires(t *testing.T) {
-	authA := &Auth{ID: "auth-a", Provider: "gemini"}
-	authB := &Auth{ID: "auth-b", Provider: "gemini"}
-	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
-		return available[0], nil
-	})
-	selector := NewSessionAffinitySelector(fallback)
-	defer selector.Stop()
-
-	opts := optsWithAffinityNamespaces(cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"cooldown-expiry"}}}, "mixed", ".gemini-flash")
-	retryAfter := 20 * time.Millisecond
-	selector.OnResult(Result{
-		AuthID:     authA.ID,
-		Provider:   "gemini",
-		Model:      "gemini-3.6-flash",
-		Success:    false,
-		Error:      &Error{HTTPStatus: http.StatusTooManyRequests},
-		RetryAfter: &retryAfter,
-		Options:    opts,
-	})
-
-	before, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB})
-	if err != nil || before.ID != authB.ID {
-		t.Fatalf("Pick before expiry = %v/%v, want auth-b", before, err)
-	}
-	selector.OnResult(Result{AuthID: authB.ID, Provider: "gemini", Model: "gemini-3.6-flash", Success: false, Error: &Error{HTTPStatus: http.StatusBadGateway}, Options: opts})
-	time.Sleep(30 * time.Millisecond)
-	after, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB})
-	if err != nil || after.ID != authA.ID {
-		t.Fatalf("Pick after expiry = %v/%v, want auth-a", after, err)
-	}
-}
-
-func TestSessionAffinity_StaleSuccessDoesNotClearNewerQuarantine(t *testing.T) {
-	authA := &Auth{ID: "auth-a", Provider: "gemini"}
-	authB := &Auth{ID: "auth-b", Provider: "gemini"}
-	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
-		return available[0], nil
-	})
-	selector := NewSessionAffinitySelector(fallback)
-	defer selector.Stop()
-
-	opts := optsWithAffinityNamespaces(cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"cooldown-stale-success"}}}, "mixed", ".gemini-flash")
-	retryAfter := 53 * time.Second
-	selector.OnResult(Result{
-		AuthID:     authA.ID,
-		Provider:   "gemini",
-		Model:      "gemini-3.6-flash",
-		Success:    false,
-		Error:      &Error{HTTPStatus: http.StatusTooManyRequests},
-		RetryAfter: &retryAfter,
-		Options:    opts,
-	})
-	selector.OnResult(Result{
-		AuthID:   authA.ID,
-		Provider: "gemini",
-		Model:    "gemini-3.6-flash",
-		Success:  true,
-		Options:  opts,
-	})
-
-	got, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB})
-	if err != nil || got.ID != authB.ID {
-		t.Fatalf("Pick after stale success = %v/%v, want auth-b while auth-a remains quarantined", got, err)
 	}
 }
 
