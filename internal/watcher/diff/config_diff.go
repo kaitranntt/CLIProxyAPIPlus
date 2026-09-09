@@ -375,6 +375,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if entries, _ := DiffOAuthModelAliasChanges(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
+	if entries, _ := DiffOAuthRequestScopedErrorsChanges(oldCfg.OAuthRequestScopedErrors, newCfg.OAuthRequestScopedErrors); len(entries) > 0 {
+		changes = append(changes, entries...)
+	}
 
 	// Remote management (never print the key)
 	if oldCfg.RemoteManagement.AllowRemote != newCfg.RemoteManagement.AllowRemote {

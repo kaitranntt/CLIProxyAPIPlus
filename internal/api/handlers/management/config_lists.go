@@ -1258,6 +1258,103 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	h.persist(c)
 }
 
+// oauth-request-scoped-errors: map[string][]RequestScopedErrorRule
+func (h *Handler) GetOAuthRequestScopedErrors(c *gin.Context) {
+	c.JSON(200, gin.H{"oauth-request-scoped-errors": sanitizedOAuthRequestScopedErrors(h.cfg.OAuthRequestScopedErrors)})
+}
+
+func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var entries map[string][]config.RequestScopedErrorRule
+	if err = json.Unmarshal(data, &entries); err != nil {
+		var wrapper struct {
+			Items map[string][]config.RequestScopedErrorRule `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		entries = wrapper.Items
+	}
+	h.cfg.OAuthRequestScopedErrors = sanitizedOAuthRequestScopedErrors(entries)
+	h.persist(c)
+}
+
+func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
+	var body struct {
+		Provider *string                         `json:"provider"`
+		Channel  *string                         `json:"channel"`
+		Rules    []config.RequestScopedErrorRule `json:"rules"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	channelRaw := ""
+	if body.Channel != nil {
+		channelRaw = *body.Channel
+	} else if body.Provider != nil {
+		channelRaw = *body.Provider
+	}
+	channel := strings.ToLower(strings.TrimSpace(channelRaw))
+	if channel == "" {
+		c.JSON(400, gin.H{"error": "invalid channel"})
+		return
+	}
+
+	normalizedMap := sanitizedOAuthRequestScopedErrors(map[string][]config.RequestScopedErrorRule{channel: body.Rules})
+	normalized := normalizedMap[channel]
+	if len(normalized) == 0 {
+		if h.cfg.OAuthRequestScopedErrors == nil {
+			c.JSON(404, gin.H{"error": "channel not found"})
+			return
+		}
+		if _, ok := h.cfg.OAuthRequestScopedErrors[channel]; !ok {
+			c.JSON(404, gin.H{"error": "channel not found"})
+			return
+		}
+		delete(h.cfg.OAuthRequestScopedErrors, channel)
+		if len(h.cfg.OAuthRequestScopedErrors) == 0 {
+			h.cfg.OAuthRequestScopedErrors = nil
+		}
+		h.persist(c)
+		return
+	}
+	if h.cfg.OAuthRequestScopedErrors == nil {
+		h.cfg.OAuthRequestScopedErrors = make(map[string][]config.RequestScopedErrorRule)
+	}
+	h.cfg.OAuthRequestScopedErrors[channel] = normalized
+	h.persist(c)
+}
+
+func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
+	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
+	if channel == "" {
+		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
+	}
+	if channel == "" {
+		c.JSON(400, gin.H{"error": "missing channel"})
+		return
+	}
+	if h.cfg.OAuthRequestScopedErrors == nil {
+		c.JSON(404, gin.H{"error": "channel not found"})
+		return
+	}
+	if _, ok := h.cfg.OAuthRequestScopedErrors[channel]; !ok {
+		c.JSON(404, gin.H{"error": "channel not found"})
+		return
+	}
+	delete(h.cfg.OAuthRequestScopedErrors, channel)
+	if len(h.cfg.OAuthRequestScopedErrors) == 0 {
+		h.cfg.OAuthRequestScopedErrors = nil
+	}
+	h.persist(c)
+}
+
 // codex-api-key: []CodexKey
 func (h *Handler) GetCodexKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})
@@ -2089,4 +2186,26 @@ func normalizeAPIKeysList(keys []string) []string {
 		return nil
 	}
 	return out
+}
+
+func sanitizedOAuthRequestScopedErrors(entries map[string][]config.RequestScopedErrorRule) map[string][]config.RequestScopedErrorRule {
+	if len(entries) == 0 {
+		return nil
+	}
+	copied := make(map[string][]config.RequestScopedErrorRule, len(entries))
+	for channel, rules := range entries {
+		if len(rules) == 0 {
+			continue
+		}
+		copied[channel] = append([]config.RequestScopedErrorRule(nil), rules...)
+	}
+	if len(copied) == 0 {
+		return nil
+	}
+	cfg := config.Config{OAuthRequestScopedErrors: copied}
+	cfg.SanitizeOAuthRequestScopedErrors()
+	if len(cfg.OAuthRequestScopedErrors) == 0 {
+		return nil
+	}
+	return cfg.OAuthRequestScopedErrors
 }

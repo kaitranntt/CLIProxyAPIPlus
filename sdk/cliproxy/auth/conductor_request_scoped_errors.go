@@ -87,6 +87,16 @@ func extractRequestScopedErrorRules(auth *Auth, cfg *internalconfig.Config) []in
 		return nil
 	}
 
+	if auth.AuthKind() == AuthKindOAuth {
+		if len(cfg.OAuthRequestScopedErrors) > 0 {
+			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+			if rules, ok := cfg.OAuthRequestScopedErrors[provider]; ok && len(rules) > 0 {
+				return rules
+			}
+		}
+		return nil
+	}
+
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	index := -1
 	if auth.Attributes != nil {
@@ -178,7 +188,8 @@ func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 	body := extractErrorBody(err)
 
 	for _, rule := range rules {
-		if rule.Status <= 0 || rule.Status != statusCode {
+		// Status == 0 (unset or omitted) matches any HTTP status; otherwise the status must match exactly.
+		if rule.Status != 0 && rule.Status != statusCode {
 			continue
 		}
 		if len(rule.Match) == 0 && len(rule.MatchRegexr) == 0 {
