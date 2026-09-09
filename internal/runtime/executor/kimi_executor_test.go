@@ -466,7 +466,7 @@ func TestNormalizeKimiToolMessageLinks_InsertsFallbackReasoningWhenMissing(t *te
 	}
 }
 
-func TestNormalizeKimiToolMessageLinks_DoesNotReuseUnavailableReasoning(t *testing.T) {
+func TestNormalizeKimiToolMessageLinks_DoesNotBackfillReasoningFromContent(t *testing.T) {
 	body := []byte(`{
 		"messages":[
 			{"role":"assistant","reasoning_content":"[reasoning unavailable]"},
@@ -480,8 +480,8 @@ func TestNormalizeKimiToolMessageLinks_DoesNotReuseUnavailableReasoning(t *testi
 	}
 
 	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
-	if got != "current summary" {
-		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "current summary")
+	if got != "[reasoning unavailable]" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "[reasoning unavailable]")
 	}
 }
 
@@ -505,7 +505,7 @@ func TestNormalizeKimiToolMessageLinks_UnavailableReasoningDoesNotOverridePrevio
 	}
 }
 
-func TestNormalizeKimiToolMessageLinks_ReplacesUnavailableReasoningContent(t *testing.T) {
+func TestNormalizeKimiToolMessageLinks_KeepsUnavailableReasoningContent(t *testing.T) {
 	body := []byte(`{
 		"messages":[
 			{"role":"assistant","content":"assistant summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}],"reasoning_content":"[reasoning unavailable]"}
@@ -518,12 +518,12 @@ func TestNormalizeKimiToolMessageLinks_ReplacesUnavailableReasoningContent(t *te
 	}
 
 	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
-	if got != "assistant summary" {
-		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "assistant summary")
+	if got != "[reasoning unavailable]" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "[reasoning unavailable]")
 	}
 }
 
-func TestNormalizeKimiToolMessageLinks_UsesContentAsReasoningFallback(t *testing.T) {
+func TestNormalizeKimiToolMessageLinks_DoesNotUseContentAsReasoningFallback(t *testing.T) {
 	body := []byte(`{
 		"messages":[
 			{"role":"assistant","content":[{"type":"text","text":"first line"},{"type":"text","text":"second line"}],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]}
@@ -536,12 +536,12 @@ func TestNormalizeKimiToolMessageLinks_UsesContentAsReasoningFallback(t *testing
 	}
 
 	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
-	if got != "first line\nsecond line" {
-		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "first line\nsecond line")
+	if got != "[reasoning unavailable]" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "[reasoning unavailable]")
 	}
 }
 
-func TestNormalizeKimiToolMessageLinks_ReplacesEmptyReasoningContent(t *testing.T) {
+func TestNormalizeKimiToolMessageLinks_DoesNotReplaceEmptyReasoningWithContent(t *testing.T) {
 	body := []byte(`{
 		"messages":[
 			{"role":"assistant","content":"assistant summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}],"reasoning_content":""}
@@ -554,8 +554,8 @@ func TestNormalizeKimiToolMessageLinks_ReplacesEmptyReasoningContent(t *testing.
 	}
 
 	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
-	if got != "assistant summary" {
-		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "assistant summary")
+	if got != "[reasoning unavailable]" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "[reasoning unavailable]")
 	}
 }
 

@@ -347,6 +347,62 @@ func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *test
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_KimiDegradesForeignSignedThinking(t *testing.T) {
+	tests := []struct {
+		name          string
+		signature     string
+		wantReasoning string
+	}{
+		{
+			name:          "unsigned thinking maps to reasoning_content",
+			signature:     "",
+			wantReasoning: "provider state",
+		},
+		{
+			name:          "Claude signature degrades to reasoning_content",
+			signature:     "claude#EjQ=",
+			wantReasoning: "provider state",
+		},
+		{
+			name:          "Gemini signature degrades to reasoning_content",
+			signature:     "gemini#EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA",
+			wantReasoning: "provider state",
+		},
+		{
+			name:          "unknown signature degrades to reasoning_content",
+			signature:     "not-a-provider-signature",
+			wantReasoning: "provider state",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := `{
+				"model": "claude-3-opus",
+				"messages": [{
+					"role": "assistant",
+					"content": [
+						{"type": "thinking", "thinking": "provider state", "signature": "` + tt.signature + `"},
+						{"type": "text", "text": "visible answer"}
+					]
+				}]
+			}`
+
+			result := ConvertClaudeRequestToOpenAI("kimi-k3", []byte(inputJSON), false)
+			assistantMsg := gjson.GetBytes(result, "messages.0")
+			if !assistantMsg.Get("reasoning_content").Exists() {
+				t.Fatalf("reasoning_content should exist for Kimi target. Output: %s", string(result))
+			}
+			if got := assistantMsg.Get("reasoning_content").String(); got != tt.wantReasoning {
+				t.Fatalf("reasoning_content = %q, want %q. Output: %s", got, tt.wantReasoning, string(result))
+			}
+			if got := assistantMsg.Get("content.0.text").String(); got != "visible answer" {
+				t.Fatalf("visible content = %q, want visible answer. Output: %s", got, string(result))
+			}
+		})
+	}
+}
+
 func validGPTChatReasoningSignature() string {
 	raw := make([]byte, 1+8+16+16+32)
 	raw[0] = 0x80

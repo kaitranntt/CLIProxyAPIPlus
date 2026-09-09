@@ -617,26 +617,9 @@ func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string)
 		return latest
 	}
 
-	content := msg.Get("content")
-	if content.Type == gjson.String {
-		if text := strings.TrimSpace(content.String()); text != "" {
-			return text
-		}
-	}
-	if content.IsArray() {
-		parts := make([]string, 0, len(content.Array()))
-		for _, item := range content.Array() {
-			text := strings.TrimSpace(item.Get("text").String())
-			if text == "" {
-				continue
-			}
-			parts = append(parts, text)
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
-	}
-
+	// Do not use visible assistant content as hidden reasoning_content.
+	// reasoning_content must come from canonical reasoning sources only;
+	// fabricating it from content risks self-reflection loops on replay.
 	return kimiReasoningUnavailable
 }
 
