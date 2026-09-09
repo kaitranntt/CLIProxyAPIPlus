@@ -677,6 +677,8 @@ func main() {
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
+	coreauth.SetQuotaCooldownFloorSeconds(cfg.QuotaCooldownFloorSeconds)
+	coreauth.SetTransientCooldownByStatus(cfg.TransientCooldownByStatus)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)

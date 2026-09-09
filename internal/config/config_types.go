@@ -69,6 +69,16 @@ type KiroRateLimitConfig struct {
 	SuspendCooldown   string  `yaml:"suspend-cooldown,omitempty" json:"suspend-cooldown,omitempty"`
 }
 
+// TransientCooldownByStatusRule overrides the transient cooldown duration for a single HTTP status.
+// Statuses not listed fall back to the global TransientErrorCooldownSeconds.
+type TransientCooldownByStatusRule struct {
+	// Status is the HTTP status code to match (e.g. 408, 500, 502, 503, 504).
+	Status int `yaml:"status" json:"status"`
+	// CooldownSeconds is the cooldown applied when this status is seen.
+	// 0 keeps the legacy default for this status; negative values disable the cooldown.
+	CooldownSeconds int `yaml:"cooldown-seconds" json:"cooldown-seconds"`
+}
+
 // RequestScopedErrorRule configures custom classification and handling for upstream errors.
 type RequestScopedErrorRule struct {
 	// Status matches the HTTP status code of the upstream response (e.g. 400).

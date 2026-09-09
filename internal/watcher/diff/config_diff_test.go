@@ -645,6 +645,30 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	expectContains(t, changes, "vertex-api-key count: 0 -> 1")
 }
 
+func TestBuildConfigChangeDetails_CooldownKnobs(t *testing.T) {
+	oldCfg := &config.Config{
+		TransientErrorCooldownSeconds: 0,
+		QuotaCooldownFloorSeconds:     1,
+		TransientCooldownByStatus: []config.TransientCooldownByStatusRule{
+			{Status: 408, CooldownSeconds: 2},
+			{Status: 503, CooldownSeconds: 10},
+		},
+	}
+	newCfg := &config.Config{
+		TransientErrorCooldownSeconds: 10,
+		QuotaCooldownFloorSeconds:     2,
+		TransientCooldownByStatus: []config.TransientCooldownByStatusRule{
+			{Status: 408, CooldownSeconds: 2},
+			{Status: 408, CooldownSeconds: 2},
+		},
+	}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "transient-error-cooldown-seconds: 0 -> 10")
+	expectContains(t, changes, "quota-cooldown-floor-seconds: 1 -> 2")
+	expectContains(t, changes, "transient-cooldown-by-status: 2 rules -> 2 rules")
+}
+
 func TestTrimStrings(t *testing.T) {
 	out := trimStrings([]string{" a ", "b", "  c"})
 	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {

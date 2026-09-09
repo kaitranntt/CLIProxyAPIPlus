@@ -52,6 +52,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.TransientErrorCooldownSeconds != newCfg.TransientErrorCooldownSeconds {
 		changes = append(changes, fmt.Sprintf("transient-error-cooldown-seconds: %d -> %d", oldCfg.TransientErrorCooldownSeconds, newCfg.TransientErrorCooldownSeconds))
 	}
+	if oldCfg.QuotaCooldownFloorSeconds != newCfg.QuotaCooldownFloorSeconds {
+		changes = append(changes, fmt.Sprintf("quota-cooldown-floor-seconds: %d -> %d", oldCfg.QuotaCooldownFloorSeconds, newCfg.QuotaCooldownFloorSeconds))
+	}
+	if !reflect.DeepEqual(collapseTransientCooldownByStatus(oldCfg.TransientCooldownByStatus), collapseTransientCooldownByStatus(newCfg.TransientCooldownByStatus)) {
+		changes = append(changes, fmt.Sprintf("transient-cooldown-by-status: %d rules -> %d rules", len(oldCfg.TransientCooldownByStatus), len(newCfg.TransientCooldownByStatus)))
+	}
 	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
 		changes = append(changes, fmt.Sprintf("disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode))
 	}
@@ -579,4 +585,12 @@ func formatURL(raw string) string {
 		return host
 	}
 	return scheme + "://" + host
+}
+
+func collapseTransientCooldownByStatus(rules []config.TransientCooldownByStatusRule) map[int]int {
+	m := make(map[int]int, len(rules))
+	for _, r := range rules {
+		m[r.Status] = r.CooldownSeconds
+	}
+	return m
 }

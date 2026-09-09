@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
@@ -18,6 +19,18 @@ import (
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
+
+func transientCooldownByStatusMap(rules []config.TransientCooldownByStatusRule) map[int]int {
+	m := make(map[int]int, len(rules))
+	for _, r := range rules {
+		m[r.Status] = r.CooldownSeconds
+	}
+	return m
+}
+
+func transientCooldownByStatusEqual(a, b []config.TransientCooldownByStatusRule) bool {
+	return reflect.DeepEqual(transientCooldownByStatusMap(a), transientCooldownByStatusMap(b))
+}
 
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 	if s == nil || s.accessManager == nil || newCfg == nil {
@@ -110,6 +123,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	}
 	if oldCfg == nil || oldCfg.TransientErrorCooldownSeconds != cfg.TransientErrorCooldownSeconds {
 		auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
+	}
+	if oldCfg == nil || oldCfg.QuotaCooldownFloorSeconds != cfg.QuotaCooldownFloorSeconds {
+		auth.SetQuotaCooldownFloorSeconds(cfg.QuotaCooldownFloorSeconds)
+	}
+	if oldCfg == nil || !transientCooldownByStatusEqual(oldCfg.TransientCooldownByStatus, cfg.TransientCooldownByStatus) {
+		auth.SetTransientCooldownByStatus(cfg.TransientCooldownByStatus)
 	}
 
 	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
