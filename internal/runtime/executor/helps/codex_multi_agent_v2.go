@@ -69,6 +69,23 @@ func sameByteSlice(a, b []byte) bool {
 // request translators when a configured API-key model enables compatibility mode.
 func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool) []byte {
 	if !isCompat {
+		if cfg != nil && cfg.Translator.CarryOverThinkingInSystem && to == sdktranslator.FormatOpenAI {
+			working := payload
+			if from == sdktranslator.FormatClaude {
+				// Extract unsigned assistant thinking before native translation so
+				// it is not dropped. The registry then translates and runs plugin
+				// NormalizeRequest hooks on the final OpenAI-shaped payload.
+				// Signed thinking stays in place and maps to reasoning_content.
+				working = carryOverClaudeSource(working)
+			}
+			translated := TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, working, stream)
+			if from != sdktranslator.FormatClaude {
+				// Other sources (e.g. openai-response) may already expose prior
+				// reasoning as reasoning_content in the translated payload.
+				translated = CarryOverThinkingToSystem(translated)
+			}
+			return translated
+		}
 		return TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
 	}
 	if from == sdktranslator.FormatOpenAIResponse && to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
