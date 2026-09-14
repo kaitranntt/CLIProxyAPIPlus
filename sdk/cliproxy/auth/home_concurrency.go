@@ -235,6 +235,8 @@ func decodeHomeDispatchError(raw []byte) error {
 
 	result := &Error{Code: code, Message: message, Retryable: detail.Retryable, HTTPStatus: http.StatusBadGateway}
 	switch strings.ToLower(code) {
+	case ErrorCodeModelVariantUnavailable:
+		result.HTTPStatus = http.StatusBadRequest
 	case "model_not_found":
 		result.HTTPStatus = http.StatusNotFound
 	case "authentication_error", "unauthorized", "no_credentials", "invalid_credential":

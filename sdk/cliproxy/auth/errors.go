@@ -15,6 +15,10 @@ const connectionLifecycleErrorCode = ErrorCodeConnectionLifecycle
 // ErrorCodeForceCooldown marks failures that must enforce credential cooldown.
 const ErrorCodeForceCooldown = "force_cooldown"
 
+// ErrorCodeModelVariantUnavailable permits alternate-account routing without
+// cooling a family that still supports other request options.
+const ErrorCodeModelVariantUnavailable = "model_variant_unavailable"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

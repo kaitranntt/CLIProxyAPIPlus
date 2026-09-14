@@ -1375,6 +1375,9 @@ func resultErrorFromError(err error) *Error {
 // Connection lifecycle is intentionally separate from request_scoped so transport
 // drops do not also stop credential rotation via isRequestInvalidError.
 func shouldSkipCredentialCooldown(err *Error) bool {
+	if err != nil && err.Code == ErrorCodeModelVariantUnavailable {
+		return true
+	}
 	if err != nil && err.Code == ErrorCodeForceCooldown {
 		return false
 	}
@@ -1875,6 +1878,10 @@ func isRequestInvalidError(err error) bool {
 	}
 	if isRequestScopedError(err) {
 		return true
+	}
+	var variantErr *Error
+	if errors.As(err, &variantErr) && variantErr != nil && variantErr.Code == ErrorCodeModelVariantUnavailable {
+		return false
 	}
 	if isCloudflareChallengeError(err) {
 		return false
