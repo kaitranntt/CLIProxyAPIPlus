@@ -3145,20 +3145,18 @@ func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
 		modelID := "kiro-" + normalizeKiroModelID(m.ModelID)
 
 		info := &ModelInfo{
-			ID:                  modelID,
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "aws",
-			Type:                "kiro",
-			DisplayName:         formatKiroDisplayName(m.ModelName, m.RateMultiplier),
-			Description:         m.Description,
-			ContextLength:       registry.KiroContextLengthForModel(modelID),
+			ID:          modelID,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "aws",
+			Type:        "kiro",
+			DisplayName: formatKiroDisplayName(m.ModelName, m.RateMultiplier),
+			Description: m.Description,
+			// Local measurements win; the upstream maxInputTokens only applies
+			// when it is smaller. See registry.KiroContextLengthForAPIModel.
+			ContextLength:       registry.KiroContextLengthForAPIModel(modelID, m.MaxInputTokens),
 			MaxCompletionTokens: registry.DefaultKiroMaxCompletionTokens,
 			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
-		}
-
-		if m.MaxInputTokens > 0 {
-			info.ContextLength = m.MaxInputTokens
 		}
 
 		models = append(models, info)

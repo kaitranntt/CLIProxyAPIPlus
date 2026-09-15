@@ -112,6 +112,27 @@ func KiroContextLengthForModel(modelID string) int {
 	return DefaultKiroContextLength
 }
 
+// KiroContextLengthForAPIModel resolves the window to advertise for a model
+// whose upstream catalog entry carries its own maxInputTokens.
+//
+// The upstream number is only trusted when it is smaller than what we resolve
+// locally. Kiro advertises the raw model ceiling (gpt-5.6 is listed at 1M) but
+// bills the turn against a window that also holds the injected system prompt,
+// the re-serialized tool schemas and the completion, none of which we can see.
+// Worse, applyKiroContextUsageFallback reconstructs input_tokens by dividing
+// contextUsagePercentage by KiroContextLengthForModel, so honoring a larger
+// upstream ceiling here would advertise 1M while still counting against 272K —
+// clients would skip compaction until Kiro rejects the turn outright. Taking
+// the smaller of the two keeps the advertised window and the reconstruction
+// denominator in agreement, and still lets upstream lower a window on us.
+func KiroContextLengthForAPIModel(modelID string, apiMaxInputTokens int) int {
+	length := KiroContextLengthForModel(modelID)
+	if apiMaxInputTokens > 0 && apiMaxInputTokens < length {
+		return apiMaxInputTokens
+	}
+	return length
+}
+
 // normalizeKiroContextKey reduces a model ID to the form used as a
 // kiroContextLengths key.
 func normalizeKiroContextKey(modelID string) string {
@@ -170,8 +191,8 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 			Type:        "kiro",
 			DisplayName: generateKiroDisplayName(km.ModelName, normalizedID),
 			Description: km.Description,
-			// Use MaxInputTokens from API if available, otherwise use default
-			ContextLength:       getContextLength(km.MaxInputTokens),
+			// Local measurements win; the API value only applies when smaller.
+			ContextLength:       KiroContextLengthForAPIModel(normalizedID, km.MaxInputTokens),
 			MaxCompletionTokens: DefaultKiroMaxCompletionTokens,
 			// All Kiro models support thinking
 			Thinking: cloneThinkingSupport(DefaultKiroThinkingSupport),
@@ -376,14 +397,6 @@ func generateAgenticDescription(baseDescription string) string {
 		return "Optimized for coding agents with chunked writes"
 	}
 	return baseDescription + " (Agentic mode: chunked writes)"
-}
-
-// getContextLength returns the context length, using default if not provided.
-func getContextLength(maxInputTokens int) int {
-	if maxInputTokens > 0 {
-		return maxInputTokens
-	}
-	return DefaultKiroContextLength
 }
 
 // cloneThinkingSupport creates a deep copy of ThinkingSupport.
