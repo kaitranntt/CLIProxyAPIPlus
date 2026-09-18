@@ -71,6 +71,72 @@ func TestKiroContextLengthForModel(t *testing.T) {
 	}
 }
 
+// Kiro's ListAvailableModels advertises the raw model ceiling (gpt-5.6 is
+// listed at 1M) while billing against a smaller effective window, and
+// input_tokens is reconstructed from KiroContextLengthForModel, so an upstream
+// value may only lower the local one.
+func TestKiroContextLengthForAPIModel(t *testing.T) {
+	cases := []struct {
+		name              string
+		modelID           string
+		apiMaxInputTokens int
+		want              int
+	}{
+		{
+			name:              "upstream 1M does not raise the measured window",
+			modelID:           "kiro-gpt-5-6-sol",
+			apiMaxInputTokens: 1000000,
+			want:              272000,
+		},
+		{
+			name:              "a smaller upstream window wins",
+			modelID:           "kiro-gpt-5-6-sol",
+			apiMaxInputTokens: 128000,
+			want:              128000,
+		},
+		{
+			name:              "missing upstream value falls back to the local table",
+			modelID:           "kiro-gpt-5-6-luna",
+			apiMaxInputTokens: 0,
+			want:              272000,
+		},
+		{
+			name:              "unknown model with no upstream value uses the default",
+			modelID:           "kiro-some-future-model",
+			apiMaxInputTokens: 0,
+			want:              DefaultKiroContextLength,
+		},
+		{
+			name:              "unknown model is capped by the default, not raised",
+			modelID:           "kiro-some-future-model",
+			apiMaxInputTokens: 1000000,
+			want:              DefaultKiroContextLength,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := KiroContextLengthForAPIModel(tc.modelID, tc.apiMaxInputTokens); got != tc.want {
+				t.Fatalf("KiroContextLengthForAPIModel(%q, %d) = %d, want %d", tc.modelID, tc.apiMaxInputTokens, got, tc.want)
+			}
+		})
+	}
+}
+
+// ConvertKiroAPIModels must apply the same clamp: the upstream catalog reaches
+// ModelInfo through this path on every dynamic discovery cycle.
+func TestConvertKiroAPIModelsClampsUpstreamWindow(t *testing.T) {
+	models := ConvertKiroAPIModels([]*KiroAPIModel{
+		{ModelID: "gpt-5.6-sol", ModelName: "GPT-5.6 Sol", MaxInputTokens: 1000000},
+	})
+	if len(models) != 1 {
+		t.Fatalf("ConvertKiroAPIModels() returned %d models, want 1", len(models))
+	}
+	if got := models[0].ContextLength; got != 272000 {
+		t.Fatalf("ContextLength = %d, want 272000", got)
+	}
+}
+
 // The reconstruction of input_tokens divides contextUsagePercentage by these
 // windows, so a mismatch silently mis-reports usage rather than failing loudly.
 func TestGetKiroModelsAdvertisePerModelContextLength(t *testing.T) {
