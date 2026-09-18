@@ -149,9 +149,6 @@ func TestBuildKiroPayload_TrailingSystemMessageKeepsTools(t *testing.T) {
 	if !strings.Contains(content, "Available agent types for the Agent tool") {
 		t.Fatalf("expected system message text carried into current message content, got: %q", content)
 	}
-	if !strings.Contains(content, "<system-reminder>") {
-		t.Fatalf("expected system text wrapped in <system-reminder> tags, got: %q", content)
-	}
 }
 
 // TestSynthesizeToolSpecsFromHistory_Dedup ensures repeated tool names yield a

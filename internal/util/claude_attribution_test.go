@@ -88,9 +88,9 @@ func TestFilterAgentSystemLines(t *testing.T) {
 		want string
 	}{
 		{
-			name: "identity line dropped, later sections kept",
+			name: "identity sentence dropped, sibling sentence on same line kept",
 			text: "You are Codex, a coding agent based on GPT-5. You and the user share one workspace.\n\n# Personality",
-			want: "\n# Personality",
+			want: "You and the user share one workspace.\n\n# Personality",
 		},
 		{
 			name: "attribution line in the middle dropped",
