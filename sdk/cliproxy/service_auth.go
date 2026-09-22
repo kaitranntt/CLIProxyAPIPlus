@@ -302,6 +302,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		current, ok := s.coreManager.GetByID(auth.ID)
 		if !ok || current.Disabled {
 			GlobalModelRegistry().UnregisterClient(auth.ID)
+			helps.DeleteCursorRoutingModels(auth.ID)
 			return nil
 		}
 		auth = current
