@@ -1218,3 +1218,131 @@ func TestQoderModelListEntriesMergesWrappedEnterpriseScene(t *testing.T) {
 		t.Fatalf("entry count = %d, want 2", got)
 	}
 }
+
+// TestValidateQoderModel_StripsThinkingSuffix verifies that a thinking suffix
+// on the model name does not prevent the model key from resolving. Without the
+// strip, "qoder/ultimate(max)" fails with "unsupported qoder model".
+func TestValidateQoderModel_StripsThinkingSuffix(t *testing.T) {
+	storage := &qoder.QoderTokenStorage{}
+	storage.SetModelConfigs(map[string]json.RawMessage{
+		"ultimate": json.RawMessage(`{"key":"ultimate","is_reasoning":true}`),
+	})
+
+	cases := []struct {
+		name  string
+		model string
+	}{
+		{name: "plain", model: "qoder/ultimate"},
+		{name: "level suffix", model: "qoder/ultimate(max)"},
+		{name: "budget suffix", model: "qoder/ultimate(16384)"},
+		{name: "no provider prefix", model: "ultimate(low)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved, err := validateQoderModel(tc.model, storage)
+			if err != nil {
+				t.Fatalf("validateQoderModel(%q) returned error: %v", tc.model, err)
+			}
+			if resolved != "ultimate" {
+				t.Fatalf("validateQoderModel(%q) = %q, want %q", tc.model, resolved, "ultimate")
+			}
+		})
+	}
+}
+
+// TestResolveQoderEffort covers the reconciliation between the canonical
+// reasoning_effort and the effort levels a model publishes.
+func TestResolveQoderEffort(t *testing.T) {
+	// Mirrors qoder/qmodel_38max, which offers low, medium and xhigh.
+	sparse := map[string]interface{}{
+		"thinking_config": map[string]interface{}{
+			"enabled": map[string]interface{}{
+				"efforts": map[string]interface{}{
+					"low":    map[string]interface{}{},
+					"medium": map[string]interface{}{},
+					"xhigh":  map[string]interface{}{},
+				},
+			},
+		},
+	}
+	// Mirrors qoder/efficient, which does not reason at all.
+	plain := map[string]interface{}{"is_reasoning": false}
+
+	cases := []struct {
+		name         string
+		request      map[string]interface{}
+		modelConfig  map[string]interface{}
+		wantEffort   string
+		wantDisabled bool
+	}{
+		{
+			name:        "absent stays absent",
+			request:     map[string]interface{}{},
+			modelConfig: sparse,
+		},
+		{
+			name:        "published level passes through",
+			request:     map[string]interface{}{"reasoning_effort": "medium"},
+			modelConfig: sparse,
+			wantEffort:  "medium",
+		},
+		{
+			name:        "unpublished level rounds up",
+			request:     map[string]interface{}{"reasoning_effort": "high"},
+			modelConfig: sparse,
+			wantEffort:  "xhigh",
+		},
+		{
+			name:        "above the published range falls back to the top",
+			request:     map[string]interface{}{"reasoning_effort": "max"},
+			modelConfig: sparse,
+			wantEffort:  "xhigh",
+		},
+		{
+			name:         "none disables thinking",
+			request:      map[string]interface{}{"reasoning_effort": "none"},
+			modelConfig:  sparse,
+			wantDisabled: true,
+		},
+		{
+			name:        "model without effort list is left alone",
+			request:     map[string]interface{}{"reasoning_effort": "high"},
+			modelConfig: plain,
+		},
+		{
+			name:        "case and padding are normalized",
+			request:     map[string]interface{}{"reasoning_effort": "  HIGH "},
+			modelConfig: sparse,
+			wantEffort:  "xhigh",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			effort, disabled := resolveQoderEffort(tc.request, tc.modelConfig)
+			if effort != tc.wantEffort {
+				t.Fatalf("effort = %q, want %q", effort, tc.wantEffort)
+			}
+			if disabled != tc.wantDisabled {
+				t.Fatalf("disabled = %t, want %t", disabled, tc.wantDisabled)
+			}
+		})
+	}
+}
+
+// TestQoderParameters verifies that the effort only appears when one was
+// resolved, so requests without a selection keep the previous wire shape.
+func TestQoderParameters(t *testing.T) {
+	withoutEffort := qoderParameters(4096, "")
+	if _, present := withoutEffort["reasoning_effort"]; present {
+		t.Fatal("reasoning_effort must be omitted when no effort was resolved")
+	}
+	if withoutEffort["max_tokens"] != 4096 {
+		t.Fatalf("max_tokens = %v, want 4096", withoutEffort["max_tokens"])
+	}
+
+	withEffort := qoderParameters(4096, "max")
+	if withEffort["reasoning_effort"] != "max" {
+		t.Fatalf("reasoning_effort = %v, want %q", withEffort["reasoning_effort"], "max")
+	}
+}

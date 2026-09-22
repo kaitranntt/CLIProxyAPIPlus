@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -70,6 +71,15 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatOpenAI, req.Model, payload, false)
 	}
 
+	// Resolve the canonical thinking configuration (model suffix, reasoning_effort
+	// or thinking budget) before the payload is parsed. The qoder applier writes
+	// the level back as a top-level reasoning_effort field, which is moved into
+	// parameters.reasoning_effort below — the slot the Qoder chat API reads.
+	payload, errThinking := thinking.ApplyThinking(payload, req.Model, sdktranslator.FormatOpenAI.String(), "qoder", e.Identifier())
+	if errThinking != nil {
+		return nil, errThinking
+	}
+
 	// Parse request to get model and messages
 	var chatReq map[string]interface{}
 	if err := json.Unmarshal(payload, &chatReq); err != nil {
@@ -105,6 +115,21 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	}
 
 	isReasoning, _ := modelConfig["is_reasoning"].(bool)
+
+	// Qoder exposes the effort levels a model accepts in
+	// thinking_config.enabled.efforts and carries the selected one in
+	// parameters.reasoning_effort. Reconcile the canonical value with that list
+	// so a level the model does not publish rounds up to the next one it does.
+	effort, thinkingDisabled := resolveQoderEffort(chatReq, modelConfig)
+	switch {
+	case thinkingDisabled:
+		isReasoning = false
+	case effort != "":
+		isReasoning = true
+	}
+	if effort != "" || thinkingDisabled {
+		log.Debugf("qoder: reasoning effort resolved — model=%s effort=%q disabled=%t", qoderModel, effort, thinkingDisabled)
+	}
 	maxOutputTokens, _ := modelConfig["max_output_tokens"].(float64)
 
 	// Last user message text — used by Qoder for the chat_context "current
@@ -155,7 +180,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 		"system":           systemText,
 		"messages":         normalized,
 		"tools":            []interface{}{},
-		"parameters":       map[string]interface{}{"max_tokens": maxTokens},
+		"parameters":       qoderParameters(maxTokens, effort),
 		"chat_context": map[string]interface{}{
 			"chatPrompt": "",
 			"imageUrls":  nil,
@@ -1251,8 +1276,105 @@ func FetchQoderUsage(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 	return &info
 }
 
+// qoderEffortOrder lists Qoder effort levels from lowest to highest, following
+// the canonical order used by the thinking pipeline.
+var qoderEffortOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+// qoderParameters builds the request "parameters" object. Qoder reads the
+// selected reasoning level from parameters.reasoning_effort; omitting the field
+// leaves the model on its own server-side default.
+func qoderParameters(maxTokens int, effort string) map[string]interface{} {
+	params := map[string]interface{}{"max_tokens": maxTokens}
+	if effort != "" {
+		params["reasoning_effort"] = effort
+	}
+	return params
+}
+
+// resolveQoderEffort maps the canonical reasoning_effort carried on the request
+// onto an effort level the model actually publishes.
+//
+// It returns the level to send and whether thinking was explicitly disabled.
+// An empty level with disabled=false means "say nothing and let Qoder pick".
+func resolveQoderEffort(chatReq map[string]interface{}, modelConfig map[string]interface{}) (string, bool) {
+	requested, _ := chatReq["reasoning_effort"].(string)
+	requested = strings.ToLower(strings.TrimSpace(requested))
+	if requested == "" {
+		return "", false
+	}
+	if requested == "none" {
+		return "", true
+	}
+	levels := qoderModelEfforts(modelConfig)
+	if len(levels) == 0 {
+		// The model publishes no effort list: either it does not reason at all
+		// or the catalogue entry predates thinking_config. Either way there is
+		// nothing to reconcile against, so stay out of the way.
+		return "", false
+	}
+	for _, level := range levels {
+		if level == requested {
+			return requested, false
+		}
+	}
+	return nearestQoderEffort(requested, levels), false
+}
+
+// qoderModelEfforts returns the effort levels published for a model in
+// thinking_config.enabled.efforts, lowest first.
+func qoderModelEfforts(modelConfig map[string]interface{}) []string {
+	thinkingConfig, ok := modelConfig["thinking_config"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	enabled, ok := thinkingConfig["enabled"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	efforts, ok := enabled["efforts"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	available := make([]string, 0, len(efforts))
+	for _, level := range qoderEffortOrder {
+		if _, present := efforts[level]; present {
+			available = append(available, level)
+		}
+	}
+	return available
+}
+
+// nearestQoderEffort picks the closest published level above the requested one,
+// falling back to the closest one below when the request already sits at or
+// above the top of the published range. Rounding up keeps an explicit request
+// from silently buying less reasoning than the caller asked for.
+func nearestQoderEffort(requested string, levels []string) string {
+	pos := qoderEffortIndex(requested)
+	if pos == -1 || len(levels) == 0 {
+		return requested
+	}
+	for _, level := range levels {
+		if qoderEffortIndex(level) > pos {
+			return level
+		}
+	}
+	return levels[len(levels)-1]
+}
+
+// qoderEffortIndex returns the canonical rank of a level, or -1 when unknown.
+func qoderEffortIndex(level string) int {
+	for i, candidate := range qoderEffortOrder {
+		if candidate == level {
+			return i
+		}
+	}
+	return -1
+}
+
 func validateQoderModel(rawModel string, storage *qoderauth.QoderTokenStorage) (string, error) {
-	qoderModel := strings.TrimPrefix(rawModel, "qoder/")
+	// A thinking suffix ("qoder/ultimate(max)") is consumed by the thinking
+	// pipeline; the model key itself never carries it.
+	qoderModel := strings.TrimPrefix(thinking.ParseSuffix(rawModel).ModelName, "qoder/")
 	if mapped, ok := qoderauth.ModelMap[qoderModel]; ok {
 		return mapped, nil
 	}
