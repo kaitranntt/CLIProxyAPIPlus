@@ -158,3 +158,54 @@ func TestRegisterModelsForAuth_CursorRefreshPublishesFilteredCatalogs(t *testing
 		})
 	}
 }
+
+func TestService_CursorAuthDisableAndRemovalClearsRoutingCatalog(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:         t.Name(),
+		Provider:   "cursor",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	reg := registry.GetGlobalRegistry()
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+		helps.DeleteCursorRoutingModels(auth.ID)
+	})
+
+	originalFetch := fetchCursorModelsForRegistration
+	t.Cleanup(func() { fetchCursorModelsForRegistration = originalFetch })
+	fetchCursorModelsForRegistration = func(context.Context, *coreauth.Auth, *config.Config) []*ModelInfo {
+		return []*ModelInfo{{ID: "claude-fable-5-1", Type: "cursor"}}
+	}
+
+	fallback := []*registry.ModelInfo{{ID: "unfiltered-fallback"}}
+
+	// 1. Initial active registration: stores routing models
+	service.registerModelsForAuth(context.Background(), auth)
+	if got := helps.CursorRoutingModels(auth.ID, fallback); len(got) != 1 || got[0].ID != "claude-fable-5-1" {
+		t.Fatalf("expected registered model, got: %#v", got)
+	}
+
+	// 2. Disabling auth in service clears routing cache and restores fallback
+	auth.Disabled = true
+	service.registerModelsForAuth(context.Background(), auth)
+	if got := helps.CursorRoutingModels(auth.ID, fallback); len(got) != 1 || got[0].ID != "unfiltered-fallback" {
+		t.Fatalf("disabled auth retained routing cache, got: %#v", got)
+	}
+
+	// 3. Re-enable: restores routing models
+	auth.Disabled = false
+	service.registerModelsForAuth(context.Background(), auth)
+	if got := helps.CursorRoutingModels(auth.ID, fallback); len(got) != 1 || got[0].ID != "claude-fable-5-1" {
+		t.Fatalf("re-enabled auth failed to store routing models: %#v", got)
+	}
+
+	// 4. Auth removal via applyCoreAuthRemoval cleans routing cache and restores fallback
+	service.coreManager = coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	_, _ = service.coreManager.Register(context.Background(), auth)
+	service.applyCoreAuthRemoval(context.Background(), auth.ID)
+	if got := helps.CursorRoutingModels(auth.ID, fallback); len(got) != 1 || got[0].ID != "unfiltered-fallback" {
+		t.Fatalf("removed auth retained routing cache, got: %#v", got)
+	}
+}
