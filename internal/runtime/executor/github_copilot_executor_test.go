@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,8 +14,10 @@ import (
 	copilotauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	usagestats "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -313,8 +317,6 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
 	}
 }
 
-// --- Tests for X-Initiator detection logic (Problem L) ---
-
 func TestApplyHeaders_XInitiator_UserOnly(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
@@ -330,9 +332,6 @@ func TestApplyHeaders_XInitiator_AgentWhenLastUserButHistoryHasAssistant(t *test
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	// When the last role is "user" and the message contains tool_result content,
-	// the request is a continuation (e.g. Claude tool result translated to a
-	// synthetic user message). Should be "agent".
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"file contents..."}]}]}`)
 	e.applyHeaders(req, "token", body)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
@@ -344,7 +343,6 @@ func TestApplyHeaders_XInitiator_AgentWithToolRole(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	// When the last message has role "tool", it's clearly agent-initiated.
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"tool","content":"result"}]}`)
 	e.applyHeaders(req, "token", body)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
@@ -367,7 +365,6 @@ func TestApplyHeaders_XInitiator_InputArrayAgentWhenLastUserButHistoryHasAssista
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	// Responses API: last item is user-role but history contains assistant → agent.
 	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I can help"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Do X"}]}]}`)
 	e.applyHeaders(req, "token", body)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
@@ -390,8 +387,6 @@ func TestApplyHeaders_XInitiator_UserInMultiTurnNoTools(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	// Genuine multi-turn: user → assistant (plain text) → user follow-up.
-	// No tool messages → should be "user" (not a false-positive).
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
 	e.applyHeaders(req, "token", body)
 	if got := req.Header.Get("X-Initiator"); got != "user" {
@@ -403,17 +398,12 @@ func TestApplyHeaders_XInitiator_UserFollowUpAfterToolHistory(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	// User follow-up after a completed tool-use conversation.
-	// The last message is a genuine user question — should be "user", not "agent".
-	// This aligns with opencode's behavior: only active tool loops are agent-initiated.
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]},{"role":"tool","tool_call_id":"tu1","content":"file data"},{"role":"assistant","content":"I read the file."},{"role":"user","content":"What did we do so far?"}]}`)
 	e.applyHeaders(req, "token", body)
 	if got := req.Header.Get("X-Initiator"); got != "user" {
 		t.Fatalf("X-Initiator = %q, want user (genuine follow-up after tool history)", got)
 	}
 }
-
-// --- Tests for x-github-api-version header (Problem M) ---
 
 func TestApplyHeaders_GitHubAPIVersion(t *testing.T) {
 	t.Parallel()
@@ -424,8 +414,6 @@ func TestApplyHeaders_GitHubAPIVersion(t *testing.T) {
 		t.Fatalf("X-Github-Api-Version = %q, want 2025-04-01", got)
 	}
 }
-
-// --- Tests for vision detection (Problem P) ---
 
 func TestDetectVisionContent_WithImageURL(t *testing.T) {
 	t.Parallel()
@@ -453,14 +441,11 @@ func TestDetectVisionContent_NoVision(t *testing.T) {
 
 func TestDetectVisionContent_NoMessages(t *testing.T) {
 	t.Parallel()
-	// After Responses API normalization, messages is removed — detection should return false
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	if detectVisionContent(body) {
 		t.Fatal("expected no vision content when messages field is absent")
 	}
 }
-
-// --- Tests for applyGitHubCopilotResponsesDefaults ---
 
 func TestApplyGitHubCopilotResponsesDefaults_SetsAllDefaults(t *testing.T) {
 	t.Parallel()
@@ -503,13 +488,10 @@ func TestApplyGitHubCopilotResponsesDefaults_NoReasoningEffort(t *testing.T) {
 	if gjson.GetBytes(got, "store").Bool() != false {
 		t.Fatalf("store = %v, want false", gjson.GetBytes(got, "store").Raw)
 	}
-	// reasoning.summary should NOT be set when reasoning.effort is absent
 	if gjson.GetBytes(got, "reasoning.summary").Exists() {
 		t.Fatalf("reasoning.summary should not be set when reasoning.effort is absent, got %q", gjson.GetBytes(got, "reasoning.summary").String())
 	}
 }
-
-// --- Tests for normalizeGitHubCopilotReasoningField ---
 
 func TestNormalizeReasoningField_NonStreaming(t *testing.T) {
 	t.Parallel()
@@ -574,8 +556,6 @@ func TestApplyHeaders_OpenAIIntentValue(t *testing.T) {
 	}
 }
 
-// --- Tests for CountTokens (local tiktoken estimation) ---
-
 func TestCountTokens_ReturnsPositiveCount(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
@@ -592,7 +572,6 @@ func TestCountTokens_ReturnsPositiveCount(t *testing.T) {
 	if len(resp.Payload) == 0 {
 		t.Fatal("CountTokens() returned empty payload")
 	}
-	// The response should contain a positive token count.
 	tokens := gjson.GetBytes(resp.Payload, "usage.prompt_tokens").Int()
 	if tokens <= 0 {
 		t.Fatalf("expected positive token count, got %d", tokens)
@@ -612,7 +591,6 @@ func TestCountTokens_ClaudeSourceFormatTranslates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountTokens() error: %v", err)
 	}
-	// Claude source format → should get input_tokens in response
 	inputTokens := gjson.GetBytes(resp.Payload, "input_tokens").Int()
 	if inputTokens <= 0 {
 		// Fallback: check usage.prompt_tokens (depends on translator registration)
@@ -774,7 +752,6 @@ func TestCountTokens_EmptyPayload(t *testing.T) {
 		t.Fatalf("CountTokens() error: %v", err)
 	}
 	tokens := gjson.GetBytes(resp.Payload, "usage.prompt_tokens").Int()
-	// Empty messages should return 0 tokens.
 	if tokens != 0 {
 		t.Fatalf("expected 0 tokens for empty messages, got %d", tokens)
 	}
@@ -795,7 +772,6 @@ func TestStripUnsupportedBetas_RemovesContext1M(t *testing.T) {
 			t.Fatal("context-1m-2025-08-07 should have been stripped")
 		}
 	}
-	// Other betas should be preserved
 	found := false
 	for _, item := range betas.Array() {
 		if item.String() == "interleaved-thinking-2025-05-14" {
@@ -813,7 +789,6 @@ func TestStripUnsupportedBetas_NoBetasField(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[]}`)
 	result := stripUnsupportedBetas(body)
 
-	// Should be unchanged
 	if string(result) != string(body) {
 		t.Fatalf("body should be unchanged when no betas field exists, got %s", string(result))
 	}
@@ -954,6 +929,181 @@ func TestCopilotModelEntry_Limits(t *testing.T) {
 			}
 			if tt.wantContext > 0 && limits.MaxContextWindowTokens != tt.wantContext {
 				t.Errorf("MaxContextWindowTokens = %d, want %d", limits.MaxContextWindowTokens, tt.wantContext)
+			}
+		})
+	}
+}
+
+func TestGitHubCopilotResponsesStreamPreservesSSEFraming(t *testing.T) {
+	wire := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"text\":{\"format\":{\"type\":\"text\"}},\"output\":[]}}\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, wire)
+	}))
+	defer server.Close()
+	e := NewGitHubCopilotExecutor(&config.Config{})
+	e.cache["test-token"] = &cachedAPIToken{token: "test-api-token", apiEndpoint: server.URL, expiresAt: time.Now().Add(time.Hour)}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "test-token"}}
+	payload := []byte(`{"model":"gpt-5.6-luna","input":[{"role":"user","content":"Hello"}],"stream":true}`)
+	result, err := e.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "gpt-5.6-luna", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), OriginalRequest: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var joined strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+		joined.Write(chunk.Payload)
+	}
+	if joined.String() != wire {
+		t.Fatalf("SSE framing changed: got %q, want %q", joined.String(), wire)
+	}
+}
+
+type copilotUsageCaptureKey struct{}
+type copilotUsageCapturePlugin struct{}
+
+func (copilotUsageCapturePlugin) HandleUsage(ctx context.Context, record usage.Record) {
+	if records, ok := ctx.Value(copilotUsageCaptureKey{}).(chan usage.Record); ok {
+		records <- record
+	}
+}
+
+func TestGitHubCopilotResponsesStreamAccounting(t *testing.T) {
+	// The named plugin retains no test state; capture is scoped to each request context.
+	usage.RegisterNamedPlugin("test:copilot-responses-accounting", copilotUsageCapturePlugin{})
+	const tokenUsage = `{"input_tokens":9,"output_tokens":5,"total_tokens":14,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}`
+	const delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n"
+	completed := func(usageJSON string) string {
+		return `{"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[],"usage":` + usageJSON + `}}`
+	}
+	for _, tc := range []struct {
+		name         string
+		event        string
+		prefix       string
+		source       string
+		model        string
+		truncated    bool
+		wantFailure  bool
+		wantReadErr  bool
+		wantTokens   int64
+		wantTerminal string
+	}{
+		{name: "nested usage", event: completed(tokenUsage), wantTokens: 14},
+		{name: "completion before transport error", event: completed(tokenUsage), truncated: true, wantTokens: 14},
+		{name: "completion without usage", event: completed("null")},
+		{name: "completion without usage before transport error", event: completed("null"), truncated: true},
+		{name: "early service tier does not publish", prefix: "data: {\"type\":\"response.created\",\"response\":{\"service_tier\":\"default\",\"usage\":null}}\n\n", event: completed(tokenUsage), wantTokens: 14},
+		{name: "early null usage does not publish", prefix: "data: {\"type\":\"response.created\",\"usage\":null}\n\n", event: completed(tokenUsage), wantTokens: 14},
+		{name: "preterminal transport error", truncated: true, wantFailure: true, wantReadErr: true},
+		{name: "metadata before transport error", prefix: "data: {\"type\":\"response.created\",\"service_tier\":\"default\",\"usage\":null}\n\n", truncated: true, wantFailure: true, wantReadErr: true},
+		{name: "explicit failure", event: `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"Failed"}}}`, wantFailure: true},
+		{name: "error event", event: `{"type":"error","error":{"type":"server_error","message":"Failed"}}`, wantFailure: true},
+		{name: "incomplete is successful", event: `{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":` + tokenUsage + `}}`, truncated: true, wantTokens: 14},
+		{name: "Claude terminal conversion", source: "claude", event: completed(tokenUsage), truncated: true, wantTokens: 14, wantTerminal: "event: message_stop\n"},
+		{name: "Chat usage control", source: "openai", model: "gpt-4o", event: `{"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}],"usage":` + tokenUsage + `}`, truncated: true, wantReadErr: true, wantTokens: 14},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := tc.prefix + delta
+			if tc.event != "" {
+				wire += "event: " + gjson.Get(tc.event, "type").String() + "\ndata: " + tc.event + "\n\n"
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				wantPath := "/responses"
+				if tc.model == "gpt-4o" {
+					wantPath = "/chat/completions"
+				}
+				if r.URL.Path != wantPath {
+					t.Errorf("path = %q, want %q", r.URL.Path, wantPath)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if tc.truncated {
+					w.Header().Set("Content-Length", fmt.Sprint(len(wire)+100))
+				}
+				_, _ = io.WriteString(w, wire)
+			}))
+			defer server.Close()
+			e := NewGitHubCopilotExecutor(&config.Config{})
+			e.cache["test-token"] = &cachedAPIToken{token: "test-api-token", apiEndpoint: server.URL, expiresAt: time.Now().Add(time.Hour)}
+			auth := &cliproxyauth.Auth{ID: t.Name(), Metadata: map[string]any{"access_token": "test-token"}}
+			records := make(chan usage.Record, 16)
+			ctx := context.WithValue(context.Background(), copilotUsageCaptureKey{}, records)
+			source := tc.source
+			if source == "" {
+				source = "openai-response"
+			}
+			model := tc.model
+			if model == "" {
+				model = "gpt-5-codex"
+			}
+			payload := []byte(fmt.Sprintf(`{"model":%q,"input":"Hello","messages":[{"role":"user","content":"Hello"}],"stream":true}`, model))
+			result, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString(source), OriginalRequest: payload,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var joined strings.Builder
+			var streamErr error
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+				joined.Write(chunk.Payload)
+			}
+			if tc.wantReadErr {
+				if !errors.Is(streamErr, io.ErrUnexpectedEOF) {
+					t.Errorf("stream error = %v, want unexpected EOF", streamErr)
+				}
+			} else if streamErr != nil {
+				t.Errorf("stream error = %v, want nil", streamErr)
+			}
+			if source == "openai-response" && joined.String() != wire {
+				t.Errorf("SSE framing changed: got %q, want %q", joined.String(), wire)
+			}
+			if tc.wantTerminal != "" && !strings.Contains(joined.String(), tc.wantTerminal) {
+				t.Errorf("terminal %q missing from %q", tc.wantTerminal, joined.String())
+			}
+
+			// A queue barrier verifies all records, including duplicates, without sleeping.
+			usage.PublishRecord(ctx, usage.Record{Model: "accounting-barrier"})
+			stats := usagestats.NewRequestStatistics()
+			var captured []usage.Record
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+		drain:
+			for {
+				select {
+				case record := <-records:
+					if record.Model == "accounting-barrier" {
+						break drain
+					}
+					captured = append(captured, record)
+					stats.Record(ctx, record)
+				case <-timer.C:
+					t.Fatal("timed out waiting for usage queue barrier")
+				}
+			}
+			if len(captured) != 1 {
+				t.Fatalf("usage records = %d, want exactly one", len(captured))
+			}
+			record := captured[0]
+			if record.Failed != tc.wantFailure || record.Detail.TotalTokens != tc.wantTokens {
+				t.Errorf("usage = %+v, want failed=%v total=%d", record, tc.wantFailure, tc.wantTokens)
+			}
+			if tc.wantTokens != 0 && (record.Detail.InputTokens != 9 || record.Detail.OutputTokens != 5 || record.Detail.CachedTokens != 3 || record.Detail.ReasoningTokens != 2) {
+				t.Errorf("token breakdown = %+v, want input=9 output=5 cached=3 reasoning=2", record.Detail)
+			}
+			snapshot := stats.Snapshot()
+			wantFailures := int64(0)
+			if tc.wantFailure {
+				wantFailures = 1
+			}
+			if snapshot.TotalRequests != 1 || snapshot.FailureCount != wantFailures || snapshot.SuccessCount != 1-wantFailures || snapshot.TotalTokens != tc.wantTokens {
+				t.Errorf("management counts = %+v, want requests=1 failures=%d total=%d", snapshot, wantFailures, tc.wantTokens)
 			}
 		})
 	}
