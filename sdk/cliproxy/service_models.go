@@ -35,6 +35,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 	if a.Disabled {
 		GlobalModelRegistry().UnregisterClient(a.ID)
+		helps.DeleteCursorRoutingModels(a.ID)
 		return
 	}
 	authKind := a.AuthKind()
@@ -342,6 +343,7 @@ func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
 	if !ok || latest.Disabled {
 		GlobalModelRegistry().UnregisterClient(current.ID)
+		helps.DeleteCursorRoutingModels(current.ID)
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false
 	}

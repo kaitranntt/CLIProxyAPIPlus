@@ -201,3 +201,41 @@ func TestAddCursorModelFamiliesThinkingOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestCursorRoutingModels_NilAndEmptySliceSemantics(t *testing.T) {
+	authID := t.Name()
+	t.Cleanup(func() { DeleteCursorRoutingModels(authID) })
+
+	fallback := []*registry.ModelInfo{{ID: "fallback-model"}}
+	active := []*registry.ModelInfo{{ID: "active-model"}}
+	empty := []*registry.ModelInfo{}
+
+	// 1. Initial state: absent key returns fallback
+	if got := CursorRoutingModels(authID, fallback); len(got) != 1 || got[0].ID != "fallback-model" {
+		t.Fatalf("expected fallback model, got: %#v", got)
+	}
+
+	// 2. Store active models: returns active
+	StoreCursorRoutingModels(authID, active)
+	if got := CursorRoutingModels(authID, fallback); len(got) != 1 || got[0].ID != "active-model" {
+		t.Fatalf("expected active model, got: %#v", got)
+	}
+
+	// 3. Storing nil normalizes to authoritative empty catalog (does NOT fall back to unfiltered models)
+	StoreCursorRoutingModels(authID, nil)
+	if got := CursorRoutingModels(authID, fallback); len(got) != 0 {
+		t.Fatalf("expected authoritative empty slice after Store(nil), got: %#v", got)
+	}
+
+	// 4. Storing non-nil empty slice is also authoritative (does NOT fall back)
+	StoreCursorRoutingModels(authID, empty)
+	if got := CursorRoutingModels(authID, fallback); len(got) != 0 {
+		t.Fatalf("expected authoritative empty slice after Store(empty), got: %#v", got)
+	}
+
+	// 5. DeleteCursorRoutingModels clears key and restores fallback
+	DeleteCursorRoutingModels(authID)
+	if got := CursorRoutingModels(authID, fallback); len(got) != 1 || got[0].ID != "fallback-model" {
+		t.Fatalf("expected fallback after Delete, got: %#v", got)
+	}
+}
