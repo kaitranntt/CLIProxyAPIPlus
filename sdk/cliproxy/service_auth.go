@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/wsrelay"
@@ -345,6 +346,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		provider = strings.TrimSpace(existing.Provider)
 	}
 	GlobalModelRegistry().UnregisterClient(id)
+	helps.DeleteCursorRoutingModels(id)
 	s.coreManager.Remove(ctx, id)
 	if strings.EqualFold(provider, "codex") {
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "auth_removed")

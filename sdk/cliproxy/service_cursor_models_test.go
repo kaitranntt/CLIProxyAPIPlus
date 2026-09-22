@@ -24,7 +24,7 @@ func TestRegisterModelsForAuth_CursorCanceledRefreshPreservesCatalogs(t *testing
 			reg := registry.GetGlobalRegistry()
 			t.Cleanup(func() {
 				reg.UnregisterClient(auth.ID)
-				helps.StoreCursorRoutingModels(auth.ID, nil)
+				helps.DeleteCursorRoutingModels(auth.ID)
 			})
 
 			originalFetch := fetchCursorModelsForRegistration
@@ -84,7 +84,7 @@ func TestRegisterModelsForAuth_CursorRefreshPublishesFilteredCatalogs(t *testing
 	reg := registry.GetGlobalRegistry()
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth.ID)
-		helps.StoreCursorRoutingModels(auth.ID, nil)
+		helps.DeleteCursorRoutingModels(auth.ID)
 	})
 
 	originalFetch := fetchCursorModelsForRegistration
