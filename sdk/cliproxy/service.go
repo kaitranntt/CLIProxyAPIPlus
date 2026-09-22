@@ -38,6 +38,10 @@ type Service struct {
 	// configRuntimeMu orders side-effecting runtime application after config commits.
 	configRuntimeMu        sync.Mutex
 	executorRegistrationMu sync.Mutex
+	authUpdateMu           sync.Mutex
+	authRevisions          map[string]uint64
+	authRegWaitMu          sync.Mutex
+	authRegWaiters         map[string]chan struct{}
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
@@ -64,6 +68,9 @@ type Service struct {
 
 	// pprofServer manages the optional pprof HTTP debug server.
 	pprofServer *pprofServer
+
+	// discoveryManager manages local network mDNS / DNS-SD service advertising.
+	discoveryManager *discoveryAdvertiserManager
 
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error
@@ -125,6 +132,7 @@ type Service struct {
 	homePluginSyncFetch          func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
 	kiroModelsCache              kiroModelsCache
+	antigravityProbeWg           sync.WaitGroup
 }
 
 // GetWatcher returns the active watcher for integrations that need to trigger
@@ -134,4 +142,20 @@ func (s *Service) GetWatcher() *WatcherWrapper {
 		return nil
 	}
 	return s.watcher
+}
+
+// SetResultPolicy sets an execution result policy on the underlying core auth manager.
+func (s *Service) SetResultPolicy(policy coreauth.ResultPolicy) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	s.coreManager.SetResultPolicy(policy)
+}
+
+// ResultPolicy returns the execution result policy configured on the core auth manager.
+func (s *Service) ResultPolicy() coreauth.ResultPolicy {
+	if s == nil || s.coreManager == nil {
+		return nil
+	}
+	return s.coreManager.ResultPolicy()
 }

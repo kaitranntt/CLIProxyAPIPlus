@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -94,48 +95,54 @@ func TestCodexExecutorExecute_NonStreamGPT56LunaIsNotClassifiedAsEmptyCompletion
 }
 
 func TestCodexExecutorExecuteStreamPreservesSSEEventLineBoundaries(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "event: response.created\n")
-		_, _ = io.WriteString(w, `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`+"\n\n")
-		_, _ = io.WriteString(w, "event: response.output_text.delta\n")
-		_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"OK"}`+"\n\n")
-		_, _ = io.WriteString(w, "event: response.completed\n")
-		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],"usage":{"output_tokens":5}}}`+"\n\n")
-	}))
-	defer server.Close()
+	for _, buffering := range []bool{false, true} {
+		t.Run(fmt.Sprintf("buffering=%t", buffering), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: response.created\n")
+				_, _ = io.WriteString(w, `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`+"\n\n")
+				_, _ = io.WriteString(w, "event: response.output_text.delta\n")
+				_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"OK"}`+"\n\n")
+				_, _ = io.WriteString(w, "event: response.completed\n")
+				_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],"usage":{"output_tokens":5}}}`+"\n\n")
+			}))
+			defer server.Close()
 
-	executor := NewCodexExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": server.URL,
-		"api_key":  "test",
-	}}
-	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gpt-6-astra",
-		Payload: []byte(`{"model":"gpt-6-astra","input":"Reply with exactly OK.","stream":true}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatOpenAIResponse,
-		Stream:       true,
-	})
-	if err != nil {
-		t.Fatalf("ExecuteStream error: %v", err)
-	}
+			cfg := &config.Config{}
+			cfg.Codex.StreamBootstrapBuffering = buffering
+			executor := NewCodexExecutor(cfg)
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": server.URL,
+				"api_key":  "test",
+			}}
+			stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "gpt-6-astra",
+				Payload: []byte(`{"model":"gpt-6-astra","input":"Reply with exactly OK.","stream":true}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Stream:       true,
+			})
+			if err != nil {
+				t.Fatalf("ExecuteStream error: %v", err)
+			}
 
-	var detector cliproxyauth.StreamBootstrapDetector
-	forwarded := false
-	for chunk := range stream.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("stream chunk error: %v", chunk.Err)
-		}
-		if detector.Observe(chunk.Payload) {
-			forwarded = true
-		}
-	}
-	if !forwarded {
-		t.Fatal("stream bootstrap never observed the non-empty output_text delta")
-	}
-	if detector.Finish() {
-		t.Fatal("non-empty Responses stream was classified as an empty completion")
+			var detector cliproxyauth.StreamBootstrapDetector
+			forwarded := false
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error: %v", chunk.Err)
+				}
+				if detector.Observe(chunk.Payload) {
+					forwarded = true
+				}
+			}
+			if !forwarded {
+				t.Fatal("stream bootstrap never observed the non-empty output_text delta")
+			}
+			if detector.Finish() {
+				t.Fatal("non-empty Responses stream was classified as an empty completion")
+			}
+		})
 	}
 }
 
@@ -659,6 +666,18 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			name:       "unknown upstream failure",
 			event:      `{"type":"response.failed","response":{"error":{"type":"upstream_error","code":"unknown","message":"Upstream failed."}}}`,
 			wantStatus: http.StatusBadGateway,
+		},
+		// Overload rejections keep falling through to 502 here. The 503 restoration is scoped to
+		// the opt-in bootstrap buffering path so this shared mapping stays unchanged.
+		{
+			name:       "overload stays a bad gateway without buffering",
+			event:      `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "model not found with invalid_request_error type maps to 404",
+			event:      `{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`,
+			wantStatus: http.StatusNotFound,
 		},
 	}
 

@@ -127,6 +127,16 @@ func wrapRouteExhaustion(cause error, tracker *routeAttemptTracker) error {
 	if tracker == nil {
 		return cause
 	}
+	var alreadyWrapped *routeExhaustionClonedError
+	if errors.As(cause, &alreadyWrapped) {
+		return cause
+	}
+	if strings.Contains(cause.Error(), "attempted routes:") {
+		return cause
+	}
+	if isUnauthorizedError(cause) || isRequestInvalidError(cause) || isRequestStopError(cause) || isStructuredJSON(cause.Error()) {
+		return cause
+	}
 	summary := tracker.Summary()
 	if summary == "" {
 		return cause
@@ -170,6 +180,19 @@ func (e *routeExhaustionClonedError) Unwrap() error {
 		return nil
 	}
 	return e.cause
+}
+
+func (e *routeExhaustionClonedError) StatusCode() int {
+	if e == nil || e.cause == nil {
+		return 0
+	}
+	type statusCoder interface {
+		StatusCode() int
+	}
+	if sc, ok := e.cause.(statusCoder); ok {
+		return sc.StatusCode()
+	}
+	return statusCodeFromError(e.cause)
 }
 
 // Headers forwards the wrapped cause's error headers if it exposes them, so

@@ -139,7 +139,7 @@ func TestNoInPlaceSJSONWrites(t *testing.T) {
 // new code rather than a proof of absence.
 var inPlaceByteWritePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bcopy\([a-zA-Z_][A-Za-z0-9_.]*\[`),
-	regexp.MustCompile(`^\s*[a-zA-Z_][A-Za-z0-9_.]*\[[a-zA-Z0-9_]+\] = 0$`),
+	regexp.MustCompile(`^\s*[a-zA-Z_][A-Za-z0-9_.]*\[[a-zA-Z0-9_]+\] = 0\r?$`),
 }
 
 // reviewedInPlaceByteWrites records the reviewed in-place byte writes per file.
@@ -155,7 +155,7 @@ type reviewedInPlaceByteWrite struct {
 var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 	"internal/runtime/executor/claude_signing.go":           {2, "writes CCH digits into bytes.Clone(body); the caller's body is never touched"},
 	"internal/runtime/executor/claude_executor_cloaking.go": {1, "shifts []string headers to prepend a block; no byte of any payload is rewritten"},
-	"internal/runtime/executor/claude_executor_request.go":  {2, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
+	"internal/runtime/executor/claude_executor_request.go":  {3, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
 	"internal/runtime/executor/helps/claude_mcp_alias.go":   {1, "copies an HMAC sum into a local fixed-size digest array"},
 	"internal/client/codex/live/tcp_proxy.go":               {1, "copies header and payload into a freshly allocated frame"},
 	"internal/runtime/executor/devin_protobuf.go":           {1, "copies a protobuf payload into a freshly allocated Connect frame"},
@@ -172,7 +172,8 @@ func TestInPlaceByteWritesAreReviewed(t *testing.T) {
 	root := repoRoot(t)
 	found := make(map[string][]string)
 	forEachSourceFile(t, root, func(rel string, data []byte) {
-		for _, line := range strings.Split(string(data), "\n") {
+		normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+		for _, line := range strings.Split(normalized, "\n") {
 			for _, pattern := range inPlaceByteWritePatterns {
 				if pattern.MatchString(line) {
 					found[rel] = append(found[rel], strings.TrimSpace(line))
@@ -214,5 +215,19 @@ func repoRoot(t *testing.T) string {
 			t.Fatal("go.mod not found above working directory")
 		}
 		dir = parent
+	}
+}
+
+func TestInPlaceByteWritePatterns_CRLF(t *testing.T) {
+	crlfLine := "\traw[index] = 0\r"
+	matched := false
+	for _, pattern := range inPlaceByteWritePatterns {
+		if pattern.MatchString(crlfLine) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("inPlaceByteWritePatterns failed to match CRLF line %q", crlfLine)
 	}
 }

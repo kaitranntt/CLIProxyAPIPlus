@@ -237,11 +237,14 @@ func TestBeginOAuthSessionSaveCoversBuiltinAndPluginProviders(t *testing.T) {
 		"xai",
 		"qoder",
 		"kimi",
+		"kimi-ai",
+		"kimi.ai",
 		"iflow",
 		"github-copilot",
 		"kiro",
 		"kilo",
 		"cursor",
+		"meta",
 	}
 	for _, provider := range providers {
 		state := provider + "-begin-save"

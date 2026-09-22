@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,6 +98,7 @@ type commandModeOptions struct {
 	gitlabLogin        bool
 	gitlabTokenLogin   bool
 	kimiLogin          bool
+	kimiAILogin        bool
 	cursorLogin        bool
 	kiroLogin          bool
 	kiroGoogleLogin    bool
@@ -105,6 +107,8 @@ type commandModeOptions struct {
 	kiroImport         bool
 	kiroIDCLogin       bool
 	xaiLogin           bool
+	devinLogin         bool
+	metaLogin          bool
 	qoderLogin         bool
 }
 
@@ -124,6 +128,7 @@ func isOneShotCommandMode(opts commandModeOptions) bool {
 		opts.gitlabLogin ||
 		opts.gitlabTokenLogin ||
 		opts.kimiLogin ||
+		opts.kimiAILogin ||
 		opts.cursorLogin ||
 		opts.kiroLogin ||
 		opts.kiroGoogleLogin ||
@@ -132,6 +137,8 @@ func isOneShotCommandMode(opts commandModeOptions) bool {
 		opts.kiroImport ||
 		opts.kiroIDCLogin ||
 		opts.xaiLogin ||
+		opts.devinLogin ||
+		opts.metaLogin ||
 		opts.qoderLogin
 }
 
@@ -139,7 +146,37 @@ func isOneShotCommandMode(opts commandModeOptions) bool {
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
-	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	if len(os.Args) > 1 && os.Args[1] == "discover" {
+		discoverFlags := flag.NewFlagSet("discover", flag.ExitOnError)
+		timeoutSec := discoverFlags.Int("timeout", 3, "Discovery timeout in seconds")
+		jsonOut := discoverFlags.Bool("json", false, "Output in JSON format")
+		serviceType := discoverFlags.String("service-type", "", "DNS-SD service type (default _ai-gateway._tcp)")
+		configPathFlag := discoverFlags.String("config", DefaultConfigPath, "Configure File Path")
+		var include, exclude []string
+		discoverFlags.Func("include", "Comma-separated interface names to scan (overrides default physical LAN filter)", appendCSV(&include))
+		discoverFlags.Func("exclude", "Comma-separated interface names to skip", appendCSV(&exclude))
+		_ = discoverFlags.Parse(os.Args[2:])
+		if !*jsonOut {
+			fmt.Fprintf(os.Stderr, "CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+		}
+		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(*configPathFlag)
+		include, exclude = cmd.ResolveDiscoveryInterfaceFilters(include, exclude, cfgInclude, cfgExclude)
+		code := cmd.DoDiscoverWithOptions(cmd.DiscoverOptions{
+			Timeout:     time.Duration(*timeoutSec) * time.Second,
+			JSONOutput:  *jsonOut,
+			ServiceType: *serviceType,
+			Include:     include,
+			Exclude:     exclude,
+		})
+		os.Exit(code)
+	}
+
+	// For legacy --discover-json flag or JSON requests, keep stdout clean
+	isJSONDiscover := argvEnablesBoolFlag(os.Args[1:], "discover-json")
+	isDiscoverMode := isJSONDiscover || argvEnablesBoolFlag(os.Args[1:], "discover")
+	if !isJSONDiscover {
+		fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	}
 
 	// Command-line flags to control the application's behavior.
 	var login bool
@@ -167,9 +204,18 @@ func main() {
 	var kiroIDCFlow string
 	var githubCopilotLogin bool
 	var codeBuddyLogin bool
+	var kimiAILogin bool
 	var xaiLogin bool
+	var devinLogin bool
+	var metaLogin bool
 	var qoderLogin bool
 	var projectID string
+	var discoverGateways bool
+	var discoverTimeout int
+	var discoverJSON bool
+	var discoverServiceType string
+	var discoverInclude []string
+	var discoverExclude []string
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -197,7 +243,8 @@ func main() {
 	flag.BoolVar(&useIncognito, "incognito", false, "Open browser in incognito/private mode for OAuth (useful for multiple accounts)")
 	flag.BoolVar(&noIncognito, "no-incognito", false, "Force disable incognito mode (uses existing browser session)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
-	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi (.com) using OAuth")
+	flag.BoolVar(&kimiAILogin, "kimi-ai-login", false, "Login to Kimi.ai using OAuth")
 	flag.BoolVar(&cursorLogin, "cursor-login", false, "Login to Cursor using OAuth")
 	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using Google OAuth")
 	flag.BoolVar(&kiroGoogleLogin, "kiro-google-login", false, "Login to Kiro using Google OAuth (same as --kiro-login)")
@@ -211,8 +258,16 @@ func main() {
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
+	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
+	flag.BoolVar(&metaLogin, "meta-login", false, "Login to Meta using OAuth")
 	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using Enterprise PAT or OAuth device flow")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
+	flag.BoolVar(&discoverGateways, "discover", false, "Discover local AI gateways and CPA instances on the LAN")
+	flag.IntVar(&discoverTimeout, "discover-timeout", 3, "Timeout in seconds for LAN discovery (default 3s)")
+	flag.BoolVar(&discoverJSON, "discover-json", false, "Output discovered gateways in JSON format")
+	flag.StringVar(&discoverServiceType, "discover-service-type", "", "DNS-SD service type for LAN discovery (default _ai-gateway._tcp)")
+	flag.Func("discover-include", "Comma-separated interface names to scan during LAN discovery", appendCSV(&discoverInclude))
+	flag.Func("discover-exclude", "Comma-separated interface names to skip during LAN discovery", appendCSV(&discoverExclude))
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -251,13 +306,28 @@ func main() {
 	}
 
 	pluginHost := pluginhost.New()
-	if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
-		pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
-		pluginHost.RegisterCommandLineFlags(context.Background(), flag.CommandLine)
+	if !isDiscoverMode {
+		if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
+			pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
+			pluginHost.RegisterCommandLineFlags(context.Background(), flag.CommandLine)
+		}
 	}
 
 	// Parse the command-line flags.
 	flag.Parse()
+
+	if discoverGateways || discoverJSON {
+		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
+		include, exclude := cmd.ResolveDiscoveryInterfaceFilters(discoverInclude, discoverExclude, cfgInclude, cfgExclude)
+		code := cmd.DoDiscoverWithOptions(cmd.DiscoverOptions{
+			Timeout:     time.Duration(discoverTimeout) * time.Second,
+			JSONOutput:  discoverJSON,
+			ServiceType: discoverServiceType,
+			Include:     include,
+			Exclude:     exclude,
+		})
+		os.Exit(code)
+	}
 
 	// Core application variables.
 	var err error
@@ -420,7 +490,7 @@ func main() {
 			parsed = &config.Config{}
 		}
 		parsed.Home = homeCfg
-		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
+		parsed.Port = config.NormalizeHomePort(parsed.Port)
 		parsed.UsageStatisticsEnabled = true
 		pluginSyncCfg := *parsed
 		parsed.Plugins.StoreAuth = nil
@@ -718,6 +788,7 @@ func main() {
 		gitlabLogin:        gitlabLogin,
 		gitlabTokenLogin:   gitlabTokenLogin,
 		kimiLogin:          kimiLogin,
+		kimiAILogin:        kimiAILogin,
 		cursorLogin:        cursorLogin,
 		kiroLogin:          kiroLogin,
 		kiroGoogleLogin:    kiroGoogleLogin,
@@ -726,6 +797,8 @@ func main() {
 		kiroImport:         kiroImport,
 		kiroIDCLogin:       kiroIDCLogin,
 		xaiLogin:           xaiLogin,
+		devinLogin:         devinLogin,
+		metaLogin:          metaLogin,
 		qoderLogin:         qoderLogin,
 	})
 	cloudConfigMissing := isCloudDeploy && !configFileExists
@@ -818,6 +891,8 @@ func main() {
 		cmd.DoGitLabTokenLogin(cfg, options)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
+	} else if kimiAILogin {
+		cmd.DoKimiAILogin(cfg, options)
 	} else if cursorLogin {
 		cmd.DoCursorLogin(cfg, options)
 	} else if kiroLogin {
@@ -836,6 +911,7 @@ func main() {
 		// For Kiro auth, default to incognito mode for multi-account support
 		// Users can explicitly override with --no-incognito
 		// Note: This config mutation is safe - auth commands exit after completion
+		// and don't share config with StartService (which is in the else branch)
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		kiro.InitRateLimiterConfig(cfg)
@@ -880,6 +956,10 @@ func main() {
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
+	} else if devinLogin {
+		cmd.DoDevinLogin(cfg, options)
+	} else if metaLogin {
+		cmd.DoMetaLogin(cfg, options)
 	} else if qoderLogin {
 		cmd.DoQoderLogin(cfg, options)
 	} else {
@@ -987,19 +1067,22 @@ func main() {
 }
 
 // modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
-// Codex client templates still refresh under Home mode because the model list
-// comes from Home IDs while template metadata stays edge-local.
-func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+// Codex client and Devin catalogs still refresh under Home mode because
+// template metadata and Devin models stay edge-local.
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient, startDevin bool) {
 	if localModel {
-		return false, false
+		return false, false, false
 	}
-	return !homeEnabled, true
+	return !homeEnabled, true, true
 }
 
 func startModelCatalogUpdaters(localModel, homeEnabled bool) {
-	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+	startModels, startCodexClient, startDevin := modelCatalogUpdaterPlan(localModel, homeEnabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())
+	}
+	if startDevin {
+		registry.StartDevinModelsUpdater(context.Background())
 	}
 	if startModels {
 		registry.StartModelsUpdater(context.Background())
@@ -1062,4 +1145,60 @@ func loadPluginBootstrapConfig(path string) *config.Config {
 		return cfg
 	}
 	return cfg
+}
+
+func appendCSV(dst *[]string) func(string) error {
+	return func(raw string) error {
+		*dst = append(*dst, cmd.ParseInterfaceList(raw)...)
+		return nil
+	}
+}
+
+func argvEnablesBoolFlag(args []string, name string) bool {
+	enabled := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			break
+		}
+		flagName, value, hasValue := splitArgvFlag(arg)
+		if flagName == name {
+			if !hasValue {
+				enabled = true
+			} else if parsed, errParse := strconv.ParseBool(value); errParse == nil {
+				enabled = parsed
+			}
+		}
+		if !hasValue && argvFlagConsumesValue(flagName) {
+			if i+1 < len(args) && args[i+1] != "--" {
+				i++
+			}
+		}
+	}
+	return enabled
+}
+
+func argvFlagConsumesValue(name string) bool {
+	switch name {
+	case "codex-login", "codex-device-login", "claude-login", "no-browser",
+		"antigravity-login", "kimi-login", "kimi-ai-login", "xai-login", "devin-login", "meta-login",
+		"discover", "discover-json", "home-disable-cluster-discovery",
+		"tui", "standalone", "local-model":
+		return false
+	default:
+		return name != ""
+	}
+}
+
+func splitArgvFlag(arg string) (name, value string, hasValue bool) {
+	if !strings.HasPrefix(arg, "-") {
+		return "", "", false
+	}
+	arg = strings.TrimPrefix(arg, "-")
+	arg = strings.TrimPrefix(arg, "-")
+	name, value, hasValue = strings.Cut(arg, "=")
+	return name, value, hasValue
 }

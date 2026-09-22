@@ -29,16 +29,25 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON = deleteCodexRequestFields(rawJSON, "max_output_tokens", "max_completion_tokens", "temperature", "top_p")
 	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
-		if normalized := normalizeCodexServiceTier(serviceTier); normalized != "" {
-			if normalized != serviceTier.String() {
-				rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", normalized)
+		if serviceTier.Type == gjson.String {
+			switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
+			case "priority", "fast":
+				if serviceTier.String() != "priority" {
+					rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", "priority")
+				}
+			case "ultrafast":
+				if serviceTier.String() != "ultrafast" {
+					rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", "ultrafast")
+				}
+			default:
+				rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
 			}
 		} else {
 			rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
 		}
 	}
 
-	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options")
+	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options", "prompt_cache_retention")
 	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
@@ -106,11 +115,12 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
 }
 
 // stripCodexResponsesCacheBreakpoints removes any "prompt_cache_breakpoint" hint
-// attached to individual input[].content[] items. Some clients (e.g. GitHub
-// Copilot CLI) attach this field per content item when targeting the OpenAI
-// Responses format. Codex Responses rejects it outright:
+// attached to input items: inside content-part arrays (message input[].content[]
+// and function_call_output input[].output[]) or as an item-level field. Some
+// clients (e.g. GitHub Copilot CLI) attach this field per content item when
+// targeting the OpenAI Responses format. Codex Responses rejects it outright:
 // {"error":{"message":"prompt_cache_breakpoint is not supported on this model", ...}}.
-// The top-level prompt_cache_options strip above does not cover this nested case.
+// The top-level prompt_cache_options strip above does not cover these nested cases.
 func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
 	if !bytes.Contains(rawJSON, []byte(`"prompt_cache_breakpoint"`)) {
 		return rawJSON
@@ -130,14 +140,24 @@ func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
 	rebuiltInput := make([][]byte, 0, len(inputItems))
 	for _, item := range inputItems {
 		itemRaw := []byte(item.Raw)
-		content := item.Get("content")
-		if content.IsArray() {
-			updatedContent, contentChanged := stripPromptCacheBreakpointFromContent(content)
-			if contentChanged {
-				if updatedItem, errSet := sjson.SetRawBytes(itemRaw, "content", updatedContent); errSet == nil {
-					itemRaw = updatedItem
-					changed = true
-				}
+		for _, arrayPath := range []string{"content", "output"} {
+			arrayResult := item.Get(arrayPath)
+			if !arrayResult.IsArray() {
+				continue
+			}
+			updatedArray, arrayChanged := stripPromptCacheBreakpointFromContent(arrayResult)
+			if !arrayChanged {
+				continue
+			}
+			if updatedItem, errSet := sjson.SetRawBytes(itemRaw, arrayPath, updatedArray); errSet == nil {
+				itemRaw = updatedItem
+				changed = true
+			}
+		}
+		if item.Get("prompt_cache_breakpoint").Exists() {
+			if updatedItem, errDelete := sjson.DeleteBytes(itemRaw, "prompt_cache_breakpoint"); errDelete == nil {
+				itemRaw = updatedItem
+				changed = true
 			}
 		}
 		rebuiltInput = append(rebuiltInput, itemRaw)

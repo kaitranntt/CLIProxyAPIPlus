@@ -11,7 +11,7 @@ import (
 
 func newTestRoundRobinSelector() *RoundRobinSelector {
 	return &RoundRobinSelector{
-		cursors: make(map[string]int),
+		lastPicked: make(map[string]string),
 	}
 }
 
@@ -373,7 +373,7 @@ func TestSessionAffinity_StreamSuccessThroughWrapperBinds(t *testing.T) {
 	cacheKey := "stream-provider::header:stream-sess-12345::stream-model"
 
 	chunk := cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"id\":\"x\"}\n\n")}
-	res := manager.wrapStreamResult(ctx, auth, "stream-provider", "stream-model", opts, nil, []cliproxyexecutor.StreamChunk{chunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
+	res := manager.wrapStreamResult(ctx, auth, "stream-provider", "stream-model", "stream-model", nil, []cliproxyexecutor.StreamChunk{chunk}, closedStreamChunks(), OAuthModelAliasResult{}, false, opts)
 	for range res.Chunks {
 	}
 
@@ -406,7 +406,7 @@ func TestSessionAffinity_StreamFailureThroughWrapperInvalidates(t *testing.T) {
 
 	// Stream fails with retryable upstream error (503).
 	errChunk := cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable}}
-	res := manager.wrapStreamResult(ctx, auth, "stream-provider", "stream-model", opts, nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
+	res := manager.wrapStreamResult(ctx, auth, "stream-provider", "stream-model", "stream-model", nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false, opts)
 	for range res.Chunks {
 	}
 
@@ -539,7 +539,7 @@ func TestSessionAffinity_MixedNamespace_StreamBindsAndInvalidatesCanonicalKey(t 
 
 	// Success binds under the canonical key.
 	chunk := cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"id\":\"x\"}\n\n")}
-	res := manager.wrapStreamResult(ctx, auth, "gemini", "stream-model", opts, nil, []cliproxyexecutor.StreamChunk{chunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
+	res := manager.wrapStreamResult(ctx, auth, "gemini", "stream-model", "stream-model", nil, []cliproxyexecutor.StreamChunk{chunk}, closedStreamChunks(), OAuthModelAliasResult{}, false, opts)
 	for range res.Chunks {
 	}
 	bound, ok := affinity.cache.Get(cacheKey)
@@ -549,7 +549,7 @@ func TestSessionAffinity_MixedNamespace_StreamBindsAndInvalidatesCanonicalKey(t 
 
 	// Failure invalidates the same canonical key.
 	errChunk := cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable}}
-	res2 := manager.wrapStreamResult(ctx, auth, "gemini", "stream-model", opts, nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
+	res2 := manager.wrapStreamResult(ctx, auth, "gemini", "stream-model", "stream-model", nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false, opts)
 	for range res2.Chunks {
 	}
 	if bound, ok := affinity.cache.Get(cacheKey); ok {
@@ -737,7 +737,7 @@ func TestSessionAffinity_ModelNamespace_StreamRewriteBindsRouteKey(t *testing.T)
 
 	// Stream succeeds with a rewritten upstream model; must bind the route-model key.
 	chunk := cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"id\":\"x\"}\n\n")}
-	res := manager.wrapStreamResult(ctx, auth, "gemini", "gemini-3.5-flash-lite", opts, nil, []cliproxyexecutor.StreamChunk{chunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
+	res := manager.wrapStreamResult(ctx, auth, "gemini", "gemini-3.5-flash-lite", ".gemini-flash", nil, []cliproxyexecutor.StreamChunk{chunk}, closedStreamChunks(), OAuthModelAliasResult{}, false, opts)
 	for range res.Chunks {
 	}
 	bound, ok := affinity.cache.Get(routeKey)
@@ -747,7 +747,7 @@ func TestSessionAffinity_ModelNamespace_StreamRewriteBindsRouteKey(t *testing.T)
 
 	// Stream failure with rewritten model clears the route key.
 	errChunk := cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable}}
-	res2 := manager.wrapStreamResult(ctx, auth, "gemini", "gemini-3.5-flash-lite", opts, nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false)
+	res2 := manager.wrapStreamResult(ctx, auth, "gemini", "gemini-3.5-flash-lite", ".gemini-flash", nil, []cliproxyexecutor.StreamChunk{errChunk}, closedStreamChunks(), OAuthModelAliasResult{}, false, opts)
 	for range res2.Chunks {
 	}
 	if bound, ok := affinity.cache.Get(routeKey); ok {
