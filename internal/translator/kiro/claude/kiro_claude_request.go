@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -167,16 +166,6 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Check for thinking mode using the comprehensive IsThinkingEnabledWithHeaders function
 	// This supports Claude API format, OpenAI reasoning_effort, AMP/Cursor format, and Anthropic-Beta header
 	thinkingEnabled := IsThinkingEnabledWithHeaders(claudeBody, headers)
-
-	// Inject timestamp context
-	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
-	timestampContext := fmt.Sprintf("[Context: Current time is %s]", timestamp)
-	if systemPrompt != "" {
-		systemPrompt = timestampContext + "\n\n" + systemPrompt
-	} else {
-		systemPrompt = timestampContext
-	}
-	log.Debugf("kiro: injected timestamp context: %s", timestamp)
 
 	// Inject agentic optimization prompt for -agentic model variants
 	if isAgentic {

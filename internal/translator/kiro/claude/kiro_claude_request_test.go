@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	"github.com/tidwall/gjson"
 )
 
@@ -241,5 +242,39 @@ func TestSynthesizeToolSpecsFromHistory_Dedup(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected %q in synthesized names %q", want, joined)
 		}
+	}
+}
+
+// TestBuildKiroPayload_OmitsPerRequestTimestampContext verifies that BuildKiroPayload
+// does not inject a dynamic "[Context: Current time is ...]" timestamp header into the system
+// prompt, preserving prefix caching on Kiro across turns (Issue #237).
+func TestBuildKiroPayload_OmitsPerRequestTimestampContext(t *testing.T) {
+	orig := kirocommon.IsSystemPromptInjectEnabled()
+	kirocommon.SetSystemPromptInjectEnabled(true)
+	defer kirocommon.SetSystemPromptInjectEnabled(orig)
+
+	claudeReq := `{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 1024,
+		"system": "You are an assistant.",
+		"messages": [
+			{"role": "user", "content": "hello"}
+		]
+	}`
+
+	out1, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-5", "arn:test", "test", false, false, http.Header{}, nil)
+	out2, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-5", "arn:test", "test", false, false, http.Header{}, nil)
+
+	content1 := gjson.GetBytes(out1, "conversationState.currentMessage.userInputMessage.content").String()
+	content2 := gjson.GetBytes(out2, "conversationState.currentMessage.userInputMessage.content").String()
+
+	if strings.Contains(content1, "[Context: Current time is") {
+		t.Fatalf("expected payload content to omit timestamp context, got: %s", content1)
+	}
+	if content1 != content2 {
+		t.Fatalf("expected consecutive payloads with identical prompts to be byte-identical, but got:\n1: %s\n2: %s", content1, content2)
+	}
+	if !strings.Contains(content1, "You are an assistant.") {
+		t.Fatalf("expected system prompt to be preserved, got: %s", content1)
 	}
 }
