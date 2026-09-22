@@ -146,17 +146,25 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
           DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
         run: |
+          LATEST_TAG="$(git tag -l 'v*' --sort=-version:refname | head -n 1)"
+          IS_LATEST="false"
+          if [ "${VERSION}" = "${LATEST_TAG}" ]; then
+            IS_LATEST="true"
+          fi
           {
             echo "tags<<EOF"
             echo "${GHCR_REF}:${VERSION}"
-            echo "${GHCR_REF}:latest"
+            if [ "${IS_LATEST}" = "true" ]; then
+              echo "${GHCR_REF}:latest"
+            fi
             if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
               echo "${DOCKERHUB_REF}:${VERSION}"
-              echo "${DOCKERHUB_REF}:latest"
+              if [ "${IS_LATEST}" = "true" ]; then
+                echo "${DOCKERHUB_REF}:latest"
+              fi
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-
       - name: Build and push (multi-arch)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
@@ -176,13 +184,18 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
           DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
         run: |
+          LATEST_TAG="$(git tag -l 'v*' --sort=-version:refname | head -n 1)"
           {
             echo "## Published"
             echo "- \`${GHCR_REF}:${VERSION}\`"
-            echo "- \`${GHCR_REF}:latest\`"
+            if [ "${VERSION}" = "${LATEST_TAG}" ]; then
+              echo "- \`${GHCR_REF}:latest\`"
+            fi
             if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
               echo "- \`${DOCKERHUB_REF}:${VERSION}\`"
-              echo "- \`${DOCKERHUB_REF}:latest\`"
+              if [ "${VERSION}" = "${LATEST_TAG}" ]; then
+                echo "- \`${DOCKERHUB_REF}:latest\`"
+              fi
               echo
               echo "Pull: \`docker pull ${DOCKERHUB_REF}:${VERSION}\`"
             else

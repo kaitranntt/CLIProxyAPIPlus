@@ -65,7 +65,8 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
-		c.JSON(http.StatusOK, h.codexClientModelsResponse())
+		clientVersion := c.Query("client_version")
+		h.WriteModelListResponse(c, h.HandlerType(), h.codexClientModelsResponse(clientVersion))
 		return
 	}
 
@@ -93,7 +94,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		filteredModels[i] = filteredModel
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
 		"object": "list",
 		"data":   filteredModels,
 	})
@@ -945,16 +946,25 @@ func sanitizeOpenAIStrictErrorMessage(errMsg *interfaces.ErrorMessage) *interfac
 	safe.Body = nil
 	if errMsg.Error != nil {
 		safe.Error = &openAIStreamSanitizedError{
-			message:     openAIStreamErrorText(errMsg.Error.Error(), status),
-			safeHeaders: coreauth.SafeResponseHeaders(errMsg.Error),
+			message:      openAIStreamErrorText(errMsg.Error.Error(), status),
+			safeHeaders:  coreauth.SafeResponseHeaders(errMsg.Error),
+			terminalAuth: coreauth.IsTerminalAuthError(errMsg.Error),
 		}
 	}
 	return &safe
 }
 
 type openAIStreamSanitizedError struct {
-	message     string
-	safeHeaders http.Header
+	message      string
+	safeHeaders  http.Header
+	terminalAuth bool
+}
+
+func (e *openAIStreamSanitizedError) IsTerminalAuth() bool {
+	if e == nil {
+		return false
+	}
+	return e.terminalAuth
 }
 
 func (e *openAIStreamSanitizedError) Error() string { return e.message }

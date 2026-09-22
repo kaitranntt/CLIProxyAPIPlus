@@ -321,7 +321,7 @@ func (d *routeExhaustionHomeDispatcher) RPopAuth(_ context.Context, _ string, _ 
 func TestRouteExhaustion_HomeMode(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
-	mgr.SetRetryConfig(3, 5*time.Second, 3)
+	mgr.SetRetryConfig(0, 5*time.Second, 3)
 
 	execClaude := newRouteExhaustionTestExecutor("claude")
 	execGemini := newRouteExhaustionTestExecutor("gemini")

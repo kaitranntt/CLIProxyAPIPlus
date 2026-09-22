@@ -285,6 +285,11 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
 	}
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, auth); errHook != nil {
+			return fmt.Errorf("post-auth persist hook failed: %w", errHook)
+		}
+	}
 	return nil
 }
 
@@ -486,6 +491,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
 		metadata = normalized
 	}
