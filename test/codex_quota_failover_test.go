@@ -113,7 +113,7 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 			}
 			before := time.Now()
 			payload, quotaErr := run(model)
-			if !strings.Contains(string(payload), "delta") || quotaErr == nil {
+			if !strings.Contains(string(payload), "response.output_text.delta") || quotaErr == nil {
 				t.Fatalf("expected payload then terminal quota error: payload=%s error=%v", payload, quotaErr)
 			}
 			var scoped interface{ IsCredentialScoped() bool }
@@ -250,7 +250,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 			}
 			before := time.Now()
 			payload, quotaErr := run(model)
-			if !strings.Contains(string(payload), "delta") || quotaErr == nil {
+			if !strings.Contains(string(payload), "response.output_text.delta") || quotaErr == nil {
 				t.Fatalf("expected payload then terminal quota error: payload=%s error=%v", payload, quotaErr)
 			}
 			var scoped interface{ IsCredentialScoped() bool }
