@@ -209,3 +209,56 @@ func TestService_CursorAuthDisableAndRemovalClearsRoutingCatalog(t *testing.T) {
 		t.Fatalf("removed auth retained routing cache, got: %#v", got)
 	}
 }
+
+func TestService_PrepareCoreAuthForModelRegistration_UpdateErrorWithDisabledAuthClearsRoutingCatalog(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil),
+	}
+	authID := t.Name()
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+		helps.DeleteCursorRoutingModels(authID)
+	})
+
+	// 1. Seed a disabled auth in coreManager
+	disabledAuth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "cursor",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+	}
+	if _, err := service.coreManager.Register(context.Background(), disabledAuth); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+
+	// 2. Seed the Cursor routing catalog for this auth
+	helps.StoreCursorRoutingModels(authID, []*registry.ModelInfo{{ID: "claude-fable-5-1"}})
+	fallback := []*registry.ModelInfo{{ID: "fallback-model"}}
+
+	// Verify the catalog is currently populated
+	if got := helps.CursorRoutingModels(authID, fallback); len(got) != 1 || got[0].ID != "claude-fable-5-1" {
+		t.Fatalf("expected seeded model, got: %#v", got)
+	}
+
+	// 3. Pass an incoming auth with invalid weight so Update fails
+	incoming := &coreauth.Auth{
+		ID:       authID,
+		Provider: "cursor",
+		Attributes: map[string]string{
+			coreauth.AttributeWeight: "invalid-not-a-number",
+		},
+	}
+
+	// 4. Call prepareCoreAuthForModelRegistration: Update fails, detects current.Disabled,
+	// unregisters client, calls DeleteCursorRoutingModels, and returns nil
+	result := service.prepareCoreAuthForModelRegistration(context.Background(), incoming)
+	if result != nil {
+		t.Fatalf("expected nil from failed prepareCoreAuth, got: %#v", result)
+	}
+
+	// 5. Verify routing catalog was deleted and fallback is restored
+	if got := helps.CursorRoutingModels(authID, fallback); len(got) != 1 || got[0].ID != "fallback-model" {
+		t.Fatalf("expected fallback after prepareCoreAuth failure, got: %#v", got)
+	}
+}
