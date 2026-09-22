@@ -67,6 +67,16 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 0
 
+      - name: Resolve latest release tag
+        id: latest
+        run: |
+          LATEST_FORK_TAG="$(git tag -l --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' | head -n 1)"
+          echo "tag=${LATEST_FORK_TAG}" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.ref.outputs.ref }}" = "${LATEST_FORK_TAG}" ]; then
+            echo "is_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -145,12 +155,8 @@ jobs:
           DOCKERHUB_REF: ${{ steps.img.outputs.dockerhub_ref }}
           VERSION: ${{ steps.meta.outputs.version }}
           DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+          IS_LATEST: ${{ steps.latest.outputs.is_latest }}
         run: |
-          LATEST_TAG="$(git tag -l 'v*' --sort=-version:refname | head -n 1)"
-          IS_LATEST="false"
-          if [ "${VERSION}" = "${LATEST_TAG}" ]; then
-            IS_LATEST="true"
-          fi
           {
             echo "tags<<EOF"
             echo "${GHCR_REF}:${VERSION}"
@@ -183,17 +189,17 @@ jobs:
           DOCKERHUB_REF: ${{ steps.img.outputs.dockerhub_ref }}
           VERSION: ${{ steps.meta.outputs.version }}
           DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+          IS_LATEST: ${{ steps.latest.outputs.is_latest }}
         run: |
-          LATEST_TAG="$(git tag -l 'v*' --sort=-version:refname | head -n 1)"
           {
             echo "## Published"
             echo "- \`${GHCR_REF}:${VERSION}\`"
-            if [ "${VERSION}" = "${LATEST_TAG}" ]; then
+            if [ "${IS_LATEST}" = "true" ]; then
               echo "- \`${GHCR_REF}:latest\`"
             fi
             if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
               echo "- \`${DOCKERHUB_REF}:${VERSION}\`"
-              if [ "${VERSION}" = "${LATEST_TAG}" ]; then
+              if [ "${IS_LATEST}" = "true" ]; then
                 echo "- \`${DOCKERHUB_REF}:latest\`"
               fi
               echo
