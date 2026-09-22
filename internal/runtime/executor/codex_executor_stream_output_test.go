@@ -55,6 +55,52 @@ func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *t
 	}
 }
 
+func TestCodexExecutorExecuteStreamPreservesSSEEventLineBoundaries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\n")
+		_, _ = io.WriteString(w, `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`+"\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\n")
+		_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"OK"}`+"\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\n")
+		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],"usage":{"output_tokens":5}}}`+"\n\n")
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-6-astra",
+		Payload: []byte(`{"model":"gpt-6-astra","input":"Reply with exactly OK.","stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var detector cliproxyauth.StreamBootstrapDetector
+	forwarded := false
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		if detector.Observe(chunk.Payload) {
+			forwarded = true
+		}
+	}
+	if !forwarded {
+		t.Fatal("stream bootstrap never observed the non-empty output_text delta")
+	}
+	if detector.Finish() {
+		t.Fatal("non-empty Responses stream was classified as an empty completion")
+	}
+}
+
 func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
