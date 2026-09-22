@@ -55,6 +55,44 @@ func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *t
 	}
 }
 
+// TestCodexExecutorExecute_NonStreamGPT56LunaIsNotClassifiedAsEmptyCompletion reproduces
+// the exact issue reported in Issue #187: a non-streaming Responses API request for gpt-5.6-luna
+// returning an SSE stream with text format configuration must not be misclassified as an empty completion.
+func TestCodexExecutorExecute_NonStreamGPT56LunaIsNotClassifiedAsEmptyCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_luna_1","status":"in_progress"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_luna_1","object":"response","status":"completed","text":{"format":{"type":"text"},"verbosity":"medium"},"output":[{"type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"pong"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	reqPayload := []byte(`{"model":"gpt-5.6-luna","input":"pong","max_output_tokens":16}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-luna",
+		Payload: reqPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if cliproxyauth.IsEmptyCompletionPayload(resp.Payload) {
+		t.Fatalf("non-stream gpt-5.6-luna response was misclassified as empty completion; payload=%s", string(resp.Payload))
+	}
+	text := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String()
+	if text != "pong" {
+		t.Fatalf("output text = %q, want %q; payload=%s", text, "pong", string(resp.Payload))
+	}
+}
+
 func TestCodexExecutorExecuteStreamPreservesSSEEventLineBoundaries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
