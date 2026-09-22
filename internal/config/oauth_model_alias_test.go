@@ -78,6 +78,8 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 		aliasSet[a.Alias] = true
 	}
 	expectedAliases := []string{
+		"claude-opus-5-5",
+		"claude-opus-5.5",
 		"claude-sonnet-4-5-20250929",
 		"claude-sonnet-4-5",
 		"claude-sonnet-4-20250514",
@@ -132,6 +134,7 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultGitHubCopilotAliases(t *testing.T
 		}
 	}
 	expectedAliases := []string{
+		"claude-opus-5-5",
 		"claude-haiku-4-5",
 		"claude-opus-4-1",
 		"claude-opus-4-5",
