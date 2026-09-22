@@ -653,7 +653,7 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 			if root.IsObject() {
 				errObj := []byte(`{}`)
 				copied := false
-				for _, field := range []string{"type", "code", "message", "param"} {
+				for _, field := range []string{"type", "code", "message", "param", "retryable"} {
 					v := root.Get(field)
 					if !v.Exists() || v.Type == gjson.Null {
 						continue
