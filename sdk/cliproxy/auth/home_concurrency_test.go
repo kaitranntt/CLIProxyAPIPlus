@@ -26,6 +26,21 @@ type fixtureHomeDispatcher struct {
 	onAbort            func()
 }
 
+func TestHomeModelVariantUnavailablePreservesRoutingSemantics(t *testing.T) {
+	err := decodeHomeDispatchError([]byte(`{"error":{"type":"model_variant_unavailable","message":"no advertised variant","retryable":true}}`))
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.StatusCode() != http.StatusBadRequest || !authErr.Retryable {
+		t.Fatalf("decoded variant error = %v", err)
+	}
+	if isRequestInvalidError(fmt.Errorf("dispatch: %w", err)) {
+		t.Fatal("account-specific absence stopped alternate routing")
+	}
+	result := resultErrorFromError(err)
+	if result.Code != ErrorCodeModelVariantUnavailable || !shouldSkipCredentialCooldown(result) {
+		t.Fatalf("variant absence lost its no-cooldown classification: %+v", result)
+	}
+}
+
 func (d *fixtureHomeDispatcher) HeartbeatOK() bool { return true }
 
 func (d *fixtureHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {

@@ -420,6 +420,11 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, fmt.Errorf("cursor: access token not found")
 	}
 
+	upstreamModel, errResolve := helps.ResolveCursorRequestModel(auth.ID, req, opts, cursorModelsOrFallback)
+	if errResolve != nil {
+		return resp, errResolve
+	}
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	payload := req.Payload
@@ -448,7 +453,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		log.Debugf("cursor: non-stream request with %d turn(s), flattening into user text", len(parsed.Turns))
 		flattenConversationIntoUserText(parsed)
 	}
-	params := buildRunRequestParams(parsed, conversationID, req.Model)
+	params := buildRunRequestParams(parsed, conversationID, upstreamModel)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -579,6 +584,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		sessionID = extractClaudeCodeSessionId(opts.OriginalRequest)
 	}
 
+	upstreamModel, errResolve := helps.ResolveCursorRequestModel(auth.ID, req, opts, cursorModelsOrFallback)
+	if errResolve != nil {
+		return nil, errResolve
+	}
+
 	// Translate input to OpenAI format if needed
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -673,11 +683,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(parsed, conversationId, req.Model)
+	params := buildRunRequestParams(parsed, conversationId, upstreamModel)
 
 	if coldToolContinuation {
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(parsed, conversationId, req.Model)
+		params = buildRunRequestParams(parsed, conversationId, upstreamModel)
 	} else if hasCheckpoint && saved.data != nil && saved.authID == authID {
 		// Same auth — use checkpoint normally.
 		log.Debugf("cursor: using saved checkpoint (%d bytes) for conv=%s auth=%s", len(saved.data), checkpointKey, authID)
@@ -698,13 +708,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		if len(parsed.Turns) > 0 {
 			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(parsed, conversationId, req.Model)
+			params = buildRunRequestParams(parsed, conversationId, upstreamModel)
 		}
 	} else if len(parsed.Turns) > 0 {
 		// Cursor reliably reads UserText, while structured turns may be ignored.
 		log.Debugf("cursor: no checkpoint, flattening %d turns into user text", len(parsed.Turns))
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(parsed, conversationId, req.Model)
+		params = buildRunRequestParams(parsed, conversationId, upstreamModel)
 	}
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
