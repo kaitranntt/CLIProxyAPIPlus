@@ -3,16 +3,28 @@ set -euo pipefail
 
 # Tests the inline selector logic used by the 'latest' step in .github/workflows/docker-image.yml
 resolve_latest_fork_tag() {
-  git tag -l --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' | head -n 1
+  local latest=""
+  while IFS= read -r tag; do
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
+      latest="$tag"
+      break
+    fi
+  done < <(git tag -l --sort=-version:refname)
+
+  if [[ -z "${latest}" ]]; then
+    echo "Error: no numeric fork release tag found matching ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$" >&2
+    return 1
+  fi
+  printf '%s\n' "${latest}"
 }
 
-# Test 1: Real repo tags - fork release v7.2.127-21 wins over upstream tags like v7.3.14
+# Test 1: Real repo smoke check - format/nonempty check resilient to future version bumps
 latest="$(resolve_latest_fork_tag)"
-if [[ "${latest}" != "v7.2.127-21" ]]; then
-  echo "FAIL: expected v7.2.127-21, got ${latest}" >&2
+if [[ ! "${latest}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
+  echo "FAIL: expected numeric fork tag format, got ${latest}" >&2
   exit 1
 fi
-echo "PASS: resolve_latest_fork_tag correctly resolved ${latest}"
+echo "PASS: real repo tag resolved to valid format: ${latest}"
 
 # Test 2: In synthetic git repo with mixed tags, numeric fork format wins
 temp_repo="$(mktemp -d)"
@@ -35,10 +47,42 @@ trap 'rm -rf "${temp_repo}"' EXIT
     exit 1
   fi
 
-  # Test that older backfill -11 is NOT latest
+  # Test workflow inclusion logic
+  is_latest_21="false"
+  if [[ "v7.2.127-21" == "${res}" ]]; then
+    is_latest_21="true"
+  fi
+  if [[ "${is_latest_21}" != "true" ]]; then
+    echo "FAIL: v7.2.127-21 must set is_latest=true" >&2
+    exit 1
+  fi
+
+  is_latest_11="false"
   if [[ "v7.2.127-11" == "${res}" ]]; then
-    echo "FAIL: v7.2.127-11 should not be considered latest" >&2
+    is_latest_11="true"
+  fi
+  if [[ "${is_latest_11}" != "false" ]]; then
+    echo "FAIL: v7.2.127-11 must set is_latest=false" >&2
     exit 1
   fi
 )
-echo "PASS: synthetic tag competition verified (v7.2.127-21 is latest, v7.3.14 ignored, v7.2.127-11 not latest)"
+echo "PASS: synthetic tag competition and workflow inclusion verified"
+
+# Test 3: No-match path returns non-zero error
+temp_empty_repo="$(mktemp -d)"
+trap 'rm -rf "${temp_repo}" "${temp_empty_repo}"' EXIT
+(
+  cd "${temp_empty_repo}"
+  git init -q
+  git config user.name "test"
+  git config user.email "test@example.com"
+  git commit -q --allow-empty -m "init"
+  git tag "v7.3.14"
+  git tag "v7.3.12"
+
+  if resolve_latest_fork_tag 2>/dev/null; then
+    echo "FAIL: expected error when no fork tags exist" >&2
+    exit 1
+  fi
+)
+echo "PASS: no-match path correctly returned non-zero error"

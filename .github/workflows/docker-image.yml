@@ -40,7 +40,7 @@ env:
   GHCR_REGISTRY: ghcr.io
   GHCR_IMAGE_NAME: ${{ github.repository_owner }}/cli-proxy-api-plus
   DOCKERHUB_IMAGE_NAME: kaitranntt/cli-proxy-api-plus
-  MODELS_REPOSITORY_REF: fb13a81071567e9d772e8abc5541a6558075e5f2
+  MODELS_REPOSITORY_REF: 0173cfadb6a8b4b126db6f7ba16315683219e58b
 
 permissions:
   contents: read
@@ -70,13 +70,24 @@ jobs:
       - name: Resolve latest release tag
         id: latest
         run: |
-          LATEST_FORK_TAG="$(git tag -l --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' | head -n 1)"
+          LATEST_FORK_TAG=""
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
+              LATEST_FORK_TAG="$tag"
+              break
+            fi
+          done < <(git tag -l --sort=-version:refname)
+          if [[ -z "${LATEST_FORK_TAG}" ]]; then
+            echo "Error: no numeric fork release tag found matching ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$" >&2
+            exit 1
+          fi
           echo "tag=${LATEST_FORK_TAG}" >> "$GITHUB_OUTPUT"
           if [ "${{ steps.ref.outputs.ref }}" = "${LATEST_FORK_TAG}" ]; then
             echo "is_latest=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_latest=false" >> "$GITHUB_OUTPUT"
           fi
+
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
