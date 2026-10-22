@@ -1191,7 +1191,7 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 
 func isGitHubCopilotResponsesBuiltinTool(toolType string) bool {
 	switch strings.TrimSpace(toolType) {
-	case "computer", "computer_use_preview":
+	case "computer", "computer_use_preview", "namespace", "tool_search":
 		return true
 	default:
 		return false
