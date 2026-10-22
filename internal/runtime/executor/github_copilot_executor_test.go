@@ -259,6 +259,28 @@ func TestNormalizeGitHubCopilotResponsesTools_InvalidToolChoiceDowngradeToAuto(t
 	}
 }
 
+func TestNormalizeGitHubCopilotResponsesTools_PreservesNamespaceAndToolSearch(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"tools":[{"type":"namespace","name":"mcp__demo","description":"demo","tools":[{"type":"function","name":"status"}]},{"type":"tool_search","execution":"client","description":"Searches deferred tools."},{"type":"function","name":"local_tool"}]}`)
+	got := normalizeGitHubCopilotResponsesTools(body)
+	tools := gjson.GetBytes(got, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools len = %d, want 3", len(tools))
+	}
+	if tools[0].Get("type").String() != "namespace" {
+		t.Fatalf("tools[0].type = %q, want namespace", tools[0].Get("type").String())
+	}
+	if tools[0].Get("name").String() != "mcp__demo" {
+		t.Fatalf("tools[0].name = %q, want mcp__demo", tools[0].Get("name").String())
+	}
+	if tools[1].Get("type").String() != "tool_search" {
+		t.Fatalf("tools[1].type = %q, want tool_search", tools[1].Get("type").String())
+	}
+	if tools[2].Get("name").String() != "local_tool" {
+		t.Fatalf("tools[2].name = %q, want local_tool", tools[2].Get("name").String())
+	}
+}
+
 func TestTranslateGitHubCopilotResponsesNonStreamToClaude_TextMapping(t *testing.T) {
 	t.Parallel()
 	resp := []byte(`{"id":"resp_1","model":"gpt-5-codex","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":5}}`)
