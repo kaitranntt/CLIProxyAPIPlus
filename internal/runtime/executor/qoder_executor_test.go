@@ -260,8 +260,11 @@ func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
 		Storage:  storage,
 	}
 
-	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 4)}
-	usage.RegisterNamedPlugin("test:qoder-stream-usage", plugin)
+	plugin := &captureQoderUsagePlugin{authID: authRecord.ID, records: make(chan usage.Record, 16)}
+	usage.RegisterNamedPlugin(t.Name(), plugin)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(t.Name(), noopClaudeUsagePlugin{})
+	})
 
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return qoderSSEHTTPResponse(req, http.StatusOK, qoderStreamBodyWithUsage(t, 3, 4, 7)), nil
@@ -459,11 +462,15 @@ func (f qoderRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 type captureQoderUsagePlugin struct {
+	authID  string
 	records chan usage.Record
 }
 
 func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
 	if p == nil {
+		return
+	}
+	if p.authID != "" && record.AuthID != p.authID {
 		return
 	}
 	select {
