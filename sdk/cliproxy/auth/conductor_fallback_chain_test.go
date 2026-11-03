@@ -24,14 +24,15 @@ import (
 type fallbackTestError struct {
 	status  int
 	body    string
-	retry   time.Duration
+	retry   *time.Duration
 	headers http.Header
 }
 
 func (e *fallbackTestError) Error() string                { return e.body }
 func (e *fallbackTestError) StatusCode() int              { return e.status }
 func (e *fallbackTestError) ResponseHeaders() http.Header { return e.headers }
-func (e *fallbackTestError) RetryAfter() *time.Duration   { return &e.retry }
+func (e *fallbackTestError) RetryAfter() *time.Duration   { return e.retry }
+
 
 func TestFallbackExhaustionClassification(t *testing.T) {
 	for _, test := range []struct {
@@ -44,16 +45,18 @@ func TestFallbackExhaustionClassification(t *testing.T) {
 		{"wrapped payment", fmt.Errorf("upstream: %w", &Error{HTTPStatus: 402}), fallbackTerminal},
 		{"unauthorized", &Error{HTTPStatus: 401}, fallbackNotExhausted},
 		{"server quota text", &Error{HTTPStatus: 500, Code: "quota_exhausted"}, fallbackNotExhausted},
-		{"unknown rate limit", &Error{HTTPStatus: 429}, fallbackNotExhausted},
-		{"short rate limit", &fallbackTestError{status: 429, retry: time.Second}, fallbackNotExhausted},
-		{"ten second boundary", &fallbackTestError{status: 429, retry: 10 * time.Second}, fallbackNotExhausted},
-		{"intermediate", &fallbackTestError{status: 429, retry: 11 * time.Second}, fallbackIntermediate},
-		{"fifteen minute boundary", &fallbackTestError{status: 429, retry: 15 * time.Minute}, fallbackIntermediate},
-		{"multi-hour", &fallbackTestError{status: 429, retry: 2 * time.Hour}, fallbackTerminal},
+		{"unknown rate limit", &Error{HTTPStatus: 429}, fallbackAmbiguous},
+		{"zero rate limit", &fallbackTestError{status: 429, retry: new(time.Duration(0))}, fallbackNotExhausted},
+		{"short rate limit", &fallbackTestError{status: 429, retry: new(time.Second)}, fallbackNotExhausted},
+		{"ten second boundary", &fallbackTestError{status: 429, retry: new(10 * time.Second)}, fallbackNotExhausted},
+		{"intermediate", &fallbackTestError{status: 429, retry: new(11 * time.Second)}, fallbackIntermediate},
+		{"fifteen minute boundary", &fallbackTestError{status: 429, retry: new(15 * time.Minute)}, fallbackIntermediate},
+		{"multi-hour", &fallbackTestError{status: 429, retry: new(2 * time.Hour)}, fallbackTerminal},
+		{"retry header zero", &fallbackTestError{status: 429, headers: http.Header{"Retry-After": {"0"}}}, fallbackNotExhausted},
 		{"quota code", &Error{HTTPStatus: 429, Code: "usage_limit_reached"}, fallbackTerminal},
 		{"nested quota code", &fallbackTestError{status: 429, body: `{"error":{"code":"quota_exhausted"}}`}, fallbackTerminal},
 		{"top-level quota type", &fallbackTestError{status: 429, body: `{"type":"usage_limit_reached"}`}, fallbackTerminal},
-		{"non-quota message", &fallbackTestError{status: 429, body: `{"error":{"message":"quota_exhausted"}}`}, fallbackNotExhausted},
+		{"non-quota message", &fallbackTestError{status: 429, body: `{"error":{"message":"quota_exhausted"}}`}, fallbackAmbiguous},
 		{"relative reset", &fallbackTestError{status: 429, body: `{"error":{"resets_in_seconds":7200}}`}, fallbackTerminal},
 		{"intermediate reset", &fallbackTestError{status: 429, body: `{"resets_in_seconds":300}`}, fallbackIntermediate},
 		{"negative reset", &fallbackTestError{status: 429, body: `{"resets_in_seconds":-300}`}, fallbackNotExhausted},
@@ -61,7 +64,7 @@ func TestFallbackExhaustionClassification(t *testing.T) {
 		{"retry header", &fallbackTestError{status: 429, headers: http.Header{"Retry-After": {"7200"}}}, fallbackTerminal},
 		{"date header", &fallbackTestError{status: 429, headers: http.Header{"Retry-After": {time.Now().Add(2 * time.Hour).UTC().Format(http.TimeFormat)}}}, fallbackTerminal},
 		{"intermediate header", &fallbackTestError{status: 429, headers: http.Header{"Retry-After": {"300"}}}, fallbackIntermediate},
-		{"invalid header", &fallbackTestError{status: 429, headers: http.Header{"Retry-After": {"tomorrow"}}}, fallbackNotExhausted},
+		{"invalid header", &fallbackTestError{status: 429, headers: http.Header{"Retry-After": {"tomorrow"}}}, fallbackAmbiguous},
 		{"request scoped payment", NewRequestScopedError("payment in request", 402), fallbackNotExhausted},
 		{"plugin response", &cliproxyexecutor.RequestTerminatedError{HTTPStatus: 402}, fallbackNotExhausted},
 	} {
@@ -220,7 +223,7 @@ func TestFallbackChainExhaustsEveryPoolBeforeAdvancing(t *testing.T) {
 					if index == 0 {
 						f.executors[candidate.Provider].failures[id] = &Error{HTTPStatus: 402, Message: "monthly balance exhausted"}
 					} else if index == 1 {
-						f.executors[candidate.Provider].failures[id] = &fallbackTestError{status: 429, retry: 3 * time.Hour}
+						f.executors[candidate.Provider].failures[id] = &fallbackTestError{status: 429, retry: new(3 * time.Hour)}
 					}
 					if index < 2 || suffix == "a" {
 						expected = append(expected, id)
@@ -272,10 +275,11 @@ func TestFallbackChainRateLimitAndMixedFailurePolicy(t *testing.T) {
 		fallback        bool
 	}{
 		{"terminal quota code", &Error{HTTPStatus: 429, Code: "usage_limit_reached"}, &Error{HTTPStatus: 429, Code: "quota_exhausted"}, false, true},
-		{"all intermediate cooled", &fallbackTestError{status: 429, retry: 30 * time.Second}, &fallbackTestError{status: 429, retry: time.Minute}, false, true},
-		{"intermediate without cooldown", &fallbackTestError{status: 429, retry: 30 * time.Second}, &fallbackTestError{status: 429, retry: time.Minute}, true, false},
-		{"transient", &fallbackTestError{status: 429, retry: 5 * time.Second}, &fallbackTestError{status: 429, retry: 5 * time.Second}, false, false},
-		{"transient before terminal", &fallbackTestError{status: 429, retry: time.Second}, &Error{HTTPStatus: 402}, false, false},
+		{"all intermediate cooled", &fallbackTestError{status: 429, retry: new(30 * time.Second)}, &fallbackTestError{status: 429, retry: new(time.Minute)}, false, true},
+		{"intermediate without cooldown", &fallbackTestError{status: 429, retry: new(30 * time.Second)}, &fallbackTestError{status: 429, retry: new(time.Minute)}, true, false},
+		{"transient", &fallbackTestError{status: 429, retry: new(5 * time.Second)}, &fallbackTestError{status: 429, retry: new(5 * time.Second)}, false, false},
+		{"ambiguous 429 full pool", &Error{HTTPStatus: 429, Message: "rate limit exceeded without quota code"}, &Error{HTTPStatus: 429, Message: "rate limit exceeded without quota code"}, false, true},
+		{"transient before terminal", &fallbackTestError{status: 429, retry: new(time.Second)}, &Error{HTTPStatus: 402}, false, false},
 		{"server error before terminal", &Error{HTTPStatus: 500}, &Error{HTTPStatus: 402}, false, false},
 		{"terminal before server error", &Error{HTTPStatus: 402}, &Error{HTTPStatus: 500}, false, false},
 	} {

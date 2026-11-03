@@ -42,6 +42,7 @@ type fallbackChainAttempt struct {
 	// Execution and bootstrap observation are synchronous. Once a stream is
 	// returned, no further chain routing or observation is performed.
 	failures map[string]error
+	eligible map[string]struct{}
 }
 
 func fallbackAttempt(ctx context.Context) *fallbackChainAttempt {
@@ -54,6 +55,10 @@ func fallbackAttempt(ctx context.Context) *fallbackChainAttempt {
 
 func recordFallbackFailure(ctx context.Context, auth *Auth, err error) {
 	if attempt := fallbackAttempt(ctx); attempt != nil && auth != nil {
+		if attempt.eligible == nil {
+			attempt.eligible = make(map[string]struct{})
+		}
+		attempt.eligible[auth.ID] = struct{}{}
 		attempt.failures[auth.ID] = err
 	}
 }
@@ -257,7 +262,10 @@ func adaptFallbackEnvelope(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 }
 
 func (m *Manager) newFallbackAttempt(ctx context.Context, candidate internalconfig.FallbackCandidate, opts cliproxyexecutor.Options) *fallbackChainAttempt {
-	attempt := &fallbackChainAttempt{failures: make(map[string]error)}
+	attempt := &fallbackChainAttempt{
+		failures: make(map[string]error),
+		eligible: make(map[string]struct{}),
+	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinned := pinnedAuthIDFromMetadata(opts.Metadata)
 	now := time.Now()
@@ -323,6 +331,12 @@ func (m *Manager) fallbackPoolExhausted(attempt *fallbackChainAttempt, candidate
 				return false
 			}
 		}
+		if kind == fallbackAmbiguous {
+			// Ambiguous 429: every credential in pool must have been attempted in this request.
+			if _, attempted := attempt.eligible[id]; !attempted {
+				return false
+			}
+		}
 	}
 	return true
 }
@@ -337,6 +351,7 @@ type fallbackExhaustion uint8
 const (
 	fallbackNotExhausted fallbackExhaustion = iota
 	fallbackIntermediate
+	fallbackAmbiguous
 	fallbackTerminal
 )
 
@@ -368,18 +383,23 @@ func fallbackExhaustionKind(err error) fallbackExhaustion {
 			return fallbackTerminal
 		}
 	}
+	hasExplicitWait := false
 	var wait time.Duration
 	if retry := retryAfterFromError(err); retry != nil {
 		wait = *retry
+		hasExplicitWait = true
 	}
 	for _, path := range []string{"error.resets_in_seconds", "resets_in_seconds", "error.retry_after_seconds", "retry_after_seconds"} {
-		seconds := gjson.Get(body, path).Float()
-		if seconds > wait.Seconds() {
-			// Compare before converting an untrusted floating-point duration.
+		node := gjson.Get(body, path)
+		if node.Exists() {
+			seconds := node.Float()
 			if seconds > defaultFallbackExhaustionCooldown.Seconds() {
 				return fallbackTerminal
 			}
-			wait = time.Duration(seconds * float64(time.Second))
+			hasExplicitWait = true
+			if seconds > wait.Seconds() {
+				wait = time.Duration(seconds * float64(time.Second))
+			}
 		}
 	}
 	var headers interface{ ResponseHeaders() http.Header }
@@ -389,11 +409,15 @@ func fallbackExhaustionKind(err error) fallbackExhaustion {
 			if seconds > defaultFallbackExhaustionCooldown.Seconds() {
 				return fallbackTerminal
 			}
+			hasExplicitWait = true
 			if seconds > wait.Seconds() {
 				wait = time.Duration(seconds * float64(time.Second))
 			}
-		} else if until, errTime := http.ParseTime(value); errTime == nil && time.Until(until) > wait {
-			wait = time.Until(until)
+		} else if until, errTime := http.ParseTime(value); errTime == nil {
+			hasExplicitWait = true
+			if d := time.Until(until); d > wait {
+				wait = d
+			}
 		}
 	}
 	if wait > defaultFallbackExhaustionCooldown {
@@ -402,6 +426,13 @@ func fallbackExhaustionKind(err error) fallbackExhaustion {
 	if wait > 10*time.Second {
 		return fallbackIntermediate
 	}
+	if !hasExplicitWait {
+		// HTTP 429 with missing or unparseable Retry-After and without explicit quota code:
+		// Ambiguous rate limit. Will retry/rotate across pool first, but can advance once
+		// all credentials in active candidate pool have been attempted.
+		return fallbackAmbiguous
+	}
+	// Explicit short throttle (<= 10s): transient rate limit, keep within intra-provider pool.
 	return fallbackNotExhausted
 }
 
