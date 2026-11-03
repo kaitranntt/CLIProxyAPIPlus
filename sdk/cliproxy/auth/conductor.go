@@ -166,6 +166,7 @@ type Manager struct {
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets             map[string]int
 	homeDispatchBundle          atomic.Pointer[HomeDispatchBundle]
+	fallbackChain               FallbackChainConductor
 	homeInFlightPublisherConfig atomic.Pointer[HomeInFlightPublisherConfig]
 
 	// Retry controls request retry behavior.

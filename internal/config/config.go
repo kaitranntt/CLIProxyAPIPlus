@@ -98,6 +98,9 @@ type Config struct {
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
+	// FallbackChain maps a route model or alias to an ordered cross-model fallback chain.
+	FallbackChain map[string]FallbackChainConfig `yaml:"fallback-chain,omitempty" json:"fallback-chain,omitempty"`
+
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
