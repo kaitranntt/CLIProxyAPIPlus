@@ -372,7 +372,15 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if got := ojson.GetBytesNoCopy(interrupted, "response.incomplete_details.reason").String(); got != "interrupted" {
 		t.Fatalf("interrupt reason = %q, payload %s", got, interrupted)
 	}
-	if !executor.canceled.Load() {
+	canceled := false
+	for i := 0; i < 50; i++ {
+		if executor.canceled.Load() {
+			canceled = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !canceled {
 		t.Fatal("http upstream was not canceled")
 	}
 	if errSend := client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"previous_response_id":"r-http","input":[]}`, model))); errSend != nil {
