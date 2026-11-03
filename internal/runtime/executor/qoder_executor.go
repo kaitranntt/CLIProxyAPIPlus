@@ -15,17 +15,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // QoderExecutor executes requests against the Qoder API with COSY authentication
@@ -982,7 +982,7 @@ func FetchQoderModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.
 	now := time.Now().Unix()
 	models := make([]*registry.ModelInfo, 0, 16)
 	configs := make(map[string]json.RawMessage, 16)
-	modelsByScene.ForEach(func(_, entry gjson.Result) bool {
+	modelsByScene.ForEach(func(_, entry ojson.Result) bool {
 		key := entry.Get("key").String()
 		if key == "" {
 			key = entry.Get("model_key").String()
@@ -1003,7 +1003,7 @@ func FetchQoderModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.
 		}
 		ctxLen := int(entry.Get("max_input_tokens").Int())
 		if ctxLen == 0 {
-			entry.Get("context_config").ForEach(func(_, contextEntry gjson.Result) bool {
+			entry.Get("context_config").ForEach(func(_, contextEntry ojson.Result) bool {
 				if tokenCount := int(contextEntry.Get("token_count").Int()); tokenCount > ctxLen {
 					ctxLen = tokenCount
 				}
@@ -1044,7 +1044,7 @@ func FetchQoderModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.
 			efforts := tc.Get("enabled.efforts")
 			if efforts.Exists() && efforts.IsObject() {
 				levels := make([]string, 0, 5)
-				efforts.ForEach(func(key, _ gjson.Result) bool {
+				efforts.ForEach(func(key, _ ojson.Result) bool {
 					levels = append(levels, key.String())
 					return true
 				})
@@ -1081,7 +1081,7 @@ func FetchQoderModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.
 // qoderModelListEntries supports the legacy `chat` catalog plus the current
 // qoderclicn `assistant` scene. The current CLI treats assistant as its
 // default interactive scene and keeps all enabled entries in that array.
-func qoderModelListEntries(body []byte, enterpriseVPC bool) gjson.Result {
+func qoderModelListEntries(body []byte, enterpriseVPC bool) ojson.Result {
 	paths := []struct {
 		models     string
 		enterprise string
@@ -1104,22 +1104,22 @@ func qoderModelListEntries(body []byte, enterpriseVPC bool) gjson.Result {
 	}
 
 	for _, path := range paths {
-		entries := gjson.GetBytes(body, path.models)
+		entries := ojson.GetBytes(body, path.models)
 		if entries.Exists() && entries.IsArray() {
 			if path.enterprise != "" {
-				return mergeQoderEnterpriseModels(entries, gjson.GetBytes(body, path.enterprise))
+				return mergeQoderEnterpriseModels(entries, ojson.GetBytes(body, path.enterprise))
 			}
 			return entries
 		}
 	}
-	return gjson.Result{}
+	return ojson.Result{}
 }
 
 // mergeQoderEnterpriseModels mirrors qoderclicn's catalog behavior: entries
 // published in the byok_enterprise scene are added to assistant when they are
 // not already present there. This keeps enterprise-provided model variants
 // visible without duplicating keys that the primary scene already defines.
-func mergeQoderEnterpriseModels(primary, enterprise gjson.Result) gjson.Result {
+func mergeQoderEnterpriseModels(primary, enterprise ojson.Result) ojson.Result {
 	if !enterprise.Exists() || !enterprise.IsArray() {
 		return primary
 	}
@@ -1167,7 +1167,7 @@ func mergeQoderEnterpriseModels(primary, enterprise gjson.Result) gjson.Result {
 	if err != nil {
 		return primary
 	}
-	return gjson.ParseBytes(combined)
+	return ojson.ParseBytes(combined)
 }
 
 // stableHash returns a deterministic hex identifier from the given inputs.

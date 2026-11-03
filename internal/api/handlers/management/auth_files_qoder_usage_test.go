@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestBuildAuthFileEntryIncludesQoderUsageSnapshot(t *testing.T) {
@@ -44,7 +44,7 @@ func TestBuildAuthFileEntryIncludesQoderUsageSnapshot(t *testing.T) {
 	}
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
 
-	entry := h.buildAuthFileEntry(auth)
+	entry := h.buildAuthFileEntry(auth, authFileQuotaContext{})
 	usage, ok := entry["usage"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected Qoder usage snapshot, got %#v", entry["usage"])
@@ -79,7 +79,7 @@ func TestBuildAuthFileEntryOmitsQoderUsageBeforeSync(t *testing.T) {
 	}
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
 
-	entry := h.buildAuthFileEntry(auth)
+	entry := h.buildAuthFileEntry(auth, authFileQuotaContext{})
 	if _, ok := entry["usage"]; ok {
 		t.Fatalf("usage should be absent before Qoder sync")
 	}

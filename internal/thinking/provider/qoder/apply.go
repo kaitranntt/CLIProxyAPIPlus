@@ -8,10 +8,9 @@
 package qoder
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 // Applier implements thinking.ProviderApplier for Qoder models.
@@ -49,7 +48,7 @@ func init() {
 //	  "reasoning_effort": "none"
 //	}
 func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
 	if !thinking.IsUserDefinedModel(modelInfo) && modelInfo.Thinking == nil {
@@ -85,7 +84,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	result, errSet := sjson.SetBytes(body, "reasoning_effort", effort)
+	result, errSet := ojson.SetBytes(body, "reasoning_effort", effort)
 	if errSet != nil {
 		return body, errSet
 	}

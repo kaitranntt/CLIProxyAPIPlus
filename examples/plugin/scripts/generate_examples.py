@@ -191,7 +191,7 @@ def generate_go(cap: Capability) -> None:
 \t\tcallHost("host.http.do", []byte(`{{"method":"GET","url":"https://example.com","headers":{{"user-agent":["{pid}"]}}}}`))
 """
         method_cases.append(f'\tcase "{method}":\n{host_callback_call}\t\treturn okEnvelopeJSON({json.dumps(result_for_method(cap, "go", method))})')
-    go_mod = f"""module github.com/router-for-me/CLIProxyAPI/v7/examples/plugin/{slug}/go
+    go_mod = f"""module github.com/router-for-me/CLIProxyAPI/v8/examples/plugin/{slug}/go
 
 go 1.26
 """

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
 )
 
 // TestBuildKiroPayload_HistoryWithToolUseButNoTools reproduces the 400 case
@@ -39,7 +39,7 @@ func TestBuildKiroPayload_HistoryWithToolUseButNoTools(t *testing.T) {
 		t.Fatal("expected non-empty payload")
 	}
 
-	tools := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
+	tools := ojson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
 	if !tools.IsArray() {
 		t.Fatalf("currentMessage.userInputMessageContext.tools is not an array: %s", tools.Raw)
 	}
@@ -81,7 +81,7 @@ func TestBuildKiroPayload_HistoryWithToolUseAndExplicitTools(t *testing.T) {
 	}`
 
 	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-5", "arn:test", "test", true, false, http.Header{}, nil)
-	tools := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
+	tools := ojson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
 	if !tools.IsArray() || len(tools.Array()) != 1 {
 		t.Fatalf("expected exactly 1 tool, got: %s", tools.Raw)
 	}
@@ -101,7 +101,7 @@ func TestBuildKiroPayload_NoToolsNoHistoryToolUse(t *testing.T) {
 		]
 	}`
 	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-5", "arn:test", "test", false, true, http.Header{}, nil)
-	tools := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
+	tools := ojson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
 	if tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		t.Fatalf("did not expect tools to be synthesized for plain chat turn: %s", tools.Raw)
 	}
@@ -135,7 +135,7 @@ func TestBuildKiroPayload_TrailingSystemMessageKeepsTools(t *testing.T) {
 		t.Fatal("expected non-empty payload")
 	}
 
-	tools := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
+	tools := ojson.GetBytes(out, "conversationState.currentMessage.userInputMessage.userInputMessageContext.tools")
 	if !tools.IsArray() || len(tools.Array()) != 1 {
 		t.Fatalf("expected exactly 1 tool on currentMessage, got: %s", tools.Raw)
 	}
@@ -143,7 +143,7 @@ func TestBuildKiroPayload_TrailingSystemMessageKeepsTools(t *testing.T) {
 		t.Fatalf("expected tool named 'Grep', got %q", got)
 	}
 
-	content := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String()
+	content := ojson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String()
 	if !strings.Contains(content, "investigate the revision conflict") {
 		t.Fatalf("expected user text in current message content, got: %q", content)
 	}
@@ -168,7 +168,7 @@ func TestBuildKiroPayload_MidConversationSystemStringPreservesOrder(t *testing.T
 	}`
 
 	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-6", "arn:test", "test", false, true, http.Header{}, nil)
-	history := gjson.GetBytes(out, "conversationState.history").Array()
+	history := ojson.GetBytes(out, "conversationState.history").Array()
 	if len(history) != 2 {
 		t.Fatalf("expected user and assistant history entries, got %d: %s", len(history), string(out))
 	}
@@ -179,7 +179,7 @@ func TestBuildKiroPayload_MidConversationSystemStringPreservesOrder(t *testing.T
 		t.Fatalf("unexpected second history content: %q", got)
 	}
 
-	current := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String()
+	current := ojson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String()
 	want := "<system-reminder>\nmid-conversation instruction\n</system-reminder>\nfinal user turn"
 	if current != want {
 		t.Fatalf("system and final user content reordered or changed:\nwant %q\n got %q", want, current)
@@ -202,7 +202,7 @@ func TestBuildKiroPayload_MidConversationSystemArrayPreservesBlockOrder(t *testi
 	}`
 
 	out, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-6", "arn:test", "test", false, true, http.Header{}, nil)
-	history := gjson.GetBytes(out, "conversationState.history").Array()
+	history := ojson.GetBytes(out, "conversationState.history").Array()
 	if len(history) != 2 {
 		t.Fatalf("expected merged user and assistant history entries, got %d: %s", len(history), string(out))
 	}
@@ -213,7 +213,7 @@ func TestBuildKiroPayload_MidConversationSystemArrayPreservesBlockOrder(t *testi
 	if got := history[1].Get("assistantResponseMessage.content").String(); got != "assistant after system" {
 		t.Fatalf("assistant order changed: %q", got)
 	}
-	if got := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String(); got != "after assistant" {
+	if got := ojson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String(); got != "after assistant" {
 		t.Fatalf("final user order changed: %q", got)
 	}
 }
@@ -265,8 +265,8 @@ func TestBuildKiroPayload_OmitsPerRequestTimestampContext(t *testing.T) {
 	out1, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-5", "arn:test", "test", false, false, http.Header{}, nil)
 	out2, _ := BuildKiroPayload([]byte(claudeReq), "claude-sonnet-4-5", "arn:test", "test", false, false, http.Header{}, nil)
 
-	content1 := gjson.GetBytes(out1, "conversationState.currentMessage.userInputMessage.content").String()
-	content2 := gjson.GetBytes(out2, "conversationState.currentMessage.userInputMessage.content").String()
+	content1 := ojson.GetBytes(out1, "conversationState.currentMessage.userInputMessage.content").String()
+	content2 := ojson.GetBytes(out2, "conversationState.currentMessage.userInputMessage.content").String()
 
 	if strings.Contains(content1, "[Context: Current time is") {
 		t.Fatalf("expected payload content to omit timestamp context, got: %s", content1)

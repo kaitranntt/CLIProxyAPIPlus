@@ -9,13 +9,13 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	management "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
-	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	management "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
-func TestRegisterModelsForAuth_MergesOAuthExcludedModelsFromConfigAndAuthAttribute(t *testing.T) {
+func TestRegisterModelsForAuth_CredentialExcludedModelsOverrideGlobal(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{
 			OAuthExcludedModels: map[string][]string{
@@ -56,13 +56,14 @@ func TestRegisterModelsForAuth_MergesOAuthExcludedModelsFromConfigAndAuthAttribu
 		}
 	}
 
+	foundGlobalModel := false
 	for _, model := range models {
-		if model == nil {
-			continue
+		if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), "gemini-2.5-pro") {
+			foundGlobalModel = true
 		}
-		if strings.EqualFold(strings.TrimSpace(model.ID), "gemini-2.5-pro") {
-			t.Fatalf("expected global excluded model %q to be excluded", model.ID)
-		}
+	}
+	if !foundGlobalModel {
+		t.Fatal("credential exclusions must override the global exclusions")
 	}
 }
 
@@ -476,20 +477,45 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	if webSearchModel.ContextLength != staticWebSearchModel.ContextLength || webSearchModel.MaxCompletionTokens != staticWebSearchModel.MaxCompletionTokens {
 		t.Fatalf("static token limits should be preserved, got=%#v static=%#v", webSearchModel, staticWebSearchModel)
 	}
-	if agentModel == nil {
-		t.Fatal("expected gemini-pro-agent to be registered")
-	}
-	expectedAgentSearch := false
-	if staticAgent := staticByID["gemini-pro-agent"]; staticAgent != nil {
-		expectedAgentSearch = staticAgent.SupportsWebSearch
-	}
-	if agentModel.SupportsWebSearch != expectedAgentSearch {
-		t.Fatalf("gemini-pro-agent SupportsWebSearch = %t, want catalog-relative %t", agentModel.SupportsWebSearch, expectedAgentSearch)
-	}
-	if staticOnlyModel == nil {
-		t.Fatal("expected static-only Antigravity model to remain registered")
+	if agentModel != nil || staticOnlyModel != nil {
+		t.Fatal("models absent from the account catalog must not be registered")
 	}
 	if fetchedOnlyModel != nil {
 		t.Fatalf("fetched-only model should not be registered: %#v", fetchedOnlyModel)
+	}
+}
+
+func TestRegisterModelsForAuth_DevinSWE16SlowIncluded(t *testing.T) {
+	service := &Service{}
+	auth := &coreauth.Auth{
+		ID:       "auth-devin-test-swe16slow",
+		Provider: "devin",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := registry.GetModelsForClient(auth.ID)
+	var foundSlow *internalregistry.ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "devin/swe-1-6-slow" {
+			foundSlow = m
+			break
+		}
+	}
+	if foundSlow == nil {
+		t.Fatal("expected devin/swe-1-6-slow to be registered for devin auth")
+	}
+	if foundSlow.DisplayName != "SWE-1.6 Slow" {
+		t.Errorf("DisplayName = %q, want 'SWE-1.6 Slow'", foundSlow.DisplayName)
 	}
 }
