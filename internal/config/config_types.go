@@ -949,3 +949,16 @@ func (m OpenAICompatibilityModel) GetIsCompat() bool               { return m.Is
 func (m OpenAICompatibilityModel) GetUseMaxCompletionTokens() bool { return m.UseMaxCompletionTokens }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+// FallbackCandidate represents a provider and model target in a fallback chain.
+type FallbackCandidate struct {
+	Provider string `yaml:"provider" json:"provider"`
+	Model    string `yaml:"model" json:"model"`
+}
+
+// FallbackChainConfig defines an ordered cross-model fallback chain configuration.
+type FallbackChainConfig struct {
+	Candidates         []FallbackCandidate `yaml:"candidates" json:"candidates"`
+	StickyPrimary      bool                `yaml:"sticky-primary" json:"sticky-primary"`
+	ExhaustionCooldown string              `yaml:"exhaustion-cooldown" json:"exhaustion-cooldown"`
+}

@@ -119,6 +119,10 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return executeFallbackChain(m, ctx, providers, req, opts, m.executeWithoutFallbackChain)
+}
+
+func (m *Manager) executeWithoutFallbackChain(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
@@ -133,6 +137,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
+	if fallbackAttempt(ctx) != nil {
+		maxRetryCredentials = 0
+	}
 	var lastErr error
 	var preferredUpstreamErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
@@ -150,7 +157,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return resp, nil
 		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
+			return cliproxyexecutor.Response{}, fallbackExecutionBoundaryError(ctx, errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
 			preferredUpstreamErr = errExec
@@ -158,6 +165,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		lastErr = errExec
 		for id := range roundAttempted {
 			tried[id] = struct{}{}
+		}
+		if fallbackAttempt(ctx) != nil && m.fallbackCurrentPoolExhausted(ctx, normalized, req, opts) {
+			break
 		}
 		status := statusCodeFromError(errExec)
 		nextRoundExclusions := m.resetRecoveredExclusions(tried, callerExcluded, status)
@@ -195,6 +205,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return executeFallbackChain(m, ctx, providers, req, opts, m.executeCountWithoutFallbackChain)
+}
+
+func (m *Manager) executeCountWithoutFallbackChain(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
@@ -209,6 +223,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
+	if fallbackAttempt(ctx) != nil {
+		maxRetryCredentials = 0
+	}
 	var lastErr error
 	var preferredUpstreamErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
@@ -226,7 +243,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			return resp, nil
 		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
+			return cliproxyexecutor.Response{}, fallbackExecutionBoundaryError(ctx, errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
 			preferredUpstreamErr = errExec
@@ -234,6 +251,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		lastErr = errExec
 		for id := range roundAttempted {
 			tried[id] = struct{}{}
+		}
+		if fallbackAttempt(ctx) != nil && m.fallbackCurrentPoolExhausted(ctx, normalized, req, opts) {
+			break
 		}
 		status := statusCodeFromError(errExec)
 		nextRoundExclusions := m.resetRecoveredExclusions(tried, callerExcluded, status)
@@ -264,6 +284,10 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return executeFallbackChain(m, ctx, providers, req, opts, m.executeStreamWithoutFallbackChain)
+}
+
+func (m *Manager) executeStreamWithoutFallbackChain(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	if m.HomeEnabled() {
@@ -278,6 +302,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
+	if fallbackAttempt(ctx) != nil {
+		maxRetryCredentials = 0
+	}
 	var lastErr error
 	var preferredUpstreamErr error
 	homeRetryLimit := -1
@@ -317,11 +344,14 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		retryRoundPending = false
 		retryRoundWaited = false
 		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
-			return nil, unwrapExecutionBoundaryError(errStream)
+			return nil, fallbackExecutionBoundaryError(ctx, errStream)
 		}
 		lastErr = errStream
 		for id := range roundAttempted {
 			tried[id] = struct{}{}
+		}
+		if fallbackAttempt(ctx) != nil && m.fallbackCurrentPoolExhausted(ctx, normalized, req, opts) {
+			break
 		}
 		status := statusCodeFromError(errStream)
 		nextRoundExclusions := m.resetRecoveredExclusions(tried, callerExcluded, status)
@@ -357,6 +387,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+			if fallbackAttempt(ctx) != nil {
+				return nil, lastErr
+			}
 			if m.HomeEnabled() {
 				return streamErrorResult(bootstrapErr.Headers(), lastErr), nil
 			}
@@ -580,6 +613,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			recordFallbackFailure(ctx, auth, errPrepare)
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
@@ -672,6 +706,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
+				recordFallbackFailure(ctx, auth, errExec)
 				tracker.Record(auth, errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -804,6 +839,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			recordFallbackFailure(ctx, auth, errPrepare)
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
@@ -896,6 +932,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
+				recordFallbackFailure(ctx, auth, errExec)
 				tracker.Record(auth, errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -1143,6 +1180,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			recordFallbackFailure(ctx, auth, errPrepare)
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
 				if homeSameAuthRetries[auth.ID] > 0 {
@@ -1232,6 +1270,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
+			recordFallbackFailure(ctx, auth, errStream)
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
 			}
