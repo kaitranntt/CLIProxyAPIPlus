@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 // ErrCursorVariantUnavailable identifies a combination absent from this account.
@@ -213,16 +213,16 @@ func cursorOptions(model string, payload []byte, format string) (cursorModelOpti
 	options := cursorModelOptions{effort: thinking.ExtractReasoningEffort(nil, format, model)}
 	if options.effort == "" {
 		options.effort = thinking.ExtractReasoningEffort(payload, format, model)
-		options.thinkingType = gjson.GetBytes(payload, "thinking.type").String()
+		options.thinkingType = ojson.GetBytes(payload, "thinking.type").String()
 		// Claude also accepts output_config.effort with enabled thinking.
 		if format == "claude" {
-			if option := gjson.GetBytes(payload, "output_config.effort"); option.Exists() {
+			if option := ojson.GetBytes(payload, "output_config.effort"); option.Exists() {
 				options.effort = strings.ToLower(strings.TrimSpace(option.String()))
 			}
 		}
 	}
 	for _, path := range []string{"service_tier", "speed"} {
-		value := gjson.GetBytes(payload, path).String()
+		value := ojson.GetBytes(payload, path).String()
 		switch value {
 		case "", "auto", "default", "standard":
 		case "fast", "priority":

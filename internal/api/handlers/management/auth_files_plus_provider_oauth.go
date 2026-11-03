@@ -17,22 +17,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
-	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
-	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
-	gitlabauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gitlab"
-	iflowauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
-	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor"
+	geminiAuth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/gemini"
+	gitlabauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/gitlab"
+	iflowauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/iflow"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kilo"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -1289,7 +1289,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 
 		if resp.StatusCode == http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			if gjson.GetBytes(bodyBytes, "state").String() == "ENABLED" {
+			if ojson.GetBytes(bodyBytes, "state").String() == "ENABLED" {
 				_ = resp.Body.Close()
 				continue
 			}
@@ -1310,7 +1310,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		errMessage := string(bodyBytes)
-		errMessageResult := gjson.GetBytes(bodyBytes, "error.message")
+		errMessageResult := ojson.GetBytes(bodyBytes, "error.message")
 		if errMessageResult.Exists() {
 			errMessage = errMessageResult.String()
 		}

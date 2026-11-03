@@ -18,29 +18,30 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cmd"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/store"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -84,6 +85,7 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 
 type commandModeOptions struct {
 	vertexImport       string
+	siwcBind           string
 	pluginCommandLine  bool
 	login              bool
 	antigravityLogin   bool
@@ -114,6 +116,7 @@ type commandModeOptions struct {
 
 func isOneShotCommandMode(opts commandModeOptions) bool {
 	return strings.TrimSpace(opts.vertexImport) != "" ||
+		strings.TrimSpace(opts.siwcBind) != "" ||
 		opts.pluginCommandLine ||
 		opts.login ||
 		opts.antigravityLogin ||
@@ -218,6 +221,7 @@ func main() {
 	var discoverExclude []string
 	var vertexImport string
 	var vertexImportPrefix string
+	var siwcBind string
 	var configPath string
 	var password string
 	var homeJWT string
@@ -226,6 +230,7 @@ func main() {
 	var standalone bool
 	var noIncognito bool
 	var useIncognito bool
+	var managementBaseURL string
 	var localModel bool
 
 	// Define command-line flags for different operation modes.
@@ -271,12 +276,14 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
+	flag.StringVar(&siwcBind, "siwc-bind", "", "Bind Sign in with ChatGPT (SIWC) credentials to a Codex credential file")
 	flag.StringVar(&password, "password", "", "")
 	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
 	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured Home address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
-	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
+	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
+	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -684,7 +691,7 @@ func main() {
 				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
 				return
 			}
-			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
+			if errCommit := persistSeededConfig(context.Background(), configFilePath, gitStoreInst.PersistConfig); errCommit != nil {
 				log.Errorf("failed to commit initial git-backed config: %v", errCommit)
 				return
 			}
@@ -764,6 +771,7 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+	githubauth.SetToken(cfg.GitHubToken)
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
@@ -774,6 +782,7 @@ func main() {
 
 	commandMode := isOneShotCommandMode(commandModeOptions{
 		vertexImport:       vertexImport,
+		siwcBind:           siwcBind,
 		pluginCommandLine:  pluginHost.HasTriggeredCommandLineFlags(),
 		login:              login,
 		antigravityLogin:   antigravityLogin,
@@ -861,6 +870,9 @@ func main() {
 	} else if login {
 		// Handle Google/Gemini login.
 		cmd.DoLogin(cfg, projectID, options)
+	} else if siwcBind != "" {
+		// Handle Sign in with ChatGPT (SIWC) credential binding
+		cmd.DoSIWCBind(cfg, siwcBind, options)
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)
@@ -970,14 +982,14 @@ func main() {
 			return
 		}
 		if localModel && (!tuiMode || standalone) {
-			log.Info("Local model mode: using embedded model catalogs, remote model updates disabled")
+			log.Info("Local model mode: using embedded catalogs unless an explicit catalog source is configured")
 		}
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+				registry.SetLocalModelCatalogs(localModel)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -1042,8 +1054,9 @@ func main() {
 				<-done
 			} else {
 				// Default TUI mode: pure management client.
-				// The proxy server must already be running.
-				if errRun := tui.Run(cfg.Port, password, nil, os.Stdout); errRun != nil {
+				// The proxy server must already be running (locally or remotely).
+				baseURL := resolveManagementBaseURL(managementBaseURL, cfg)
+				if errRun := tui.RunWithBaseURL(baseURL, password, nil, os.Stdout); errRun != nil {
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
 				}
 			}
@@ -1051,7 +1064,7 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+			registry.SetLocalModelCatalogs(localModel)
 			if cfg.AuthDir != "" {
 				kiro.InitRateLimiterConfig(cfg)
 				kiro.InitSystemPromptInjectConfig(cfg)
@@ -1060,35 +1073,43 @@ func main() {
 				kiro.InitializeAndStart(cfg.AuthDir, cfg)
 				defer kiro.StopGlobalRefreshManager()
 			}
-
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
 }
 
-// modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
-// Codex client and Devin catalogs still refresh under Home mode because
-// template metadata and Devin models stay edge-local.
-func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient, startDevin bool) {
-	if localModel {
-		return false, false, false
+// resolveManagementBaseURL determines the management API base URL for TUI client mode.
+// Priority: command-line flag > config file remote-management.base-url > default localhost.
+func resolveManagementBaseURL(flagURL string, cfg *config.Config) string {
+	baseURL := strings.TrimSpace(flagURL)
+	if baseURL != "" {
+		return baseURL
 	}
-	return !homeEnabled, true, true
+	if cfg != nil {
+		baseURL = strings.TrimSpace(cfg.RemoteManagement.BaseURL)
+		if baseURL != "" {
+			return baseURL
+		}
+	}
+	port := 8317
+	if cfg != nil && cfg.Port > 0 {
+		port = cfg.Port
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
 }
 
-func startModelCatalogUpdaters(localModel, homeEnabled bool) {
-	startModels, startCodexClient, startDevin := modelCatalogUpdaterPlan(localModel, homeEnabled)
-	if startCodexClient {
-		registry.StartCodexClientModelsUpdater(context.Background())
+// persistSeededConfig persists a config file freshly copied from the template. The file
+// is first rewritten as the startup load would, so a plaintext management secret never
+// reaches the remote store. When that fails, the copy is removed and an error returned,
+// so every start refuses the template instead of running from an unpersisted config.
+func persistSeededConfig(ctx context.Context, configFilePath string, persist func(context.Context) error) error {
+	if errPrepare := config.PrepareConfigFileForUpload(configFilePath); errPrepare != nil {
+		if errRemove := os.Remove(configFilePath); errRemove != nil {
+			log.WithError(errRemove).Warn("failed to remove the config copied from the template")
+		}
+		return fmt.Errorf("prepare config for upload: %w", errPrepare)
 	}
-	if startDevin {
-		registry.StartDevinModelsUpdater(context.Background())
-	}
-	if startModels {
-		registry.StartModelsUpdater(context.Background())
-	} else if homeEnabled {
-		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
-	}
+	return persist(ctx)
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {

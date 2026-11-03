@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Compare full requests and SSE transcripts with the unmodified 7.3.8 release.
+// Compare full requests and SSE transcripts with the baseline (self-terminating SSE frames, issue #6161).
 func TestResponsesCompatibilityDigest(t *testing.T) {
 	requests := [][]byte{
 		responsesPerfRequest(0), responsesPerfRequest(10), responsesPerfRequest(100),
@@ -19,7 +19,11 @@ func TestResponsesCompatibilityDigest(t *testing.T) {
 	hash := sha256.New()
 	ctx := context.Background()
 	for _, request := range requests {
-		hash.Write(ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, true))
+		body1, errConvert1 := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, true)
+		if errConvert1 != nil {
+			t.Fatal(errConvert1)
+		}
+		hash.Write(body1)
 		for _, name := range []string{"editor__read", "read", "editor__patch", "patch", "unknown"} {
 			var state any
 			chunks := []string{
@@ -37,7 +41,7 @@ func TestResponsesCompatibilityDigest(t *testing.T) {
 		}
 	}
 	got := fmt.Sprintf("%x", hash.Sum(nil))
-	const want = "cb281779e231dbb25b4fbc1f159608fb5d91a2444e0b67dcde6bc593fed23693"
+	const want = "be3fc19eade4e6aff373fdfdd0192d586b5aa83e01a6b22884456396443f8411"
 	if got != want {
 		t.Fatalf("compatibility digest: got %s, want %s", got, want)
 	}

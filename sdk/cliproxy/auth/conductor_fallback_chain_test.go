@@ -10,15 +10,15 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/claude"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/openai"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin"
 )
 
 type fallbackTestError struct {
@@ -32,7 +32,6 @@ func (e *fallbackTestError) Error() string                { return e.body }
 func (e *fallbackTestError) StatusCode() int              { return e.status }
 func (e *fallbackTestError) ResponseHeaders() http.Header { return e.headers }
 func (e *fallbackTestError) RetryAfter() *time.Duration   { return e.retry }
-
 
 func TestFallbackExhaustionClassification(t *testing.T) {
 	for _, test := range []struct {
@@ -458,7 +457,7 @@ func TestFallbackChainPreservesSourceThinkingEnvelopes(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				if !gjson.GetBytes(body, test.field).Exists() {
+				if !ojson.GetBytes(body, test.field).Exists() {
 					return fmt.Errorf("missing adapted %s in %s", test.field, body)
 				}
 				return nil

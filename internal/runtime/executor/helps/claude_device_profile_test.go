@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type fakeClaudeDeviceProfileKVClient struct {
@@ -130,7 +130,7 @@ func TestResolveClaudeDeviceProfileLocalUsesBaselineForInvalidSignals(t *testing
 func TestResolveClaudeDeviceProfileLocalKeepsExactMeasuredSoftwareBaseline(t *testing.T) {
 	ResetClaudeDeviceProfileCache()
 	auth := &cliproxyauth.Auth{ID: "auth-newer-patch-signals"}
-	headers := claudeDeviceHeaders("claude-cli/2.1.263 (external, cli)")
+	headers := claudeDeviceHeaders("claude-cli/2.1.281 (external, cli)")
 
 	profile := resolveClaudeDeviceProfileLocal(auth, "api-key", headers, nil)
 	baseline := defaultClaudeDeviceProfile(nil)
@@ -188,6 +188,35 @@ func TestApplyClaudeLegacyDeviceHeadersAcceptsConfiguredMeasuredBaseline(t *test
 	}
 	if got := request.Header.Get("X-Stainless-Runtime-Version"); got != "v26.4.0" {
 		t.Fatalf("X-Stainless-Runtime-Version = %q, want v26.4.0", got)
+	}
+}
+
+func TestApplyClaudeLegacyDeviceHeadersKeepNewerVersionsUsesConfiguredBaseline(t *testing.T) {
+	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+		UserAgent:      "claude-cli/2.2.0 (external, cli)",
+		PackageVersion: "0.95.0",
+		RuntimeVersion: "v26.4.0",
+		OS:             "MacOS",
+		Arch:           "arm64",
+	}}
+	incoming := claudeDeviceHeaders("claude-cli/2.2.5 (external, cli)")
+	incoming.Set("X-Stainless-Package-Version", "0.128.0")
+	incoming.Set("X-Stainless-Runtime-Version", "v26.5.0")
+
+	ApplyClaudeLegacyDeviceHeaders(request, incoming, cfg, true, true)
+
+	if got := request.Header.Get("User-Agent"); got != "claude-cli/2.2.5 (external, cli)" {
+		t.Fatalf("User-Agent = %q, want claude-cli/2.2.5 (external, cli)", got)
+	}
+	if got := request.Header.Get("X-Stainless-Package-Version"); got != "0.128.0" {
+		t.Fatalf("X-Stainless-Package-Version = %q, want 0.128.0", got)
+	}
+	if got := request.Header.Get("X-Stainless-Runtime-Version"); got != "v26.5.0" {
+		t.Fatalf("X-Stainless-Runtime-Version = %q, want v26.5.0", got)
 	}
 }
 
@@ -372,11 +401,22 @@ func TestResolveClaudeDeviceProfileSeparatesVSCodeAgentSDKFromCLI(t *testing.T) 
 		t.Fatalf("ResolveClaudeDeviceProfileRequired() VSCode error = %v", errVSCode)
 	}
 
+	sdkTSUA := "claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.220)"
+	sdkTSHeaders := claudeDeviceHeaders(sdkTSUA)
+	sdkTSHeaders.Set("X-Stainless-Package-Version", "0.112.1")
+	sdkTSHeaders.Set("X-Stainless-Runtime-Version", "v26.3.0")
+	sdkTSProfile, errSDKTS := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", sdkTSHeaders, nil)
+	if errSDKTS != nil {
+		t.Fatalf("ResolveClaudeDeviceProfileRequired() sdk-ts error = %v", errSDKTS)
+	}
 	if cliProfile.UserAgent != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("CLI UserAgent = %q, want CLI profile", cliProfile.UserAgent)
 	}
 	if vscodeProfile.UserAgent != vscodeUA {
 		t.Fatalf("VSCode UserAgent = %q, want %q", vscodeProfile.UserAgent, vscodeUA)
+	}
+	if sdkTSProfile.UserAgent != sdkTSUA {
+		t.Fatalf("sdk-ts UserAgent = %q, want %q", sdkTSProfile.UserAgent, sdkTSUA)
 	}
 
 	cliProfileAgain, errCLIAgain := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", cliHeaders, nil)

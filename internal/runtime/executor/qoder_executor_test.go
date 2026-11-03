@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // TestNewQoderExecutor tests the constructor
@@ -260,8 +260,11 @@ func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
 		Storage:  storage,
 	}
 
-	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 4)}
-	usage.RegisterNamedPlugin("test:qoder-stream-usage", plugin)
+	plugin := &captureQoderUsagePlugin{authID: authRecord.ID, records: make(chan usage.Record, 16)}
+	usage.RegisterNamedPlugin(t.Name(), plugin)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(t.Name(), noopClaudeUsagePlugin{})
+	})
 
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return qoderSSEHTTPResponse(req, http.StatusOK, qoderStreamBodyWithUsage(t, 3, 4, 7)), nil
@@ -459,11 +462,15 @@ func (f qoderRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 type captureQoderUsagePlugin struct {
+	authID  string
 	records chan usage.Record
 }
 
 func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
 	if p == nil {
+		return
+	}
+	if p.authID != "" && record.AuthID != p.authID {
 		return
 	}
 	select {
@@ -474,7 +481,7 @@ func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Re
 
 func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, authID, model string) usage.Record {
 	t.Helper()
-	timeout := time.After(5 * time.Second) // generous for CI scheduling jitter; correctness comes from matching the record, not the deadline
+	timeout := time.After(10 * time.Second) // generous for CI runner scheduling jitter
 	for {
 		select {
 		case record := <-records:

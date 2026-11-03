@@ -88,6 +88,16 @@ plugins:
 
 The default example model is `gpt-5.5`, but the request succeeds only when the current CPA model and auth configuration can route that model.
 
+## Host HTTP Callback Cancellation
+
+Shared-library plugins can make `host.http.do` and `host.http.do_stream` cancelable before a response or `stream_id` is returned:
+
+1. Call `host.http.operation_open` with the same live `host_callback_id` that the HTTP request will use, if any. The callback ID must belong to the calling plugin. The response contains a host-generated `operation_id` scoped to that plugin.
+2. Include that `operation_id` at the top level of the `host.http.do` or `host.http.do_stream` request, and forward the same `host_callback_id` used when opening the operation.
+3. Call `host.http.cancel` with the same `operation_id` to cancel the in-flight request. For an opened stream, cancellation also closes its host-side stream entry; `host.http.stream_close` remains supported.
+
+Each operation ID can be claimed by one HTTP callback. HTTP stream IDs are also scoped to the owning plugin. Cancel an opened operation if it will not be used, and close streams when finished. This API provides explicit cancellation, not a host-managed per-call timeout; a plugin that wants a deadline must arrange its own cancellation call.
+
 ## Scheduler
 
 `scheduler` declares the scheduler capability. It can select a configured auth ID from the candidate list, delegate to the built-in `fill-first` or `round-robin` scheduler, or reject picks when `deny` is `true`.
@@ -120,7 +130,7 @@ When a plugin executor encounters an upstream failure (such as `401 Unauthorized
 - **Important**: Both non-streaming (`executor.execute`) and streaming (`executor.execute_stream`) call sites must include `http_status` so failures are classified consistently.
 - Because native dynamic library plugins communicate across the C ABI via serialized JSON buffers, the status code must be encoded in the serialized JSON envelope (e.g. using `pluginabi.NewErrorEnvelope` or a custom envelope struct with an `http_status` field). Returning an unmarshaled Go error does not traverse the C ABI boundary.
 
-Go plugins can import `github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi` and use `pluginabi.NewErrorEnvelope(code, message, httpStatus)`:
+Go plugins can import `github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi` and use `pluginabi.NewErrorEnvelope(code, message, httpStatus)`:
 
 ```go
 // Recommended: construct an error envelope directly using sdk/pluginabi

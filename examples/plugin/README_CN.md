@@ -119,7 +119,7 @@ plugins:
 - **注意**：非流式执行（`executor.execute`）和流式执行（`executor.execute_stream`）两处报错路径均需要设置 `http_status`，以保证异常分类行为一致。
 - 原生动态库插件通过 C ABI 交换序列化的 JSON 缓冲区通信，因此状态码必须编码到序列化的 JSON 信封中（例如使用 `pluginabi.NewErrorEnvelope` 或自定义带 `http_status` 字段的信封结构体）。Go 语言原生的 error 对象无法跨越 C ABI 边界传递。
 
-Go 语言编写的插件可导入 `github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi` 并直接使用 `pluginabi.NewErrorEnvelope(code, message, httpStatus)`：
+Go 语言编写的插件可导入 `github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi` 并直接使用 `pluginabi.NewErrorEnvelope(code, message, httpStatus)`：
 
 ```go
 // 推荐方式：直接使用 sdk/pluginabi 构造错误信封

@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // tokenCount tolerates usage values that cannot be decoded as json.Number

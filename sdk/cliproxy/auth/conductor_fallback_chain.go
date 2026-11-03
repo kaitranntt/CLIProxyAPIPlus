@@ -9,12 +9,11 @@ import (
 	"sync"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 const defaultFallbackExhaustionCooldown = 15 * time.Minute
@@ -245,12 +244,12 @@ func adaptFallbackEnvelope(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		req.Payload = sdktranslator.TranslateRequest(req.Format, opts.SourceFormat, candidate.Model, req.Payload, opts.Stream)
 	}
 	if len(req.Payload) > 0 {
-		if !gjson.ValidBytes(req.Payload) || !gjson.ParseBytes(req.Payload).IsObject() {
+		if !ojson.ValidBytes(req.Payload) || !ojson.ParseBytes(req.Payload).IsObject() {
 			return req, opts, &Error{Code: "invalid_request", Message: "fallback request payload must be a JSON object", HTTPStatus: http.StatusBadRequest}
 		}
-		if model := gjson.GetBytes(req.Payload, "model"); model.Exists() && model.String() != candidate.Model {
+		if model := ojson.GetBytes(req.Payload, "model"); model.Exists() && model.String() != candidate.Model {
 			var err error
-			req.Payload, err = sjson.SetBytes(req.Payload, "model", candidate.Model)
+			req.Payload, err = ojson.SetBytes(req.Payload, "model", candidate.Model)
 			if err != nil {
 				return req, opts, err
 			}
@@ -379,7 +378,7 @@ func fallbackExhaustionKind(err error) fallbackExhaustion {
 		}
 	}
 	for _, path := range []string{"error.code", "error.type", "code", "type"} {
-		if fallbackQuotaCode(gjson.Get(body, path).String()) {
+		if fallbackQuotaCode(ojson.Get(body, path).String()) {
 			return fallbackTerminal
 		}
 	}
@@ -390,7 +389,7 @@ func fallbackExhaustionKind(err error) fallbackExhaustion {
 		hasExplicitWait = true
 	}
 	for _, path := range []string{"error.resets_in_seconds", "resets_in_seconds", "error.retry_after_seconds", "retry_after_seconds"} {
-		node := gjson.Get(body, path)
+		node := ojson.Get(body, path)
 		if node.Exists() {
 			seconds := node.Float()
 			if seconds > defaultFallbackExhaustionCooldown.Seconds() {

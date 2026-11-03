@@ -3,9 +3,9 @@ package qoder
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 func reasoningModel() *registry.ModelInfo {
@@ -76,7 +76,7 @@ func TestApply(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Apply returned error: %v", err)
 			}
-			effort := gjson.GetBytes(got, "reasoning_effort")
+			effort := ojson.GetBytes(got, "reasoning_effort")
 			if !tc.wantSet {
 				if effort.Exists() {
 					t.Fatalf("reasoning_effort = %q, want it absent", effort.String())

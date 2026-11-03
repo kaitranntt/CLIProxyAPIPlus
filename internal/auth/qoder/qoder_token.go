@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
 
 // QoderTokenStorage stores OAuth2 token information for Qoder API authentication.

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 const validClaudeCodeMetadataUserID = `{"device_id":"0000000000000000000000000000000000000000000000000000000000000000","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"11111111-2222-4333-8444-555555555555"}`
@@ -63,6 +63,11 @@ func measuredClaudeCodeMinimalHelperPayload() []byte {
 func measuredClaudeCodeStructuredHelperPayload() []byte {
 	encodedUserID, _ := json.Marshal(validClaudeCodeMetadataUserID)
 	return []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":` + string(encodedUserID) + `},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}`)
+}
+
+func measuredClaudeCodeTitle280HelperPayload() []byte {
+	encodedUserID, _ := json.Marshal(validClaudeCodeMetadataUserID)
+	return []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":80,"messages":[{"role":"user","content":"generate title"}],"metadata":{"user_id":` + string(encodedUserID) + `},"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`)
 }
 
 func TestDetectClaudeCodeRequestRequiresAllFourMessageSignals(t *testing.T) {
@@ -139,7 +144,7 @@ func TestDetectClaudeCodeRequestClassifiesEntrypoints(t *testing.T) {
 		{name: "cli", userAgent: "claude-cli/2.1.280 (external, cli)", entrypoint: "cli", subclient: "claude-code-cli", native: true},
 		{name: "vscode-agent-sdk", userAgent: "claude-cli/2.1.280 (external, claude-vscode, agent-sdk/0.3.220)", entrypoint: "claude-vscode", subclient: "claude-code-vscode", agentSDKVersion: "0.3.220", native: true},
 		{name: "sdk-cli", userAgent: "claude-cli/2.1.280 (external, sdk-cli)", entrypoint: "sdk-cli", subclient: "claude-code-cli-sdk", native: true},
-		{name: "sdk-ts", userAgent: "claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.220)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", agentSDKVersion: "0.3.220"},
+		{name: "sdk-ts", userAgent: "claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.220)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", agentSDKVersion: "0.3.220", native: true},
 		{name: "sdk-py", userAgent: "claude-cli/2.1.280 (external, sdk-py, agent-sdk/0.1.0)", entrypoint: "sdk-py", subclient: "claude-code-sdk-py", agentSDKVersion: "0.1.0"},
 		{name: "desktop", userAgent: "claude-cli/2.1.280 (external, claude-desktop)", entrypoint: "claude-desktop", subclient: "claude-desktop"},
 		{name: "desktop-third-party-inference", userAgent: "claude-cli/2.1.280 (external, claude-desktop-3p)", entrypoint: "claude-desktop-3p", subclient: "claude-desktop-3p"},
@@ -215,6 +220,11 @@ func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 			beta:    claudeCodeHelperBetaProfile(false, "structured-outputs-2025-12-15"),
 			payload: measuredClaudeCodeStructuredHelperPayload(),
 		},
+		{
+			name:    "structured title helper 2.1.280",
+			beta:    claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15", "server-side-fallback-2026-06-01", "fallback-credit-2026-06-01", "cache-diagnosis-2026-04-07"),
+			payload: measuredClaudeCodeTitle280HelperPayload(),
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -230,6 +240,54 @@ func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 				t.Fatalf("claude-code beta signal = true, want helper profile to remain separate: %#v", detection)
 			}
 		})
+	}
+}
+
+func TestDetectClaudeCodeRequestRejectsExtendedHaikuHelperBetas(t *testing.T) {
+	beta := claudeCodeHelperBetaProfile(true,
+		"structured-outputs-2025-12-15",
+		"server-side-fallback-2026-06-01",
+		"fallback-credit-2026-06-01",
+		"cache-diagnosis-2026-04-07",
+		"advisor-tool-2026-03-01",
+	)
+	detection := DetectClaudeCodeRequest(
+		measuredClaudeCodeHelperHeaders(beta),
+		measuredClaudeCodeStructuredHelperPayload(),
+		false,
+	)
+	if detection.Confirmed || detection.HelperProfile {
+		t.Fatalf("detection = %#v, want an extra helper beta rejected", detection)
+	}
+}
+
+func TestDetectClaudeCodeRequestRejectsCrossMismatchedHaikuHelperBetaAndBody(t *testing.T) {
+	title280Beta := claudeCodeHelperBetaProfile(true,
+		"structured-outputs-2025-12-15",
+		"server-side-fallback-2026-06-01",
+		"fallback-credit-2026-06-01",
+		"cache-diagnosis-2026-04-07",
+	)
+	legacyStructuredBeta := claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15")
+
+	// 1. Title 2.1.280 beta with 2.1.258 structured stream payload must be rejected
+	det1 := DetectClaudeCodeRequest(
+		measuredClaudeCodeHelperHeaders(title280Beta),
+		measuredClaudeCodeStructuredHelperPayload(),
+		false,
+	)
+	if det1.Confirmed || det1.HelperProfile {
+		t.Fatalf("det1 = %#v, want 2.1.280 beta with legacy structured payload rejected", det1)
+	}
+
+	// 2. Legacy structured beta with 2.1.280 title non-stream payload must be rejected
+	det2 := DetectClaudeCodeRequest(
+		measuredClaudeCodeHelperHeaders(legacyStructuredBeta),
+		measuredClaudeCodeTitle280HelperPayload(),
+		false,
+	)
+	if det2.Confirmed || det2.HelperProfile {
+		t.Fatalf("det2 = %#v, want legacy beta with 2.1.280 title payload rejected", det2)
 	}
 }
 
@@ -530,4 +588,37 @@ func TestMeasuredHelperProfileIgnoresConfiguredStainlessTimeout(t *testing.T) {
 			t.Fatalf("detection = %#v, want a non-measured timeout to disqualify the helper profile", detection)
 		}
 	})
+}
+
+func TestDetectClaudeCodeRequestRecognizesAgentSDKHaiku55Helpers(t *testing.T) {
+	encodedUserID, _ := json.Marshal(validClaudeCodeMetadataUserID)
+	titleBetas := "interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,effort-2025-11-24,structured-outputs-2025-12-15,extended-cache-ttl-2025-04-11"
+	titlePayload := []byte(`{"max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"name session"}]}],"metadata":{"user_id":` + string(encodedUserID) + `},"model":"claude-haiku-5-5","output_config":{"effort":"medium","format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.304.c80; cc_entrypoint=sdk-ts"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."},{"type":"text","text":"You are naming a coding session so the user can pick it out of a long list of sessions."}],"tools":[]}`)
+
+	webSearchBetas := "interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,extended-cache-ttl-2025-04-11"
+	webSearchPayload := []byte(`{"max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"search query"}]}],"metadata":{"user_id":` + string(encodedUserID) + `},"model":"claude-haiku-5-5","output_config":{"effort":"medium"},"stream":true,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.304.2e0; cc_entrypoint=sdk-ts"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."},{"type":"text","text":"Perform web search."}],"tool_choice":{"type":"auto"},"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
+
+	for _, tc := range []struct {
+		name    string
+		betas   string
+		payload []byte
+	}{
+		{name: "sdk-ts title helper", betas: titleBetas, payload: titlePayload},
+		{name: "sdk-ts web_search helper", betas: webSearchBetas, payload: webSearchPayload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := measuredClaudeCodeHelperHeaders(tc.betas)
+			headers.Set("User-Agent", "claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.3.276)")
+			headers.Set("X-Stainless-Package-Version", "0.128.0")
+			headers.Del("X-Client-Request-Id")
+
+			detection := DetectClaudeCodeRequest(headers, tc.payload, false)
+			if !detection.Confirmed || !detection.StrongSignals || !detection.NativeClient || !detection.HelperProfile {
+				t.Fatalf("detection = %#v, want confirmed sdk-ts Haiku 5.5 helper", detection)
+			}
+			if detection.Entrypoint != "sdk-ts" || detection.Subclient != "claude-code-sdk-ts" || detection.AgentSDKVersion != "0.3.276" {
+				t.Fatalf("detection identity = %#v, want sdk-ts / claude-code-sdk-ts / 0.3.276", detection)
+			}
+		})
+	}
 }
