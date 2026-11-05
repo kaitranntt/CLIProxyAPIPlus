@@ -845,36 +845,70 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 			if !value.Exists() || value.Type == ojson.Null {
 				continue
 			}
-			if field == "message" {
+			switch field {
+			case "message":
 				safeMsg := truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), openAIStreamErrorMessageLimit)
 				if errSet := errorDoc.Set("message", safeMsg); errSet != nil {
 					return nil, errSet
 				}
 				copied = true
-				continue
+			case "param":
+				safeParam := truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), openAIStreamErrorFieldLimit)
+				if errSet := errorDoc.Set("param", safeParam); errSet != nil {
+					return nil, errSet
+				}
+				copied = true
+			case "type", "code":
+				safeText := truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), openAIStreamErrorFieldLimit)
+				if errSet := errorDoc.Set(field, safeText); errSet != nil {
+					return nil, errSet
+				}
+				copied = true
+			case "resets_in_seconds", "reset_seconds":
+				if value.Type == ojson.Number {
+					if errSet := errorDoc.Set(field, value.Int()); errSet != nil {
+						return nil, errSet
+					}
+					copied = true
+				}
+			case "reset_time":
+				if value.Type == ojson.String {
+					safeTime := truncateOpenAIStreamErrorText(value.String(), openAIStreamErrorFieldLimit)
+					if errSet := errorDoc.Set(field, safeTime); errSet != nil {
+						return nil, errSet
+					}
+					copied = true
+				}
+			case "retryable":
+				if value.Type == ojson.True || value.Type == ojson.False {
+					if errSet := errorDoc.Set(field, value.Bool()); errSet != nil {
+						return nil, errSet
+					}
+					copied = true
+				}
 			}
-			if errSet := errorDoc.SetRawBytes(field, []byte(value.Raw)); errSet != nil {
+		}
+		if copied {
+			if errSet := payloadDoc.SetRawBytes("error", errorDoc.Bytes()); errSet != nil {
 				return nil, errSet
 			}
-			copied = true
+			hasErrorField = true
 		}
-		var errSet error
-		if copied {
-			errSet = payloadDoc.SetRawBytes("error", errorDoc.Bytes())
-		} else {
-			errSet = payloadDoc.SetRawBytes("error", []byte(errorNode.Raw))
-		}
-		if errSet != nil {
-			return nil, errSet
-		}
-		hasErrorField = true
 	}
 
 	if !hasErrorField {
+		fallbackMsg := errText
+		if json.Valid([]byte(fallbackMsg)) {
+			fallbackMsg = http.StatusText(status)
+		}
+		fallbackMsg = truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(fallbackMsg), openAIStreamErrorMessageLimit)
+		if fallbackMsg == "" {
+			fallbackMsg = http.StatusText(status)
+		}
 		if errSet := payloadDoc.Set("error.type", "server_error"); errSet != nil {
 			return nil, errSet
 		}
-		if errSet := payloadDoc.Set("error.message", errText); errSet != nil {
+		if errSet := payloadDoc.Set("error.message", fallbackMsg); errSet != nil {
 			return nil, errSet
 		}
 	}

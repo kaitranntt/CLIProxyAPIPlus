@@ -3403,6 +3403,53 @@ func TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketErrorPayloadSanitizesParamSecrets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "ws-param-secret-9999"
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"type":"invalid_request_error","code":"invalid_param","message":"bad param","param":"api_key=` + secret + `"}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("webSocket rebuilt error leaked param secret: %s", raw)
+	}
+	param := ojson.GetBytes(payload, "error.param").String()
+	if !strings.Contains(param, "[REDACTED]") {
+		t.Fatalf("param was not redacted: %q (payload=%s)", param, raw)
+	}
+}
+
+func TestResponsesWebsocketErrorPayloadDropsUnknownOnlyErrorObject(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "super-secret-key-12345"
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"api_key":"` + secret + `","internal_token":"top-secret"}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) || strings.Contains(raw, "top-secret") {
+		t.Fatalf("webSocket rebuilt error leaked unknown fields: %s", raw)
+	}
+	if strings.Contains(raw, "api_key") || strings.Contains(raw, "internal_token") {
+		t.Fatalf("webSocket rebuilt error retained unknown field keys: %s", raw)
+	}
+	if got := ojson.GetBytes(payload, "error.type").String(); got != "server_error" {
+		t.Fatalf("error.type = %q, want server_error", got)
+	}
+	if got := ojson.GetBytes(payload, "error.message").String(); got != http.StatusText(http.StatusBadRequest) {
+		t.Fatalf("error.message = %q, want %q", got, http.StatusText(http.StatusBadRequest))
+	}
+}
+
 // TestResponsesWebsocketTerminalErrorUnknownFieldNotEchoed drives a valid
 // in-band error frame that carries an unknown secret field through
 // forwardResponsesWebsocket. The raw frame bytes/fields must never be echoed;
