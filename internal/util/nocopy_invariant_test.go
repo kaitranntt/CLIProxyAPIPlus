@@ -166,6 +166,7 @@ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 	"internal/pluginstore/auth.go":                                  {1, "zeroes a locally built credential buffer after base64 encoding copied it out"},
 	"internal/runtime/executor/devin_protobuf.go":                   {1, "copies a protobuf payload into a freshly allocated Connect frame"},
 	"internal/auth/cursor/proto/connect.go":                         {1, "copies a protobuf payload into a freshly allocated Connect frame"},
+	"internal/kvstore/bolt_store.go":                                {1, "copies payload into a freshly allocated envelope buffer"},
 }
 
 // TestInPlaceByteWritesAreReviewed keeps the set of in-place byte writes small

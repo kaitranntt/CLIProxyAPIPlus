@@ -2700,7 +2700,7 @@ func TestShouldExposeResponsesUpstreamError(t *testing.T) {
 		{status: http.StatusUnprocessableEntity, want: true},
 		{status: http.StatusUnauthorized},
 		{status: http.StatusRequestTimeout},
-		{status: http.StatusTooManyRequests},
+		{status: http.StatusTooManyRequests, want: true},
 		{status: http.StatusInternalServerError},
 	}
 
@@ -2741,12 +2741,25 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 			body:   `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}`,
 			want:   true,
 		},
-		// Credential, quota and transport failures stay silent: the client just
+		// Credential and transport failures stay silent: the client just
 		// reconnects, and a fresh socket already implies a full context resend.
+		// Terminal 429 / quota / model-cooldown errors are exposed once failover ends.
 		{name: "unauthorized", status: http.StatusUnauthorized, body: "invalid token"},
 		{name: "payment required", status: http.StatusPaymentRequired, body: "insufficient credits"},
 		{name: "forbidden", status: http.StatusForbidden, body: "forbidden"},
-		{name: "too many requests", status: http.StatusTooManyRequests, body: "usage limit reached"},
+		{name: "too many requests", status: http.StatusTooManyRequests, body: "usage limit reached", want: true},
+		{
+			name:   "usage limit reached at 502",
+			status: http.StatusBadGateway,
+			body:   `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}`,
+			want:   true,
+		},
+		{
+			name:   "model cooldown at 500",
+			status: http.StatusInternalServerError,
+			body:   `{"error":{"code":"model_cooldown","message":"All credentials for model gpt-5 are cooling down","reset_seconds":60}}`,
+			want:   true,
+		},
 		{name: "request timeout", status: http.StatusRequestTimeout, body: "timeout"},
 		{name: "bad gateway", status: http.StatusBadGateway, body: "bad gateway"},
 		{
@@ -3112,15 +3125,6 @@ func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) 
 			err:  errors.New("read tcp 198.18.0.1:53030->145.223.58.12:6281: i/o timeout"),
 		},
 		{
-			// Credential failover already ran and lost; the client only needs to
-			// reconnect, so no downstream error is produced.
-			name: "quota exhausted",
-			err: websocketPinnedFailoverStatusError{
-				status: http.StatusTooManyRequests,
-				msg:    `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`,
-			},
-		},
-		{
 			name: "credential rejected",
 			err: websocketPinnedFailoverStatusError{
 				status: http.StatusUnauthorized,
@@ -3396,6 +3400,91 @@ func TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload(t *testing.T) {
 	}
 	if !strings.Contains(raw, "[REDACTED]") {
 		t.Fatalf("rebuilt payload not redacted: %q", raw)
+	}
+}
+
+func TestResponsesWebsocketErrorPayloadSanitizesParamSecrets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "ws-param-secret-9999"
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"type":"invalid_request_error","code":"invalid_param","message":"bad param","param":"api_key=` + secret + `"}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("webSocket rebuilt error leaked param secret: %s", raw)
+	}
+	param := ojson.GetBytes(payload, "error.param").String()
+	if !strings.Contains(param, "[REDACTED]") {
+		t.Fatalf("param was not redacted: %q (payload=%s)", param, raw)
+	}
+}
+
+func TestResponsesWebsocketErrorPayloadDropsUnknownOnlyErrorObject(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "super-secret-key-12345"
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"api_key":"` + secret + `","internal_token":"top-secret"}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) || strings.Contains(raw, "top-secret") {
+		t.Fatalf("webSocket rebuilt error leaked unknown fields: %s", raw)
+	}
+	if strings.Contains(raw, "api_key") || strings.Contains(raw, "internal_token") {
+		t.Fatalf("webSocket rebuilt error retained unknown field keys: %s", raw)
+	}
+	if got := ojson.GetBytes(payload, "error.type").String(); got != "server_error" {
+		t.Fatalf("error.type = %q, want server_error", got)
+	}
+	if got := ojson.GetBytes(payload, "error.message").String(); got != http.StatusText(http.StatusBadRequest) {
+		t.Fatalf("error.message = %q, want %q", got, http.StatusText(http.StatusBadRequest))
+	}
+}
+
+func TestResponsesWebsocketErrorPayloadValidatesTimingFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "secret-timing-token-8888"
+
+	// Case 1: Malformed string in reset_time or non-number in resets_in_seconds must be rejected.
+	malformedErrMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New(`{"error":{"reset_time":"api_key=` + secret + `","resets_in_seconds":"not-a-number"}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(malformedErrMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("webSocket rebuilt error leaked timing secret: %s", raw)
+	}
+	if strings.Contains(raw, "reset_time") || strings.Contains(raw, "resets_in_seconds") {
+		t.Fatalf("malformed timing fields survived sanitization: %s", raw)
+	}
+
+	// Case 2: Valid reset_time duration string (e.g. "30s") and valid resets_in_seconds are preserved.
+	validErrMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New(`{"error":{"type":"model_cooldown","message":"cooling","reset_time":"30s","resets_in_seconds":30}}`),
+	}
+	validPayload, errValid := buildResponsesWebsocketErrorPayload(validErrMsg)
+	if errValid != nil {
+		t.Fatalf("valid timing buildResponsesWebsocketErrorPayload: %v", errValid)
+	}
+	if got := ojson.GetBytes(validPayload, "error.reset_time").String(); got != "30s" {
+		t.Fatalf("valid error.reset_time = %q, want 30s", got)
+	}
+	if got := ojson.GetBytes(validPayload, "error.resets_in_seconds").Int(); got != 30 {
+		t.Fatalf("valid error.resets_in_seconds = %d, want 30", got)
 	}
 }
 
