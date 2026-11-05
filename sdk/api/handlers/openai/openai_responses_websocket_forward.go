@@ -269,7 +269,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// payload errors after response.created are recoverable events;
 				// StreamChunk.Err still arrives through errs and closes the socket.
 				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
-				if eventType == wsEventTypeError && !preserveErrorEvent {
+				if eventType == wsEventTypeError && preserveErrorEvent {
+					turnEnded = true
+					if errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i]); errMsg != nil && h != nil {
+						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+					}
+				} else if eventType == wsEventTypeError && !preserveErrorEvent {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
 					if h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
@@ -385,11 +390,11 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Only request-shape failures are exposed: the client can act on them and no
-// credential rotation or retry can make the request succeed. Credential, quota
-// and transport failures stay silent so the client simply reconnects and retries;
-// a fresh connection carries no server-side transcript, so reconnecting already
-// implies a full context resend.
+// Request-shape failures, permanent auth failures, and terminal 429 quota or
+// model-cooldown failures (where credential failover has already exhausted all
+// eligible candidates) are exposed so the client can surface the final error
+// instead of reconnecting in a loop. Transient credential and transport failures
+// stay silent so the client reconnects with a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
@@ -397,7 +402,52 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
-	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
+	status := responsesWebsocketErrorStatus(errMsg)
+	if status == http.StatusTooManyRequests || isResponsesWebsocketQuotaOrCooldownError(errMsg.Error) {
+		return true
+	}
+	return clienterror.IsRequestFault(status, errMsg.Error)
+}
+
+func isResponsesWebsocketQuotaOrCooldownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type modelCooldownMarker interface {
+		IsModelCooldown() bool
+	}
+	var mcm modelCooldownMarker
+	if errors.As(err, &mcm) && mcm != nil && mcm.IsModelCooldown() {
+		return true
+	}
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil && strings.EqualFold(strings.TrimSpace(authErr.Code), "model_cooldown") {
+		return true
+	}
+	body := strings.TrimSpace(err.Error())
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" || !ojson.Valid(body) {
+		return false
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+		switch strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())) {
+		case "usage_limit_reached", "model_cooldown":
+			return true
+		}
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		switch strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())) {
+		case "usage_limit_reached", "model_cooldown":
+			return true
+		}
+	}
+	return false
 }
 
 func writeResponsesWebsocketTerminalError(
@@ -719,21 +769,19 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byte, error) {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
-	var turnErr *cliproxyexecutor.UpstreamWebsocketTurnError
 	if errMsg != nil {
-		errors.As(errMsg.Error, &turnErr)
-	}
-	if errMsg != nil {
-		errMsg = sanitizeOpenAIErrorMessage(errMsg)
-		if errMsg.StatusCode > 0 {
-			status = errMsg.StatusCode
+		if code := responsesWebsocketErrorStatus(errMsg); code > 0 {
+			status = code
+			errText = http.StatusText(status)
+		}
+		if isResponsesWebsocketQuotaOrCooldownError(errMsg.Error) && (status <= 0 || status >= http.StatusInternalServerError) {
+			status = http.StatusTooManyRequests
 			errText = http.StatusText(status)
 		}
 		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 			errText = errMsg.Error.Error()
 		}
 	}
-
 	var errCause error
 	if errMsg != nil {
 		errCause = errMsg.Error
@@ -747,11 +795,25 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
+	if errMsg != nil {
 		headersDoc := ojson.NewDoc([]byte(`{}`))
 		hasHeaders := false
+		trustedDeadline := coreauth.HasTrustedRetryDeadline(errMsg.Error)
+		for key, values := range coreauth.SafeResponseHeaders(errMsg.Error) {
+			if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+				continue
+			}
+			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
+			if errSet := headersDoc.Set(headerPath, values[0]); errSet != nil {
+				return nil, errSet
+			}
+			hasHeaders = true
+		}
 		for key, values := range errMsg.Addon {
-			if len(values) == 0 {
+			if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+				continue
+			}
+			if trustedDeadline && http.CanonicalHeaderKey(key) == "Retry-After" {
 				continue
 			}
 			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
@@ -778,9 +840,17 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		}
 		errorDoc := ojson.NewDoc([]byte(`{}`))
 		copied := false
-		for _, field := range []string{"type", "code", "message", "param", "retryable"} {
+		for _, field := range []string{"type", "code", "message", "param", "retryable", "resets_in_seconds", "reset_seconds", "reset_time"} {
 			value := errorNode.Get(field)
 			if !value.Exists() || value.Type == ojson.Null {
+				continue
+			}
+			if field == "message" {
+				safeMsg := truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), openAIStreamErrorMessageLimit)
+				if errSet := errorDoc.Set("message", safeMsg); errSet != nil {
+					return nil, errSet
+				}
+				copied = true
 				continue
 			}
 			if errSet := errorDoc.SetRawBytes(field, []byte(value.Raw)); errSet != nil {
@@ -809,7 +879,8 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		}
 	}
 
-	if turnErr != nil && turnErr.EventID != "" {
+	var turnErr *cliproxyexecutor.UpstreamWebsocketTurnError
+	if errMsg != nil && errors.As(errMsg.Error, &turnErr) && turnErr.EventID != "" {
 		if errSet := payloadDoc.Set("error.event_id", turnErr.EventID); errSet != nil {
 			return nil, errSet
 		}
