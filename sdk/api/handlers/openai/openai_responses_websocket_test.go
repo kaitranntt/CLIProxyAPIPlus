@@ -3450,6 +3450,44 @@ func TestResponsesWebsocketErrorPayloadDropsUnknownOnlyErrorObject(t *testing.T)
 	}
 }
 
+func TestResponsesWebsocketErrorPayloadValidatesTimingFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "secret-timing-token-8888"
+
+	// Case 1: Malformed string in reset_time or non-number in resets_in_seconds must be rejected.
+	malformedErrMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New(`{"error":{"reset_time":"api_key=` + secret + `","resets_in_seconds":"not-a-number"}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(malformedErrMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("webSocket rebuilt error leaked timing secret: %s", raw)
+	}
+	if strings.Contains(raw, "reset_time") || strings.Contains(raw, "resets_in_seconds") {
+		t.Fatalf("malformed timing fields survived sanitization: %s", raw)
+	}
+
+	// Case 2: Valid reset_time duration string (e.g. "30s") and valid resets_in_seconds are preserved.
+	validErrMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New(`{"error":{"type":"model_cooldown","message":"cooling","reset_time":"30s","resets_in_seconds":30}}`),
+	}
+	validPayload, errValid := buildResponsesWebsocketErrorPayload(validErrMsg)
+	if errValid != nil {
+		t.Fatalf("valid timing buildResponsesWebsocketErrorPayload: %v", errValid)
+	}
+	if got := ojson.GetBytes(validPayload, "error.reset_time").String(); got != "30s" {
+		t.Fatalf("valid error.reset_time = %q, want 30s", got)
+	}
+	if got := ojson.GetBytes(validPayload, "error.resets_in_seconds").Int(); got != 30 {
+		t.Fatalf("valid error.resets_in_seconds = %d, want 30", got)
+	}
+}
+
 // TestResponsesWebsocketTerminalErrorUnknownFieldNotEchoed drives a valid
 // in-band error frame that carries an unknown secret field through
 // forwardResponsesWebsocket. The raw frame bytes/fields must never be echoed;

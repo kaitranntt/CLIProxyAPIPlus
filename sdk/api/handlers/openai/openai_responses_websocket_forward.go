@@ -866,18 +866,23 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 				copied = true
 			case "resets_in_seconds", "reset_seconds":
 				if value.Type == ojson.Number {
-					if errSet := errorDoc.Set(field, value.Int()); errSet != nil {
-						return nil, errSet
+					secs := value.Int()
+					if secs >= 0 {
+						if errSet := errorDoc.Set(field, secs); errSet != nil {
+							return nil, errSet
+						}
+						copied = true
 					}
-					copied = true
 				}
 			case "reset_time":
 				if value.Type == ojson.String {
-					safeTime := truncateOpenAIStreamErrorText(value.String(), openAIStreamErrorFieldLimit)
-					if errSet := errorDoc.Set(field, safeTime); errSet != nil {
-						return nil, errSet
+					str := strings.TrimSpace(value.String())
+					if d, errParse := time.ParseDuration(str); errParse == nil && d >= 0 {
+						if errSet := errorDoc.Set(field, d.String()); errSet != nil {
+							return nil, errSet
+						}
+						copied = true
 					}
-					copied = true
 				}
 			case "retryable":
 				if value.Type == ojson.True || value.Type == ojson.False {
