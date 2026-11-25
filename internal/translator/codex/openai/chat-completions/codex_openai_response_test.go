@@ -2,10 +2,10 @@ package chat_completions
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 )
 
@@ -990,9 +990,19 @@ func TestConvertCodexResponseToOpenAI_RestoresNormalizedToolNames(t *testing.T) 
 
 // Only the original winning custom patch declaration allows the JSON wrapper.
 func TestApplyPatchCustomChatCompletionsWrapper(t *testing.T) {
-	for _, toolType := range []string{"custom", "function"} {
-		t.Run(toolType, func(t *testing.T) {
-			request := []byte(`{"tools":[{"type":"` + toolType + `","name":"apply_patch"}]}`)
+	for _, tc := range []struct {
+		name  string
+		tools string
+		wrap  bool
+	}{
+		{"flat custom", `[{"type":"custom","name":"apply_patch"}]`, true},
+		{"nested custom", `[{"type":"custom","custom":{"name":"apply_patch"}}]`, true},
+		{"function", `[{"type":"function","name":"apply_patch"}]`, false},
+		{"custom before function", `[{"type":"custom","custom":{"name":"apply_patch"}},{"type":"function","function":{"name":"apply_patch"}}]`, false},
+		{"function before custom", `[{"type":"function","function":{"name":"apply_patch"}},{"type":"custom","custom":{"name":"apply_patch"}}]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := []byte(`{"tools":` + tc.tools + `}`)
 			var param any
 			var arguments strings.Builder
 			send := func(event string) {
@@ -1001,38 +1011,49 @@ func TestApplyPatchCustomChatCompletionsWrapper(t *testing.T) {
 				}
 			}
 			send(`{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`)
-			for _, delta := range []string{"*** Begin Patch\n", "+中文😀 \"\n", "*** End Patch\n"} {
+			for _, delta := range []string{"*** Begin Patch\n", "+中文😀 \"\\path\\\n", "*** End Patch\n"} {
 				send(`{"type":"response.custom_tool_call_input.delta","item_id":"a","output_index":0,"delta":` + string(mustJSONMarshal(t, delta)) + `}`)
 			}
-			patch := "*** Begin Patch\n+中文😀 \"\n*** End Patch\n"
+			patch := "*** Begin Patch\n+中文😀 \"\\path\\\n*** End Patch\n"
 			send(`{"type":"response.custom_tool_call_input.done","item_id":"a","output_index":0,"input":` + string(mustJSONMarshal(t, patch)) + `}`)
 			send(`{"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":` + string(mustJSONMarshal(t, patch)) + `}}`)
 			want := patch
-			if toolType == "custom" {
+			if tc.wrap {
 				want = `{"input":` + string(mustJSONMarshal(t, patch)) + `}`
 			}
 			if arguments.String() != want {
-				t.Fatalf("arguments=%q want=%q", arguments.String(), want)
+				t.Errorf("arguments=%q want=%q", arguments.String(), want)
 			}
 			var nonStream any
 			out := ConvertCodexResponseToOpenAINonStream(t.Context(), "model", request, request, []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","name":"apply_patch","call_id":"c","input":`+string(mustJSONMarshal(t, patch))+`}]}}`), &nonStream)
 			if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != want {
-				t.Fatalf("nonstream arguments=%q want=%q", got, want)
+				t.Errorf("nonstream arguments=%q want=%q", got, want)
+			}
+			if got := isOriginalCustomPatch(request, ojson.Parse(`{"type":"custom_tool_call","name":"apply_patch"}`)); got != tc.wrap {
+				t.Errorf("isOriginalCustomPatch=%v want=%v", got, tc.wrap)
 			}
 		})
 	}
 }
 
 func TestApplyPatchCustomChatCompletionsDoneFallback(t *testing.T) {
-	request := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
-	for _, added := range []bool{false, true} {
+	for _, tc := range []struct {
+		tools string
+		added bool
+	}{
+		{`[{"type":"custom","name":"apply_patch"}]`, false},
+		{`[{"type":"custom","name":"apply_patch"}]`, true},
+		{`[{"type":"custom","custom":{"name":"apply_patch"}}]`, false},
+		{`[{"type":"custom","custom":{"name":"apply_patch"}}]`, true},
+	} {
+		request := []byte(`{"tools":` + tc.tools + `}`)
 		var param any
-		if added {
+		if tc.added {
 			_ = ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`), &param)
 		}
 		out := ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}}`), &param)
 		if len(out) != 1 || ojson.GetBytesNoCopy(out[0], "choices.0.delta.tool_calls.0.function.arguments").String() != `{"input":"p"}` {
-			t.Fatalf("fallback: %s", out)
+			t.Errorf("tools=%s added=%v fallback: %s", tc.tools, tc.added, out)
 		}
 	}
 }
@@ -1040,14 +1061,43 @@ func TestApplyPatchCustomChatCompletionsDoneFallback(t *testing.T) {
 // This round trip requires the request converter to unwrap only a winning custom
 // patch's normalized function envelope, while explicit custom inputs remain raw.
 func TestApplyPatchChatCompletionNativeHistoryRoundTrip(t *testing.T) {
-	original := []byte(`{"messages":[{"role":"user","content":"patch"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
-	response := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"p"}]}}`)
-	out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, original, response, nil)
-	message := ojson.GetBytesNoCopy(out, "choices.0.message")
-	followup := []byte(`{"messages":[` + message.Raw + `,{"role":"tool","tool_call_id":"c","content":"ok"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
-	request, _ := ConvertOpenAIRequestToCodex("m", followup, true)
-	if got := ojson.GetBytesNoCopy(request, "input.0.input").String(); got != "p" {
-		t.Fatalf("normalized function history must restore raw patch before native Codex: got %q, request=%s", got, request)
+	patch := "*** Begin Patch\n+中文😀 \"quoted\" \\path\\\n*** End Patch"
+	wrappedPatch := `{"input":` + string(mustJSONMarshal(t, patch)) + `}`
+	for _, tools := range []string{
+		`[{"type":"custom","name":"apply_patch"}]`,
+		`[{"type":"custom","custom":{"name":"apply_patch","description":"Edit files","format":{"type":"grammar","grammar":{"syntax":"lark","definition":"start: patch"}}}}]`,
+	} {
+		original := []byte(`{"messages":[{"role":"user","content":"patch"}],"tools":` + tools + `}`)
+		initialReq, errInitial := ConvertOpenAIRequestToCodex("m", original, true)
+		if errInitial != nil {
+			t.Fatal(errInitial)
+		}
+		if ojson.GetBytesNoCopy(initialReq, "tools.0.custom").Exists() {
+			t.Fatalf("tools=%s leaked nested custom declaration: %s", tools, initialReq)
+		}
+		response := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":` + string(mustJSONMarshal(t, patch)) + `}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, initialReq, response, nil)
+		message := ojson.GetBytesNoCopy(out, "choices.0.message")
+		if got := message.Get("tool_calls.0.function.arguments").String(); got != wrappedPatch {
+			t.Fatalf("tools=%s arguments=%q, want %q", tools, got, wrappedPatch)
+		}
+		followup := []byte(`{"messages":[{"role":"user","content":"patch"},` + message.Raw + `,{"role":"tool","tool_call_id":"c","content":"ok"},{"role":"assistant","content":"Patch applied."}],"tools":` + tools + `}`)
+		request, errConvert := ConvertOpenAIRequestToCodex("m", followup, true)
+		if errConvert != nil {
+			t.Fatal(errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(request, "input.1.type").String(); got != "custom_tool_call" {
+			t.Fatalf("tools=%s history call type=%q, want custom_tool_call", tools, got)
+		}
+		if got := ojson.GetBytesNoCopy(request, "input.1.input").String(); got != patch {
+			t.Fatalf("normalized function history must restore raw patch before native Codex: got %q, want %q, request=%s", got, patch, request)
+		}
+		if got := ojson.GetBytesNoCopy(request, "input.2.type").String(); got != "custom_tool_call_output" {
+			t.Fatalf("tools=%s history output type=%q, want custom_tool_call_output", tools, got)
+		}
+		if got := ojson.GetBytesNoCopy(request, "input.3.content.0.text").String(); got != "Patch applied." {
+			t.Fatalf("tools=%s assistant continuation=%q, want Patch applied.", tools, got)
+		}
 	}
 }
 
@@ -1057,4 +1107,112 @@ func TestApplyPatchChatResponseOrdinaryFunctionPreference(t *testing.T) {
 	if ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.arguments").String() != "raw" {
 		t.Fatalf("ordinary preference stolen: %s", out)
 	}
+}
+
+func TestConvertCodexResponseToOpenAI_RefusalStreamAndNonStream(t *testing.T) {
+	const refusalText = "I'm sorry, but I can't help with that request."
+	ctx := context.Background()
+
+	t.Run("streamed_refusal_delta_no_duplicate_on_done", func(t *testing.T) {
+		var param any
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.refusal.delta","output_index":0,"item_id":"msg_1","delta":"I'm sorry, but I can't help with that request."}`),
+			[]byte(`data: {"type":"response.refusal.done","output_index":0,"item_id":"msg_1","refusal":"I'm sorry, but I can't help with that request."}`),
+			[]byte(`data: {"type":"response.content_part.done","output_index":0,"item_id":"msg_1","part":{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("stream content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("done_only_refusal_fallback", func(t *testing.T) {
+		var param any
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("done-only stream content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("empty_refusal_delta_does_not_suppress_done_fallback", func(t *testing.T) {
+		var param any
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.refusal.delta","output_index":0,"item_id":"msg_1","delta":""}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("empty-delta fallback content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("response_created_resets_message_delta_state", func(t *testing.T) {
+		var param any
+		_ = ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`), &param)
+		_ = ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"earlier"}`), &param)
+
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_2","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_2","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("reused param second response content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("nonstream_refusal", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-ember-1.0","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "muse-ember-1.0", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "choices.0.message.content").String(); got != refusalText {
+			t.Fatalf("nonstream content = %q, want %q; raw=%s", got, refusalText, out)
+		}
+	})
+
+	t.Run("nonstream_empty_refusal_falls_back_to_text", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-ember-1.0","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"","text":"I'm sorry, but I can't help with that request."}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "muse-ember-1.0", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "choices.0.message.content").String(); got != refusalText {
+			t.Fatalf("nonstream fallback content = %q, want %q; raw=%s", got, refusalText, out)
+		}
+	})
 }

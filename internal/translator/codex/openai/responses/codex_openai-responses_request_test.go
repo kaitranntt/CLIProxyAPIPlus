@@ -418,6 +418,88 @@ func TestConvertOpenAIResponsesRequestToCodexReusesNormalizedPayloadWithSources(
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_PreservesVerifiedCodexIncludes(t *testing.T) {
+	tests := []struct {
+		name        string
+		includeJSON string
+		want        []string
+	}{
+		{
+			name:        "web search results alone",
+			includeJSON: `["web_search_call.results"]`,
+			want:        []string{"reasoning.encrypted_content", "web_search_call.results"},
+		},
+		{
+			name:        "output encrypted content alone",
+			includeJSON: `["output.encrypted_content"]`,
+			want:        []string{"reasoning.encrypted_content", "output.encrypted_content"},
+		},
+		{
+			name:        "all verified codex includes reordered and duplicated",
+			includeJSON: `["output.encrypted_content","web_search_call.results","web_search_call.action.sources","web_search_call.results","reasoning.encrypted_content","output.encrypted_content"]`,
+			want:        []string{"reasoning.encrypted_content", "web_search_call.action.sources", "web_search_call.results", "output.encrypted_content"},
+		},
+		{
+			name:        "filters platform-only and unknown entries alongside verified codex includes",
+			includeJSON: `["file_search_call.results","web_search_call.results","web_search_call.action.sources","message.input_image.image_url","computer_call_output.output.image_url","code_interpreter_call.outputs","reasoning.encrypted_content","message.output_text.logprobs","output.encrypted_content","unknown.custom.field",42,null]`,
+			want:        []string{"reasoning.encrypted_content", "web_search_call.action.sources", "web_search_call.results", "output.encrypted_content"},
+		},
+	}
+
+	for _, stream := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("stream_%v/%s", stream, tt.name), func(t *testing.T) {
+				inputDoc := ojson.NewDocString(`{"model":"gpt-6-luna","input":[{"type":"message","role":"user","content":"hi"}]}`)
+				if errSet := inputDoc.SetRawBytes("include", []byte(tt.includeJSON)); errSet != nil {
+					t.Fatalf("setting include: %v", errSet)
+				}
+				inputJSON := inputDoc.Bytes()
+
+				before := string(inputJSON)
+				output, errConvert := ConvertOpenAIResponsesRequestToCodex("gpt-6-luna", inputJSON, stream)
+				if errConvert != nil {
+					t.Fatalf("ConvertOpenAIResponsesRequestToCodex() error = %v", errConvert)
+				}
+				if string(inputJSON) != before {
+					t.Fatalf("caller input changed:\n got: %s\nwant: %s", inputJSON, before)
+				}
+				got := ojson.GetBytesNoCopy(output, "include").Array()
+				if len(got) != len(tt.want) {
+					t.Fatalf("include = %s, want %v", ojson.GetBytesNoCopy(output, "include").Raw, tt.want)
+				}
+				for i, want := range tt.want {
+					if got[i].Type != ojson.String || got[i].String() != want {
+						t.Fatalf("include[%d] = %s, want %q; include = %s", i, got[i].Raw, want, ojson.GetBytesNoCopy(output, "include").Raw)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodexReusesNormalizedPayloadWithCodexIncludes(t *testing.T) {
+	for _, includeJSON := range []string{
+		`["reasoning.encrypted_content","web_search_call.results"]`,
+		`["reasoning.encrypted_content","output.encrypted_content"]`,
+		`["reasoning.encrypted_content","web_search_call.action.sources","web_search_call.results"]`,
+		`["reasoning.encrypted_content","web_search_call.action.sources","web_search_call.results","output.encrypted_content"]`,
+		`[ "reasoning.encrypted_content" , "web_search_call.results" , "output.encrypted_content" ]`,
+	} {
+		inputJSON := []byte(`{"model":"gpt-6-luna","stream":true,"store":false,"parallel_tool_calls":true,"include":` + includeJSON + `,"service_tier":"priority","input":[{"type":"message","role":"user","content":"hello"}]}`)
+
+		output, errConvert := ConvertOpenAIResponsesRequestToCodex("gpt-6-luna", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToCodex() error = %v", errConvert)
+		}
+		if &output[0] != &inputJSON[0] {
+			t.Fatalf("normalized request payload with include %s was copied", includeJSON)
+		}
+		if string(output) != string(inputJSON) {
+			t.Fatalf("normalized request changed:\n got: %s\nwant: %s", output, inputJSON)
+		}
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToCodex_FiltersPromptCacheRetention(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.6-terra",
@@ -1097,4 +1179,87 @@ func TestConvertOpenAIResponsesRequestToCodexParallelToolCalls(t *testing.T) {
 			t.Fatalf("normalized request changed:\n got: %s\nwant: %s", output, inputJSON)
 		}
 	})
+}
+
+func TestConvertOpenAIResponsesRequestToCodexSanitizesOrphanToolOutputs(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"function_call_output","id":"fco_1","name":"codex_apps_open_page","namespace":"agent","output":"{\"page_id\":null}"},
+			{"type":"custom_tool_call_output","id":"fco_2","name":"custom_ctx","output":[{"type":"input_text","text":"part one"},{"type":"input_text","text":"part two"},{"type":"input_image","image_url":"https://example.com/page.png"}]},
+			{"type":"function_call","call_id":"call_ok","name":"shell","arguments":""},
+			{"type":"function_call_output","call_id":"call_ok","output":"ok"},
+			{"type":"function_call_output","call_id":" ","output":"blank id"},
+			{"type":"function_call_output","id":"fco_3","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>task</codex_delegation>"},
+			{"type":"function_call","call_id":"call_pair","name":"shell","arguments":"{}"},
+			{"type":"function_call_output","output":"paired without call_id"}
+		]
+	}`)
+
+	out, errConvert := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", raw, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToCodex returned error: %v", errConvert)
+	}
+	input := ojson.GetBytesNoCopy(out, "input").Array()
+	if len(input) != 9 {
+		t.Fatalf("input len = %d, want 9", len(input))
+	}
+
+	if got := input[1].Get("type").String(); got != "message" {
+		t.Fatalf("input[1].type = %q, want %q", got, "message")
+	}
+	if got := input[1].Get("role").String(); got != "user" {
+		t.Fatalf("input[1].role = %q, want %q", got, "user")
+	}
+	want1 := "Tool output from codex_apps_open_page:\n{\"page_id\":null}"
+	if got := input[1].Get("content.0.text").String(); got != want1 {
+		t.Fatalf("input[1].content.0.text = %q, want %q", got, want1)
+	}
+
+	if got := input[2].Get("type").String(); got != "message" {
+		t.Fatalf("input[2].type = %q, want %q", got, "message")
+	}
+	want2 := "Tool output from custom_ctx:\npart one\npart two"
+	if got := input[2].Get("content.0.text").String(); got != want2 {
+		t.Fatalf("input[2].content.0.text = %q, want %q", got, want2)
+	}
+	if got := input[2].Get("content.1.type").String(); got != "input_image" {
+		t.Fatalf("input[2].content.1.type = %q, want %q", got, "input_image")
+	}
+	if got := input[2].Get("content.1.image_url").String(); got != "https://example.com/page.png" {
+		t.Fatalf("input[2].content.1.image_url = %q, want %q", got, "https://example.com/page.png")
+	}
+
+	if got := input[3].Get("arguments").String(); got != "{}" {
+		t.Fatalf("input[3].arguments = %q, want %q", got, "{}")
+	}
+	if got := input[4].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("input[4].type = %q, want %q", got, "function_call_output")
+	}
+	if got := input[4].Get("call_id").String(); got != "call_ok" {
+		t.Fatalf("input[4].call_id = %q, want %q", got, "call_ok")
+	}
+
+	if got := input[5].Get("type").String(); got != "message" {
+		t.Fatalf("input[5].type = %q, want %q", got, "message")
+	}
+	want5 := "Tool output from tool:\nblank id"
+	if got := input[5].Get("content.0.text").String(); got != want5 {
+		t.Fatalf("input[5].content.0.text = %q, want %q", got, want5)
+	}
+
+	if got := input[6].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("input[6].type = %q, want %q", got, "function_call_output")
+	}
+	if got := input[6].Get("namespace").String(); got != "codex_app" {
+		t.Fatalf("input[6].namespace = %q, want %q", got, "codex_app")
+	}
+
+	if got := input[8].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("input[8].type = %q, want %q", got, "function_call_output")
+	}
+	if got := input[8].Get("call_id").String(); got != "call_pair" {
+		t.Fatalf("input[8].call_id = %q, want %q", got, "call_pair")
+	}
 }

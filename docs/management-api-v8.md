@@ -15,6 +15,21 @@ Send `Authorization: Bearer <management-key>` or `X-Management-Key: <management-
 OAuth callbacks validate a pending login state and do not require a management-key
 header. Home mode disables local management endpoints for both versions.
 
+Authenticated management responses include `X-CPA-SERVER-ID` when an identity
+is available, including on v0 routes that use the management key. Cross-origin
+clients can read the header. Authentication failures, CORS preflights, OAuth
+callbacks without key authentication, and non-management routes do not expose it.
+
+`GET /v8/management/server/server-id` returns the active server identity:
+
+```json
+{"server-id":"20fb88e4-73ab-44db-b5b5-4e7120ba3368"}
+```
+
+The endpoint and its header use the same authenticated request snapshot. The
+identity is distinct from the Home node identifier: Home config updates do not
+replace the local runtime identity.
+
 ## Configuration endpoints
 
 All paths below are relative to `/v8/management`.
@@ -29,6 +44,28 @@ GET renders the persisted configuration in the v8 layout without migrating the
 file or adding omitted runtime defaults. Successful v8 configuration writes save
 the latest layout; reads and rejected writes leave the file unchanged.
 Historical v8 paths and request bodies remain accepted as aliases.
+
+`server.server-id` is a nonzero, hyphenated UUID. Successful v8 writes trim and
+lowercase an explicit UUID. If the resulting identity is missing, null, blank,
+or invalid, the write saves a fresh UUIDv4. For example, deleting
+`/config/server/server-id` rotates the identity, while an unrelated PATCH keeps
+an existing valid ID. Include the current ID when using a full replacement if
+clients should continue to see the same deployment. Successful writes return
+`status`, `config-version`, and the saved `server-id`; the response header matches
+the saved value. A read-only configuration without an explicit ID can show its
+process-local ID in the read view without persisting it. Set an explicit UUID
+if a read-only deployment needs the same ID across restarts.
+
+Only the first YAML document supplies runtime settings. JSON and path writes
+preserve the remaining documents byte-for-byte; YAML PUT replaces the complete
+stream and preserves the trailing documents supplied in that request. Invalid
+YAML in any document rejects the write without modifying the file.
+
+Configuration GET responses and successful writes return a strong `ETag` for
+the exact stored bytes. Use it as `If-Match` to guard against lost updates. A
+stale conditional write returns `412 Precondition Failed`; an unconditional
+write whose file snapshot changes during processing returns `409 Conflict`.
+Re-read the configuration before retrying either response.
 
 JSON writes accept the value directly, without a `{ "value": ... }` envelope.
 PUT replaces its target. PATCH merges objects and replaces lists and scalars.
@@ -72,6 +109,48 @@ credential supplies a nonempty list; the lists are not combined. This precedence
 also applies to Plus providers. In Home mode, Home owns dispatched credential
 availability: local cooldown state does not veto a credential chosen by Home.
 
+### Weighted routing with session affinity
+
+Set `routing.strategy` to `weighted-round-robin` to use per-credential integer
+`weight` values (default `1`, maximum `1000000`; non-positive values are excluded).
+With `routing.session-affinity` enabled, sticky requests, parent inheritance,
+Guardian selections, and LCP matches also consume weighted credits without moving
+existing bindings. New or reselected sessions favor under-served credentials
+within the same eligible credential set. For example, with weights `3:1`, four
+sticky requests to the second credential can be compensated by twelve new
+requests to the first when both remain eligible.
+
+Different priority tiers, transport preferences, and retry/cooldown candidate
+sets keep separate credits; returning to a set resumes its retained credits.
+Pinned requests account against the eligible pool before pinning, within the
+pinned credential's priority tier and transport class, even when session affinity
+is disabled. Pinned and ordinary requests share the same weighted credits. A
+lower-priority binding never shifts the request ratio among higher-priority credentials.
+
+Settled credits are capped at ±32 times the eligible pool total, so request
+ratios are approximate rather than guaranteed. While reservations are in flight,
+committed balances can temporarily exceed the cap; their pending offsets remain
+intact until the pool settles, including when the last reservation rolls back. Sticky requests still use their binding at
+the cap, but stop adding compensation when their full credit delta cannot fit.
+New sessions continue repaying debt and earning credit, so excessive sticky
+traffic does not starve smaller-weight peers.
+
+Credits are local to the CPA process and reset on restart, selector replacement,
+or bounded pool-cache eviction. Concurrent selections see pending credit; local
+selection/binding success confirms it, while failure releases it. In Home mode,
+scheduling and credit accounting remain owned by Home. With matching CPA and Home
+versions, retained WebSocket responses (including Codex duplex successors) report
+`home_selection.reused` through usage so Home can charge later turns without
+redispatching or acquiring another concurrency slot. The scheduling model is
+carried separately from the upstream model. First-turn primary usage does not
+charge again. Split additional-model billing records (such as image usage) carry
+`home_selection.additional` and never add scheduling charges, even when they have
+independent execution IDs. Each reused execution is charged once through primary
+usage; redelivery of that execution ID is deduplicated.
+Compensation arrives after completion and uses Home's current eligible
+pool and API-key permissions, so it remains approximate. Old peers ignore the
+optional metadata; missing usage cannot compensate a reused turn.
+
 ### Codex multi-agent configuration migration
 
 `client.codex.optimize-multi-agent-v2` is the sole runtime setting. Loading older
@@ -96,6 +175,7 @@ retain the corresponding business operation's fields.
 | Path | Methods | Description |
 | --- | --- | --- |
 | `/config/upstream/<provider>` | GET, PUT, PATCH, DELETE | Manage shared provider settings. |
+| `/server/server-id` | GET | Get the active deployment UUID. |
 | `/server/latest-version` | GET | Get latest release information. |
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
@@ -122,7 +202,7 @@ retain the corresponding business operation's fields.
 | `/oauth/callback` | GET, POST | Submit an OAuth callback. |
 | `/plugins` | GET | List installed plugins. |
 | `/plugins/<id>` | DELETE | Delete a plugin. |
-| `/plugins/store` | GET | List the plugin store. |
+| `/plugins/store` | GET | List the plugin store (supports optional `?refresh=true` to bypass cached release checks). |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
 
@@ -130,7 +210,7 @@ retain the corresponding business operation's fields.
 
 The login URL is shared by all providers. Set the required `provider` query
 parameter to `claude`, `codex`, `antigravity`, `kimi`, `kimi-ai`, `xai`, `devin`,
-`meta`, or a registered plugin provider ID. For example:
+`copilot`, `meta`, or a registered plugin provider ID. For example:
 
 ```http
 GET /v8/management/oauth/auth-url?provider=codex
@@ -255,7 +335,9 @@ operations in this release.
 
 ## v0 compatibility
 
-The `/v0/management` endpoints keep their original paths and payloads, including
+The `/v0/management` endpoints keep their original paths and payloads. In
+particular, `GET /v0/management/config` does not add `server-id` to its JSON.
+Existing contracts include
 provider-specific OAuth login URLs, callbacks, status queries, and cancellation.
 For example, `GET /v0/management/codex-auth-url` and
 `GET /v8/management/oauth/auth-url?provider=codex` start the same login flow.

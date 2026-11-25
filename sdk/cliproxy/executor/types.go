@@ -15,6 +15,12 @@ const RequestedModelMetadataKey = "requested_model"
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
 
+// RequestIDMetadataKey stores the host request lifecycle identifier in Options.Metadata.
+const RequestIDMetadataKey = "request_id"
+
+// TraceIDMetadataKey stores the inbound request trace identifier in Options.Metadata.
+const TraceIDMetadataKey = "trace_id"
+
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
@@ -34,6 +40,8 @@ const GenerateMetadataKey = "generate"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// ExcludedAuthIDsMetadataKey excludes specific auth IDs from selection for the current attempt.
+	ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
 	// SelectionIDMetadataKey stores the per-selection ID generated for a plugin scheduler pick.
 	SelectionIDMetadataKey = "selection_id"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
@@ -82,10 +90,6 @@ const (
 	LCPMinPrefixLengthMetadataKey = "lcp_min_prefix_length"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
-	// ExcludedAuthIDsMetadataKey carries the set of auth IDs that already failed
-	// (429/5xx/empty) within the current request and must never be re-selected
-	// for the remainder of that request. Value is map[string]struct{} or []string.
-	ExcludedAuthIDsMetadataKey = "request_excluded_auth_ids"
 	// SessionAffinityProviderMetadataKey carries the affinity selection namespace
 	// (provider string, e.g. the literal "mixed" pool key) used by SessionAffinitySelector.Pick,
 	// so OnResult keys the session cache identically to how selection read it.
@@ -147,6 +151,11 @@ type RequestAfterAuthInterceptResponse struct {
 	ClearHeaders []string
 	// Terminate prevents the selected executor from receiving the request.
 	Terminate bool
+	// TerminateScope narrows Terminate for after-auth interceptors.
+	// Empty or "request" terminates the whole request; "credential" refuses only
+	// the selected credential for this request so selection continues with the
+	// next candidate. Unknown values behave as "request".
+	TerminateScope string
 	// StatusCode is the downstream HTTP status used when Terminate is true.
 	StatusCode int
 	// ResponseHeaders contains downstream response headers used when Terminate is true.

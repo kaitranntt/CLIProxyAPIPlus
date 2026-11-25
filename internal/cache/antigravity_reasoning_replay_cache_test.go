@@ -3,12 +3,12 @@ package cache
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 )
@@ -494,21 +494,29 @@ func TestAntigravityReasoningReplayLocalAbsenceReservationsStayWithinEntryBound(
 	}
 }
 
-func TestAntigravityReasoningReplayHomeWritesRemainLegacyArrayReadable(t *testing.T) {
+func TestAntigravityReasoningReplayHomeWritesUnwrappedJSONArrayAndReadsLegacyBase64(t *testing.T) {
 	client := newFakeAntigravityReasoningReplayKVClient()
 	useFakeAntigravityReasoningReplayKVClient(t, client, true)
-	const model, session = "gemini-3.6-flash-high", "home-legacy-readable"
+	const model, session = "gemini-3.6-flash-high", "home-unwrapped-json-array"
 	item := antigravityReplayTestItem("legacy-readable-signature-123456")
 	if !CacheAntigravityReasoningReplayItems(model, session, [][]byte{item}) {
 		t.Fatal("Home write failed")
 	}
 	raw := client.values[antigravityReasoningReplayKVKey(model, session)]
-	var legacyItems [][]byte
-	if errUnmarshal := json.Unmarshal(raw, &legacyItems); errUnmarshal != nil {
-		t.Fatalf("new Home value is not readable as legacy [][]byte: %v", errUnmarshal)
+	root := ojson.ParseBytes(raw)
+	if !root.IsArray() || len(root.Array()) != 2 || !root.Get("0").IsObject() || !root.Get("1").IsObject() {
+		t.Fatalf("new Home value must be an unwrapped JSON object array without base64 double encoding: %s", raw)
 	}
-	if len(legacyItems) != 2 || ojson.GetBytes(legacyItems[0], "type").String() != antigravityReasoningReplayGenerationItemType || !bytes.Contains(legacyItems[1], []byte("legacy-readable-signature")) {
-		t.Fatalf("legacy-readable Home array malformed: %q", legacyItems)
+	if root.Get("0.type").String() != antigravityReasoningReplayGenerationItemType || root.Get("1.thoughtSignature").String() != "legacy-readable-signature-123456" {
+		t.Fatalf("unwrapped Home array malformed: %s", raw)
+	}
+
+	// Verify backward-compatible decoding of legacy base64-encoded [][]byte arrays.
+	legacyRaw := []byte(`["` + base64.StdEncoding.EncodeToString(item) + `"]`)
+	client.values[antigravityReasoningReplayKVKey(model, session)] = legacyRaw
+	gotLegacy, _, foundLegacy, errLegacy := GetAntigravityReasoningReplayItemsWithSnapshotRequired(context.Background(), model, session)
+	if errLegacy != nil || !foundLegacy || len(gotLegacy) != 1 || ojson.GetBytes(gotLegacy[0], "thoughtSignature").String() != "legacy-readable-signature-123456" {
+		t.Fatalf("legacy base64 Home array read = %q, found=%v err=%v", gotLegacy, foundLegacy, errLegacy)
 	}
 }
 
@@ -518,7 +526,7 @@ func TestAntigravityReasoningReplayHomeReadNormalizesAndRejectsMixedInvalidChain
 	const model, session = "gemini-3.6-flash-high", "home-validation"
 	key := antigravityReasoningReplayKVKey(model, session)
 	valid := []byte(`{"type":"function_call_part","name":"run","args":{"b":2,"a":1},"targetOccurrence":1,"thoughtSignature":"valid-home-signature-123456"}`)
-	raw, errMarshal := json.Marshal([][]byte{valid})
+	raw, errMarshal := marshalReasoningReplayRawJSONArray([][]byte{valid})
 	if errMarshal != nil {
 		t.Fatal(errMarshal)
 	}
@@ -534,7 +542,7 @@ func TestAntigravityReasoningReplayHomeReadNormalizesAndRejectsMixedInvalidChain
 		t.Fatalf("valid Home read expire count = %d, want 1", client.expireCount)
 	}
 
-	invalidRaw, errInvalidMarshal := json.Marshal([][]byte{valid, []byte(`{"type":"unknown"}`)})
+	invalidRaw, errInvalidMarshal := marshalReasoningReplayRawJSONArray([][]byte{valid, []byte(`{"type":"unknown"}`)})
 	if errInvalidMarshal != nil {
 		t.Fatal(errInvalidMarshal)
 	}
@@ -544,5 +552,125 @@ func TestAntigravityReasoningReplayHomeReadNormalizesAndRejectsMixedInvalidChain
 	}
 	if client.expireCount != 1 {
 		t.Fatalf("invalid Home read refreshed TTL: count=%d", client.expireCount)
+	}
+}
+
+func TestAntigravityReasoningReplayDeleteWithSnapshotAllowsSubsequentCASReplace(t *testing.T) {
+	modes := []struct {
+		name     string
+		homeMode bool
+	}{
+		{name: "local", homeMode: false},
+		{name: "home", homeMode: true},
+	}
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			ClearAntigravityReasoningReplayCache()
+			t.Cleanup(ClearAntigravityReasoningReplayCache)
+			if mode.homeMode {
+				client := newFakeAntigravityReasoningReplayKVClient()
+				useFakeAntigravityReasoningReplayKVClient(t, client, true)
+			}
+
+			const model = "gemini-3.6-flash-high"
+			session := "delete-with-snapshot-" + mode.name
+			badItem := antigravityReplayTestItem("bad-cached-signature-123456")
+			freshItem := antigravityReplayTestItem("fresh-after-delete-signature-123456")
+			staleItem := antigravityReplayTestItem("stale-pre-delete-signature-123456")
+
+			if !CacheAntigravityReasoningReplayItems(model, session, [][]byte{badItem}) {
+				t.Fatal("initial cache write failed")
+			}
+			_, preDeleteSnapshot, found, errGet := GetAntigravityReasoningReplayItemsWithSnapshotRequired(context.Background(), model, session)
+			if errGet != nil || !found {
+				t.Fatalf("snapshot read = found %v, err %v", found, errGet)
+			}
+
+			tombstoneSnapshot, deleted, errDelete := DeleteAntigravityReasoningReplayItemsIfUnchangedWithSnapshot(context.Background(), model, session, preDeleteSnapshot)
+			if errDelete != nil || !deleted || !tombstoneSnapshot.loaded || !tombstoneSnapshot.found {
+				t.Fatalf("DeleteAntigravityReasoningReplayItemsIfUnchangedWithSnapshot() = (snapshot=%+v, deleted=%v, err=%v), want loaded tombstone", tombstoneSnapshot, deleted, errDelete)
+			}
+
+			// Pre-delete snapshot must no longer pass CAS against the tombstone.
+			if swapped, errSwap := ReplaceAntigravityReasoningReplayItemsIfUnchanged(context.Background(), model, session, preDeleteSnapshot, [][]byte{staleItem}); errSwap != nil || swapped {
+				t.Fatalf("pre-delete snapshot replace = (%v, %v), want (false, nil)", swapped, errSwap)
+			}
+
+			// Returned tombstone snapshot must permit the next CAS replace.
+			if swapped, errSwap := ReplaceAntigravityReasoningReplayItemsIfUnchanged(context.Background(), model, session, tombstoneSnapshot, [][]byte{freshItem}); errSwap != nil || !swapped {
+				t.Fatalf("tombstone snapshot replace = (%v, %v), want (true, nil)", swapped, errSwap)
+			}
+			items, ok := GetAntigravityReasoningReplayItems(model, session)
+			if !ok || len(items) != 1 || !bytes.Contains(items[0], []byte("fresh-after-delete-signature-123456")) {
+				t.Fatalf("stored items = %q, found=%v", items, ok)
+			}
+
+			// A stale pre-delete snapshot must also remain blocked after the fresh commit.
+			if swapped, errSwap := ReplaceAntigravityReasoningReplayItemsIfUnchanged(context.Background(), model, session, preDeleteSnapshot, [][]byte{staleItem}); errSwap != nil || swapped {
+				t.Fatalf("pre-delete snapshot replace after commit = (%v, %v), want (false, nil)", swapped, errSwap)
+			}
+		})
+	}
+}
+
+func TestAntigravityReasoningReplayDeleteWithSnapshotPreservesConcurrentWrites(t *testing.T) {
+	modes := []struct {
+		name     string
+		homeMode bool
+	}{
+		{name: "local", homeMode: false},
+		{name: "home", homeMode: true},
+	}
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			ClearAntigravityReasoningReplayCache()
+			t.Cleanup(ClearAntigravityReasoningReplayCache)
+			if mode.homeMode {
+				client := newFakeAntigravityReasoningReplayKVClient()
+				useFakeAntigravityReasoningReplayKVClient(t, client, true)
+			}
+
+			const model = "gemini-3.6-flash-high"
+			session := "delete-with-snapshot-race-" + mode.name
+			badItem := antigravityReplayTestItem("race-bad-signature-123456")
+			concurrentItem := antigravityReplayTestItem("race-concurrent-signature-123456")
+			laterItem := antigravityReplayTestItem("race-later-signature-123456")
+
+			// Case 1: concurrent write before conditional delete causes CAS miss.
+			if !CacheAntigravityReasoningReplayItems(model, session, [][]byte{badItem}) {
+				t.Fatal("initial cache write failed")
+			}
+			_, staleSnapshot, found, errGet := GetAntigravityReasoningReplayItemsWithSnapshotRequired(context.Background(), model, session)
+			if errGet != nil || !found {
+				t.Fatalf("initial snapshot read = found %v, err %v", found, errGet)
+			}
+			if !CacheAntigravityReasoningReplayItems(model, session, [][]byte{concurrentItem}) {
+				t.Fatal("concurrent write failed")
+			}
+			missedSnapshot, deleted, errDelete := DeleteAntigravityReasoningReplayItemsIfUnchangedWithSnapshot(context.Background(), model, session, staleSnapshot)
+			if errDelete != nil || deleted || missedSnapshot.loaded {
+				t.Fatalf("stale conditional delete = (snapshot=%+v, deleted=%v, err=%v), want (empty, false, nil)", missedSnapshot, deleted, errDelete)
+			}
+
+			// Case 2: concurrent write after conditional delete blocks the returned tombstone snapshot.
+			_, currentSnapshot, foundCurrent, errCurrent := GetAntigravityReasoningReplayItemsWithSnapshotRequired(context.Background(), model, session)
+			if errCurrent != nil || !foundCurrent {
+				t.Fatalf("current snapshot read = found %v, err %v", foundCurrent, errCurrent)
+			}
+			tombstoneSnapshot, deletedCurrent, errDeleteCurrent := DeleteAntigravityReasoningReplayItemsIfUnchangedWithSnapshot(context.Background(), model, session, currentSnapshot)
+			if errDeleteCurrent != nil || !deletedCurrent {
+				t.Fatalf("current conditional delete = (deleted=%v, err=%v), want (true, nil)", deletedCurrent, errDeleteCurrent)
+			}
+			if !CacheAntigravityReasoningReplayItems(model, session, [][]byte{concurrentItem}) {
+				t.Fatal("post-delete concurrent write failed")
+			}
+			if swapped, errSwap := ReplaceAntigravityReasoningReplayItemsIfUnchanged(context.Background(), model, session, tombstoneSnapshot, [][]byte{laterItem}); errSwap != nil || swapped {
+				t.Fatalf("superseded tombstone snapshot replace = (%v, %v), want (false, nil)", swapped, errSwap)
+			}
+			items, ok := GetAntigravityReasoningReplayItems(model, session)
+			if !ok || len(items) != 1 || !bytes.Contains(items[0], []byte("race-concurrent-signature-123456")) {
+				t.Fatalf("concurrent item was clobbered: %q, found=%v", items, ok)
+			}
+		})
 	}
 }

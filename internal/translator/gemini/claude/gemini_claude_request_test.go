@@ -11,6 +11,49 @@ import (
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 )
 
+func TestConvertClaudeRequestToGemini_ToolUseWithoutInputDefaultsToEmptyObject(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_1", "name": "get_time"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "12:00"}
+				]
+			}
+		]
+	}`)
+
+	output, errConvert := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToGemini() error = %v", errConvert)
+	}
+
+	contents := ojson.GetBytesNoCopy(output, "contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("contents count = %d, want 2; output=%s", len(contents), output)
+	}
+	functionCall := contents[0].Get("parts.0.functionCall")
+	if functionCall.Get("id").String() != "toolu_1" || functionCall.Get("name").String() != "get_time" {
+		t.Fatalf("functionCall = %s, want id toolu_1 and name get_time", functionCall.Raw)
+	}
+	if functionCall.Get("args").Raw != `{}` {
+		t.Fatalf("functionCall.args = %s, want {}", functionCall.Get("args").Raw)
+	}
+	functionResponse := contents[1].Get("parts.0.functionResponse")
+	if functionResponse.Get("id").String() != "toolu_1" {
+		t.Fatalf("functionResponse = %s, want id toolu_1", functionResponse.Raw)
+	}
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+		t.Fatalf("translated tool history is invalid: %v; output=%s", errPairing, output)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_ToolChoice_SpecificTool(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",
@@ -958,6 +1001,48 @@ func TestConvertClaudeRequestToGemini_Issue5960_DocumentPreservation(t *testing.
 	}
 }
 
+func TestConvertClaudeRequestToGemini_PreservesGenerationConstraints(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-2.5-pro",
+		"max_tokens": 256,
+		"stop_sequences": ["STOP_HERE"],
+		"thinking": {"type": "adaptive"},
+		"output_config": {
+			"effort": "high",
+			"format": {
+				"type": "json_schema",
+				"schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"],
+					"additionalProperties": false
+				}
+			}
+		},
+		"messages": [{"role": "user", "content": "Return Tokyo."}]
+	}`)
+
+	output, errConvert := ConvertClaudeRequestToGemini("gemini-2.5-pro", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToGemini() error = %v", errConvert)
+	}
+	if got := ojson.GetBytesNoCopy(output, "generationConfig.maxOutputTokens").Int(); got != 256 {
+		t.Errorf("generationConfig.maxOutputTokens = %d, want 256; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "generationConfig.stopSequences.0").String(); got != "STOP_HERE" {
+		t.Errorf("generationConfig.stopSequences[0] = %q, want STOP_HERE; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Errorf("generationConfig.responseMimeType = %q, want application/json; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "generationConfig.responseJsonSchema.properties.city.type").String(); got != "string" {
+		t.Errorf("generationConfig.responseJsonSchema.properties.city.type = %q, want string; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+		t.Errorf("generationConfig.thinkingConfig.thinkingLevel = %q, want high; output=%s", got, output)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_ContainerUploadKeepsOtherText(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",
@@ -1010,4 +1095,143 @@ func TestConvertClaudeRequestToGemini_ImageURLAndRedactedThinkingStaySkipped(t *
 	if len(parts) != 1 || parts[0].Get("text").String() != "keep me" {
 		t.Fatalf("old skip paths changed the turn: %s", output)
 	}
+}
+
+func TestConvertClaudeRequestToGemini_ToolResultDocumentNestedInFunctionResponseParts(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		wantResult string
+	}{
+		{
+			name:       "array text and pdf document",
+			content:    `[{"type":"text","text":"Loaded sample.pdf"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]`,
+			wantResult: "Loaded sample.pdf",
+		},
+		{
+			name:       "array pdf document only",
+			content:    `[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]`,
+			wantResult: "",
+		},
+		{
+			name:       "object pdf document",
+			content:    `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}`,
+			wantResult: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(fmt.Sprintf(`{
+				"model": "gemini-3.1-pro-preview",
+				"messages": [
+					{"role": "assistant", "content": [{"type": "tool_use", "id": "call_pdf", "name": "read_file", "input": {}}]},
+					{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_pdf", "content": %s}]}
+				]
+			}`, tt.content))
+
+			output, err := ConvertClaudeRequestToGemini("gemini-3.1-pro-preview", inputJSON, false)
+			if err != nil {
+				t.Fatalf("ConvertClaudeRequestToGemini failed: %v", err)
+			}
+			fr := ojson.GetBytesNoCopy(output, "contents.1.parts.0.functionResponse")
+			if !fr.Exists() {
+				t.Fatalf("functionResponse missing: %s", output)
+			}
+			pdf := fr.Get("parts.0.inlineData")
+			if !pdf.Exists() {
+				t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got %s", fr.Raw)
+			}
+			if got := pdf.Get("mimeType").String(); got != "application/pdf" {
+				t.Fatalf("mimeType = %q, want application/pdf", got)
+			}
+			if got := pdf.Get("data").String(); got != "JVBERi0xLjQK" {
+				t.Fatalf("data = %q, want JVBERi0xLjQK", got)
+			}
+			if strings.Contains(fr.Get("response.result").Raw, "JVBERi0xLjQK") {
+				t.Fatalf("base64 PDF leaked into response.result: %s", fr.Get("response.result").Raw)
+			}
+			if tt.wantResult == "" {
+				if got := fr.Get("response.result").String(); got != "" {
+					t.Fatalf("response.result = %q, want empty", got)
+				}
+			} else if got := fr.Get("response.result.text").String(); got != tt.wantResult {
+				t.Fatalf("response.result.text = %q, want %q (raw=%s)", got, tt.wantResult, fr.Get("response.result").Raw)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToGemini_SanitizesGenerationConstraints(t *testing.T) {
+	t.Run("preserves native numeric max_tokens and filters mixed stop_sequences", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			maxTokens  string
+			wantRawMax string
+		}{
+			{name: "zero max_tokens preserved", maxTokens: "0", wantRawMax: "0"},
+			{name: "long decode max_tokens preserved", maxTokens: "1030323", wantRawMax: "1030323"},
+			{name: "fractional max_tokens passed verbatim", maxTokens: "1024.9", wantRawMax: "1024.9"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inputJSON := []byte(`{
+					"model": "gemini-3.5-flash",
+					"max_tokens": ` + tc.maxTokens + `,
+					"stop_sequences": ["END", "\n\n", " ", "", 123, null],
+					"messages": [{"role": "user", "content": "hi"}]
+				}`)
+				output, errConvert := ConvertClaudeRequestToGemini("gemini-3.5-flash", inputJSON, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToGemini() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "generationConfig")
+				if got := genConfig.Get("maxOutputTokens").Raw; got != tc.wantRawMax {
+					t.Fatalf("maxOutputTokens raw = %q, want %s; output=%s", got, tc.wantRawMax, output)
+				}
+				stops := genConfig.Get("stopSequences").Array()
+				wantStops := []string{"END", "\n\n", " "}
+				if len(stops) != len(wantStops) {
+					t.Fatalf("stopSequences = %s, want %v", genConfig.Get("stopSequences").Raw, wantStops)
+				}
+				for i, want := range wantStops {
+					if got := stops[i].String(); got != want {
+						t.Fatalf("stopSequences[%d] = %q, want %q", i, got, want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("omits non-numeric max_tokens, empty stop_sequences, and invalid output_config.format", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			payload string
+		}{
+			{
+				name:    "null max_tokens and empty stop_sequences",
+				payload: `{"model":"gemini-3.5-flash","max_tokens":null,"stop_sequences":["",123],"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+			{
+				name:    "string max_tokens and json_schema without schema object",
+				payload: `{"model":"gemini-3.5-flash","max_tokens":"256","stop_sequences":[],"output_config":{"format":{"type":"json_schema"}},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+			{
+				name:    "unsupported format type",
+				payload: `{"model":"gemini-3.5-flash","output_config":{"format":{"type":"text","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				output, errConvert := ConvertClaudeRequestToGemini("gemini-3.5-flash", []byte(tc.payload), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToGemini() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "generationConfig")
+				for _, key := range []string{"maxOutputTokens", "stopSequences", "responseMimeType", "responseJsonSchema", "responseSchema"} {
+					if genConfig.Get(key).Exists() {
+						t.Fatalf("generationConfig.%s should be omitted, got %s; output=%s", key, genConfig.Get(key).Raw, output)
+					}
+				}
+			})
+		}
+	})
 }

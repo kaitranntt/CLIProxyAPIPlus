@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestManagementV8RoutesShareAccessControl(t *testing.T) {
@@ -116,6 +120,36 @@ func TestManagementV8IndependentContract(t *testing.T) {
 			t.Fatalf("%s %s: status=%d body=%s", method, url, response.Code, response.Body.String())
 		}
 		return strings.TrimSpace(response.Body.String())
+	}
+	for _, tc := range []struct {
+		query, channel string
+	}{
+		{"Copilot", "copilot"},
+		{"Devin", "devin"},
+	} {
+		prefix := tc.channel + "/"
+		v8Models := ojson.Get(request(http.MethodGet, "/v8/management/routing/model-definitions/"+tc.query, "", http.StatusOK), "models").Array()
+		v0Models := ojson.Get(request(http.MethodGet, "/v0/management/model-definitions/"+tc.channel, "", http.StatusOK), "models").Array()
+		if len(v8Models) == 0 || len(v8Models) != len(v0Models) {
+			t.Fatalf("%s catalog lengths: v8=%d v0=%d", tc.channel, len(v8Models), len(v0Models))
+		}
+		patterns := []string{"*/gpt-*", "*/claude-*", "*/gemini-*"}
+		matched := make(map[string]bool, len(patterns))
+		for i, entry := range v8Models {
+			nativeID := v0Models[i].Get("id").String()
+			id := entry.Get("id").String()
+			if nativeID == "" || strings.HasPrefix(nativeID, prefix) || id != prefix+nativeID {
+				t.Fatalf("%s catalog IDs: v8=%q v0=%q", tc.channel, id, nativeID)
+			}
+			for _, pattern := range patterns {
+				matched[pattern] = matched[pattern] || modelconfig.MatchExcludedModelPattern(pattern, id)
+			}
+		}
+		for _, pattern := range patterns {
+			if !matched[pattern] {
+				t.Errorf("%s catalog: no model matches %q", tc.channel, pattern)
+			}
+		}
 	}
 	for _, legacy := range []string{"debug", "request-retry", "api-keys", "codex-api-key", "auth-files", "codex-auth-url", "oauth/providers/codex/auth-url", "plugins/test-plugin/config"} {
 		request(http.MethodGet, "/v8/management/"+legacy, "", http.StatusNotFound)
@@ -223,5 +257,69 @@ func TestManagementV8PluginOperationMigratesConfiguration(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("missing configuration reload")
+	}
+}
+
+func TestManagementV8PluginsExposesRuntimePriorityOnlyOnV8(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := fmt.Sprintf("remote-management: {secret-key: test-password}\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    registered-plugin: {enabled: true, priority: 77}\n    configured-only: {enabled: true, priority: 33}\n", filepath.ToSlash(dir))
+	if errWrite := os.WriteFile(path, []byte(raw), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	host := pluginhost.New()
+	host.RegisterPluginForTest("registered-plugin", pluginapi.Plugin{})
+	host.RegisterPluginWithPriorityForTest("zero-plugin", 0, pluginapi.Plugin{})
+
+	h := management.NewHandler(cfg, path, nil)
+	h.SetLocalPassword("test-password")
+	h.SetPluginHost(host)
+
+	s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
+	s.managementRoutesEnabled.Store(true)
+	s.registerManagementRoutes()
+
+	queryPlugins := func(route string) map[string]ojson.Result {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, route, nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		rec := httptest.NewRecorder()
+		s.engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !ojson.ValidBytes(rec.Body.Bytes()) {
+			t.Fatalf("GET %s status=%d body=%s", route, rec.Code, rec.Body.String())
+		}
+		out := make(map[string]ojson.Result)
+		for _, item := range ojson.Parse(rec.Body.String()).Get("plugins").Array() {
+			out[item.Get("id").String()] = item
+		}
+		return out
+	}
+
+	v8Entries := queryPlugins("/v8/management/plugins")
+	if p := v8Entries["registered-plugin"].Get("priority"); !p.Exists() || p.Type != ojson.Number || p.Int() != 1 {
+		t.Fatalf("v8 registered-plugin priority = %s, want 1; entry=%s", p.Raw, v8Entries["registered-plugin"].Raw)
+	}
+	if p := v8Entries["zero-plugin"].Get("priority"); !p.Exists() || p.Type != ojson.Number || p.Int() != 0 {
+		t.Fatalf("v8 zero-plugin priority = %s, want 0; entry=%s", p.Raw, v8Entries["zero-plugin"].Raw)
+	}
+	if p := v8Entries["configured-only"].Get("priority"); p.Exists() {
+		t.Fatalf("v8 configured-only exposed priority = %s", p.Raw)
+	}
+
+	v0Entries := queryPlugins("/v0/management/plugins")
+	if p := v0Entries["registered-plugin"].Get("priority"); p.Exists() {
+		t.Fatalf("deprecated v0 registered-plugin exposed priority = %s", p.Raw)
+	}
+	if p := v0Entries["zero-plugin"].Get("priority"); p.Exists() {
+		t.Fatalf("deprecated v0 zero-plugin exposed priority = %s", p.Raw)
+	}
+	if p := v0Entries["configured-only"].Get("priority"); p.Exists() {
+		t.Fatalf("deprecated v0 configured-only exposed priority = %s", p.Raw)
 	}
 }

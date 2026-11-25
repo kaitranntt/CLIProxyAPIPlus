@@ -2,7 +2,6 @@ package claude
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -904,6 +904,130 @@ func TestClaudeStreamMultiLineDataEventsAreRecognizedAcrossChunks(t *testing.T) 
 		body := recorder.Body.String()
 		if !strings.Contains(body, "event: error\ndata: ") {
 			t.Fatalf("expected terminal error event when stream truncated after multiline tool_use containing nested message_stop line; body=%q", body)
+		}
+	})
+}
+
+func TestClaudeErrorNormalizesGoogleTokenExceededToPromptIsTooLong(t *testing.T) {
+	const googleMsg = "The input token count exceeds the maximum number of tokens allowed (1048576); input token count: 1050377."
+	const googleVariantMsg = "The input token count (1050377) exceeds the maximum number of tokens allowed (1048576)."
+
+	t.Run("JSON WriteErrorResponse prefixes Google 400 token exceeded message", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+		msg := &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(`{"error":{"code":400,"message":"` + googleMsg + `","status":"INVALID_ARGUMENT"}}`),
+		}
+
+		handler.WriteErrorResponse(c, msg)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+		body := recorder.Body.Bytes()
+		if got := ojson.GetBytesNoCopy(body, "type").String(); got != "error" {
+			t.Fatalf("type = %q, want error; body=%s", got, body)
+		}
+		if got := ojson.GetBytesNoCopy(body, "error.type").String(); got != "invalid_request_error" {
+			t.Fatalf("error.type = %q, want invalid_request_error; body=%s", got, body)
+		}
+		wantMessage := "prompt is too long: " + googleMsg
+		if got := ojson.GetBytesNoCopy(body, "error.message").String(); got != wantMessage {
+			t.Fatalf("error.message = %q, want %q; body=%s", got, wantMessage, body)
+		}
+	})
+
+	t.Run("committed SSE prefixes Google 400 token exceeded message", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		c.Header("Content-Type", "text/event-stream")
+		_, _ = c.Writer.Write([]byte("event: message_start\ndata: {}\n\n"))
+		c.Writer.Flush()
+
+		handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(`{"error":{"code":400,"message":"` + googleMsg + `","status":"INVALID_ARGUMENT"}}`),
+		}
+		close(errs)
+
+		handler.forwardClaudeStream(c, c.Writer, func(error) {}, nil, errs)
+
+		const prefix = "event: error\ndata: "
+		body := recorder.Body.String()
+		_, payload, ok := strings.Cut(body, prefix)
+		if !ok {
+			t.Fatalf("expected SSE error event; body=%q", body)
+		}
+		payload = strings.TrimSpace(payload)
+		wantMessage := "prompt is too long: " + googleMsg
+		if got := ojson.Get(payload, "error.type").String(); got != "invalid_request_error" {
+			t.Fatalf("error.type = %q, want invalid_request_error; payload=%s", got, payload)
+		}
+		if got := ojson.Get(payload, "error.message").String(); got != wantMessage {
+			t.Fatalf("error.message = %q, want %q; payload=%s", got, wantMessage, payload)
+		}
+	})
+
+	t.Run("parenthesized Google token count variant is also prefixed", func(t *testing.T) {
+		errType, message := claudeErrorDetailFromText(
+			http.StatusBadRequest,
+			`{"error":{"code":400,"message":"`+googleVariantMsg+`","status":"INVALID_ARGUMENT"}}`,
+		)
+		if errType != "invalid_request_error" {
+			t.Fatalf("errType = %q, want invalid_request_error", errType)
+		}
+		wantMessage := "prompt is too long: " + googleVariantMsg
+		if message != wantMessage {
+			t.Fatalf("message = %q, want %q", message, wantMessage)
+		}
+	})
+
+	t.Run("already prefixed prompt is too long message is not double prefixed", func(t *testing.T) {
+		const alreadyPrefixed = "prompt is too long: " + googleMsg
+		errType, message := claudeErrorDetailFromText(
+			http.StatusBadRequest,
+			`{"type":"error","error":{"type":"invalid_request_error","message":"`+alreadyPrefixed+`"}}`,
+		)
+		if errType != "invalid_request_error" {
+			t.Fatalf("errType = %q, want invalid_request_error", errType)
+		}
+		if message != alreadyPrefixed {
+			t.Fatalf("message = %q, want %q", message, alreadyPrefixed)
+		}
+	})
+
+	t.Run("non-invalid_request_error status does not rewrite message", func(t *testing.T) {
+		errType, message := claudeErrorDetailFromText(
+			http.StatusInternalServerError,
+			`{"error":{"code":500,"message":"`+googleMsg+`","status":"INTERNAL"}}`,
+		)
+		if errType != "api_error" {
+			t.Fatalf("errType = %q, want api_error", errType)
+		}
+		if message != googleMsg {
+			t.Fatalf("message = %q, want %q", message, googleMsg)
+		}
+	})
+
+	t.Run("output token exceeded mentioning input token count is not prefixed", func(t *testing.T) {
+		const outputLimitMsg = "Requested output token count exceeds the maximum; input token count: 100."
+		errType, message := claudeErrorDetailFromText(
+			http.StatusBadRequest,
+			`{"error":{"code":400,"message":"`+outputLimitMsg+`","status":"INVALID_ARGUMENT"}}`,
+		)
+		if errType != "invalid_request_error" {
+			t.Fatalf("errType = %q, want invalid_request_error", errType)
+		}
+		if message != outputLimitMsg {
+			t.Fatalf("message = %q, want %q", message, outputLimitMsg)
 		}
 	})
 }

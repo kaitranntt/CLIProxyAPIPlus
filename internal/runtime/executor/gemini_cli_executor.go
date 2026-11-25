@@ -252,7 +252,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			continue
 		}
 
-		err = newGeminiStatusErr(httpResp.StatusCode, data)
+		err = newGeminiCLIStatusErr(httpResp.StatusCode, data)
 		return resp, err
 	}
 
@@ -262,7 +262,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	err = newGeminiStatusErr(lastStatus, lastBody)
+	err = newGeminiCLIStatusErr(lastStatus, lastBody)
 	return resp, err
 }
 
@@ -394,7 +394,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				continue
 			}
-			err = newGeminiStatusErr(httpResp.StatusCode, data)
+			err = newGeminiCLIStatusErr(httpResp.StatusCode, data)
 			return nil, err
 		}
 
@@ -490,7 +490,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	err = newGeminiStatusErr(lastStatus, lastBody)
+	err = newGeminiCLIStatusErr(lastStatus, lastBody)
 	return nil, err
 }
 
@@ -605,7 +605,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	return cliproxyexecutor.Response{}, newGeminiStatusErr(lastStatus, lastBody)
+	return cliproxyexecutor.Response{}, newGeminiCLIStatusErr(lastStatus, lastBody)
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini CLI).
@@ -977,7 +977,7 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 	return rawJSON
 }
 
-func newGeminiStatusErr(statusCode int, body []byte) statusErr {
+func newGeminiCLIStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := parseRetryDelay(body); parseErr == nil && retryAfter != nil {

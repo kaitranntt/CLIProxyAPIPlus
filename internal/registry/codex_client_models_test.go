@@ -2,10 +2,11 @@ package registry
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestEmbeddedCodexClientModelsCatalogIsValid(t *testing.T) {
@@ -24,6 +25,32 @@ func TestEmbeddedCodexClientModelsCatalogIsValid(t *testing.T) {
 	}
 	if err := ValidateCodexClientModelsJSON(second); err != nil {
 		t.Fatalf("mutating returned snapshot changed stored catalog: %v", err)
+	}
+}
+
+func TestEmbeddedCodexClientModelsCatalogOmitsAudioForGPT62SolAndGPT55(t *testing.T) {
+	data, _ := GetCodexClientModelsSnapshot()
+	var payload codexClientModelsPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal embedded catalog: %v", err)
+	}
+
+	bySlug := make(map[string]map[string]any, len(payload.Models))
+	for _, model := range payload.Models {
+		if slug, ok := model["slug"].(string); ok {
+			bySlug[slug] = model
+		}
+	}
+
+	for _, slug := range []string{"gpt-6.2-sol", "gpt-5.5"} {
+		model, exists := bySlug[slug]
+		if !exists {
+			t.Fatalf("embedded catalog missing %s", slug)
+		}
+		mods, ok := model["input_modalities"].([]any)
+		if !ok || len(mods) != 2 || mods[0] != "text" || mods[1] != "image" {
+			t.Fatalf("embedded %s input_modalities = %#v, want [text image]", slug, model["input_modalities"])
+		}
 	}
 }
 
