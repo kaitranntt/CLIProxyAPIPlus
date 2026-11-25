@@ -5,8 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,9 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
+
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -69,6 +71,8 @@ type Auth struct {
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
 	Storage baseauth.TokenStorage `json:"-"`
+	// CopilotCatalog holds this account's discovered routes in memory only.
+	CopilotCatalog *copilot.Catalog `json:"-"`
 	// CodexRefreshPatch carries an immutable pending credential update, never configuration.
 	CodexRefreshPatch *codex.CredentialRefreshPatch `json:"-"`
 	// Label is an optional human readable label for logging.
@@ -133,7 +137,8 @@ type Auth struct {
 	AdoptedAt time.Time `json:"-"`
 	// AdoptedGrantHash records the fingerprint of the credential grant when it was adopted into runtime state,
 	// preserved across upstream automatic refresh rotations and reset when the credential grant is externally replaced.
-	AdoptedGrantHash string `json:"-"`
+	AdoptedGrantHash            string `json:"-"`
+	antigravityEnumRegistration string
 	// InferenceVerified reports whether the current credential version completed a real inference response.
 	InferenceVerified bool `json:"-"`
 	// LastInferenceVerifiedAt records when the current credential version last completed an inference response.
@@ -151,7 +156,15 @@ type Auth struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq uint64 `json:"-"`
+	cooldownRecordedSeq         uint64    `json:"-"`
+	forceCooldownUntil          time.Time `json:"-"`
+	quotaForceCooldownUntil     time.Time `json:"-"`
+	credQuotaForceUntil         time.Time `json:"-"`
+	credentialRetryAfter        time.Time `json:"-"`
+	nonAuthCredentialRetryAfter time.Time `json:"-"`
+	nonAuthCredentialLastError  *Error    `json:"-"`
+	nonQuotaCooldownUntil       time.Time `json:"-"`
+	forceCooldownSeeded         bool      `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
@@ -355,6 +368,10 @@ type QuotaState struct {
 	// Cooldown transitions must use applyCooldownFields so they cannot replace
 	// this snapshot.
 	Signals map[string]string `json:"signals,omitempty"`
+	// cooldownSignals retains rejected quota headers captured when the active
+	// cooldown was recorded so out-of-order completions cannot overwrite them.
+	cooldownSignals   map[string]string
+	cooldownEvaluated bool
 }
 
 // Clone returns an independent copy of the quota state.
@@ -364,6 +381,12 @@ func (q QuotaState) Clone() QuotaState {
 		copyQuota.Signals = make(map[string]string, len(q.Signals))
 		for key, value := range q.Signals {
 			copyQuota.Signals[key] = value
+		}
+	}
+	if len(q.cooldownSignals) > 0 {
+		copyQuota.cooldownSignals = make(map[string]string, len(q.cooldownSignals))
+		for key, value := range q.cooldownSignals {
+			copyQuota.cooldownSignals[key] = value
 		}
 	}
 	return copyQuota
@@ -390,7 +413,11 @@ type ModelState struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq uint64 `json:"-"`
+	cooldownRecordedSeq     uint64    `json:"-"`
+	forceCooldownUntil      time.Time `json:"-"`
+	quotaForceCooldownUntil time.Time `json:"-"`
+	nonQuotaCooldownUntil   time.Time `json:"-"`
+	forceCooldownSeeded     bool      `json:"-"`
 	// credentialQuotaShadow holds this model's independent (own-failure)
 	// cooldown layer while the outer fields present the auth-level
 	// credential quota propagated over it, so quota restoration can drop
@@ -473,6 +500,22 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	return out
 }
 
+// ActiveCopilotCatalog selects the account snapshot or the pre-discovery catalog.
+// A known empty, expired or revoked account directory never reopens preset routes.
+func (a *Auth) ActiveCopilotCatalog(now time.Time) *copilot.Catalog {
+	if a == nil || a.Disabled || a.Status == StatusDisabled {
+		return nil
+	}
+	if a.CopilotCatalog != nil {
+		return a.CopilotCatalog.Active(now)
+	}
+	base, _ := a.Metadata["base_url"].(string)
+	if !copilot.TrustedAPI(base) || !a.HasValidAccessToken(now) || a.RejectedAccessToken != "" && a.RejectedAccessToken == authAccessToken(a) {
+		return nil
+	}
+	return copilot.PresetCatalog
+}
+
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
@@ -481,12 +524,13 @@ func (a *Auth) Clone() *Auth {
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
 	if a.LastError != nil {
-		copyErr := *a.LastError
-		copyAuth.LastError = &copyErr
+		copyAuth.LastError = a.LastError.Clone()
 	}
 	if a.RefreshError != nil {
-		copyErr := *a.RefreshError
-		copyAuth.RefreshError = &copyErr
+		copyAuth.RefreshError = a.RefreshError.Clone()
+	}
+	if a.nonAuthCredentialLastError != nil {
+		copyAuth.nonAuthCredentialLastError = a.nonAuthCredentialLastError.Clone()
 	}
 	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
@@ -553,26 +597,32 @@ func (o *ProxyConnectionPoolOverride) Clone() *ProxyConnectionPoolOverride {
 	return out
 }
 
+func cloneMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMetadataMap(typed)
+	case []string:
+		s := make([]string, len(typed))
+		copy(s, typed)
+		return s
+	case []any:
+		s := make([]any, len(typed))
+		for i, item := range typed {
+			s[i] = cloneMetadataValue(item)
+		}
+		return s
+	default:
+		return value
+	}
+}
+
 func cloneMetadataMap(src map[string]any) map[string]any {
 	if src == nil {
 		return nil
 	}
 	dst := make(map[string]any, len(src))
 	for key, value := range src {
-		switch typed := value.(type) {
-		case map[string]any:
-			dst[key] = cloneMetadataMap(typed)
-		case []string:
-			s := make([]string, len(typed))
-			copy(s, typed)
-			dst[key] = s
-		case []any:
-			s := make([]any, len(typed))
-			copy(s, typed)
-			dst[key] = s
-		default:
-			dst[key] = value
-		}
+		dst[key] = cloneMetadataValue(value)
 	}
 	return dst
 }
@@ -751,12 +801,7 @@ func (m *ModelState) Clone() *ModelState {
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
 	if m.LastError != nil {
-		copyState.LastError = &Error{
-			Code:       m.LastError.Code,
-			Message:    m.LastError.Message,
-			Retryable:  m.LastError.Retryable,
-			HTTPStatus: m.LastError.HTTPStatus,
-		}
+		copyState.LastError = m.LastError.Clone()
 	}
 	if m.credentialQuotaShadow != nil {
 		copyState.credentialQuotaShadow = m.credentialQuotaShadow.cloneShallow()
@@ -773,12 +818,7 @@ func (m *ModelState) cloneShallow() *ModelState {
 	copyState.Quota = m.Quota.Clone()
 	copyState.credentialQuotaShadow = nil
 	if m.LastError != nil {
-		copyState.LastError = &Error{
-			Code:       m.LastError.Code,
-			Message:    m.LastError.Message,
-			Retryable:  m.LastError.Retryable,
-			HTTPStatus: m.LastError.HTTPStatus,
-		}
+		copyState.LastError = m.LastError.Clone()
 	}
 	return &copyState
 }
@@ -1019,7 +1059,9 @@ func IsCodexClientUserAgent(userAgent string) bool {
 		strings.Contains(ua, "codex-rs") ||
 		strings.Contains(ua, "codex_cli_rs") ||
 		strings.Contains(ua, "codex-tui") ||
-		strings.Contains(ua, "codex_exec")
+		strings.Contains(ua, "codex_exec") ||
+		strings.Contains(ua, "codex-acp") ||
+		strings.Contains(ua, "codex_acp")
 }
 
 func headerValueFromHTTPHeader(headers http.Header, name string) string {
@@ -1129,6 +1171,15 @@ const CodexOuterRefreshLead = 96 * time.Hour
 // CodexSIWCRefreshLead is the minimum remaining validity required before refreshing
 // a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
 const CodexSIWCRefreshLead = 5 * time.Minute
+
+// SIWCEarliestRefreshTime returns the server's lower bound for SIWC token renewal.
+func (a *Auth) SIWCEarliestRefreshTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwc, _ := a.Metadata["siwc"].(map[string]any)
+	return lookupMetadataTime(siwc, "earliest_refresh_at")
+}
 
 // SIWCStatus represents the read-only validity state of a Codex SIWC credential.
 type SIWCStatus string
@@ -1347,28 +1398,26 @@ func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh 
 
 	siwcToken, _ := siwcMap["access_token"].(string)
 	siwcToken = strings.TrimSpace(siwcToken)
-	if siwcToken == "" {
+	due := now
+	if siwcToken != "" && !a.isSIWCAccessTokenRejected(siwcToken) {
+		// The legacy expired field already includes a margin; prefer the real expiry.
+		expiry, hasExpiry := a.SIWCRealExpirationTime()
+		if !hasExpiry {
+			expiry, hasExpiry = a.SIWCExpirationTime()
+		}
+		if hasExpiry && !expiry.IsZero() {
+			due = expiry.Add(-CodexSIWCRefreshLead)
+		} else if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
+			due = lastRefresh.Add(CodexSIWCRefreshLead)
+		}
+	}
+	if earliest, okEarliest := a.SIWCEarliestRefreshTime(); okEarliest && earliest.After(due) {
+		due = earliest
+	}
+	if !due.After(now) {
 		return now, true, true
 	}
-	if a.isSIWCAccessTokenRejected(siwcToken) {
-		return now, true, true
-	}
-	expiry, hasExpiry := a.SIWCExpirationTime()
-	if hasExpiry && !expiry.IsZero() {
-		due := expiry.Add(-CodexSIWCRefreshLead)
-		if !due.After(now) {
-			return now, true, true
-		}
-		return due, true, false
-	}
-	if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
-		due := lastRefresh.Add(CodexSIWCRefreshLead)
-		if !due.After(now) {
-			return now, true, true
-		}
-		return due, true, false
-	}
-	return now, true, true
+	return due, true, false
 }
 
 // OuterAccessTokenExpirationTime returns the expiration time of the outer access_token,

@@ -2,11 +2,11 @@ package cliproxy
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -293,6 +293,43 @@ func TestApplyOAuthModelAlias_PreservesMetadataModelID(t *testing.T) {
 	}
 }
 
+func TestApplyModelPrefixes_PreservesExplicitPublishedNames(t *testing.T) {
+	for _, provider := range []string{"copilot", "devin"} {
+		t.Run(provider, func(t *testing.T) {
+			baseSource := provider + "/base"
+			explicitSource := provider + "/explicit"
+			models := []*ModelInfo{
+				{ID: "chat", SourceModelID: baseSource},
+				{ID: "team/chat", SourceModelID: explicitSource},
+			}
+			for _, tc := range []struct {
+				name  string
+				force bool
+				want  map[string]string
+			}{
+				{"optional", false, map[string]string{
+					"chat": baseSource, "team/chat": explicitSource, "team/team/chat": explicitSource,
+				}},
+				{"required", true, map[string]string{
+					"team/chat": baseSource, "team/team/chat": explicitSource,
+				}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					published := applyModelPrefixes(models, "team", tc.force)
+					if len(published) != len(tc.want) {
+						t.Fatalf("published %d routes, want %d", len(published), len(tc.want))
+					}
+					for _, model := range published {
+						if want := tc.want[model.ID]; model.SourceModelID != want {
+							t.Errorf("route %q source = %q, want %q", model.ID, model.SourceModelID, want)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestApplyModelPrefixes_PreservesMetadataModelID(t *testing.T) {
 	webSearch := true
 	models := []*ModelInfo{
@@ -448,4 +485,60 @@ func TestApplyModelPrefixes_RewritesModelInfoNameForGeminiEndpoints(t *testing.T
 	if forcedOut[0].Name != "models/gcp/gemini-4-argon" {
 		t.Fatalf("forced gcp/gemini-4-argon Name = %q, want models/gcp/gemini-4-argon", forcedOut[0].Name)
 	}
+}
+
+func TestApplyOAuthModelAlias_CaseOnlyRenameAndFork(t *testing.T) {
+	t.Run("rename preserves case-only alias", func(t *testing.T) {
+		cfg := &config.Config{
+			OAuthModelAlias: map[string][]config.OAuthModelAlias{
+				"opencode-go": {
+					{Name: "minimax-m3.1-flash", Alias: "MiniMax-M3.1-Flash", Fork: false},
+				},
+			},
+		}
+		models := []*ModelInfo{
+			{ID: "minimax-m3.1-flash", Name: "models/minimax-m3.1-flash", DisplayName: "MiniMax M3.1 Flash"},
+		}
+
+		out := applyOAuthModelAlias(cfg, "opencode-go", "oauth", models)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 model, got %d", len(out))
+		}
+		if out[0].ID != "MiniMax-M3.1-Flash" {
+			t.Fatalf("expected model id %q, got %q", "MiniMax-M3.1-Flash", out[0].ID)
+		}
+		if out[0].Name != "models/MiniMax-M3.1-Flash" {
+			t.Fatalf("expected model name %q, got %q", "models/MiniMax-M3.1-Flash", out[0].Name)
+		}
+		if out[0].MetadataModelID != "minimax-m3.1-flash" {
+			t.Fatalf("expected MetadataModelID %q, got %q", "minimax-m3.1-flash", out[0].MetadataModelID)
+		}
+	})
+
+	t.Run("fork keeps both original and case-only alias", func(t *testing.T) {
+		cfg := &config.Config{
+			OAuthModelAlias: map[string][]config.OAuthModelAlias{
+				"opencode-go": {
+					{Name: "minimax-m3.1-flash", Alias: "MiniMax-M3.1-Flash", Fork: true},
+				},
+			},
+		}
+		models := []*ModelInfo{
+			{ID: "minimax-m3.1-flash", Name: "models/minimax-m3.1-flash", DisplayName: "MiniMax M3.1 Flash"},
+		}
+
+		out := applyOAuthModelAlias(cfg, "opencode-go", "oauth", models)
+		if len(out) != 2 {
+			t.Fatalf("expected 2 models, got %d", len(out))
+		}
+		if out[0].ID != "minimax-m3.1-flash" {
+			t.Fatalf("expected first model id %q, got %q", "minimax-m3.1-flash", out[0].ID)
+		}
+		if out[1].ID != "MiniMax-M3.1-Flash" {
+			t.Fatalf("expected second model id %q, got %q", "MiniMax-M3.1-Flash", out[1].ID)
+		}
+		if out[1].Name != "models/MiniMax-M3.1-Flash" {
+			t.Fatalf("expected second model name %q, got %q", "models/MiniMax-M3.1-Flash", out[1].Name)
+		}
+	})
 }

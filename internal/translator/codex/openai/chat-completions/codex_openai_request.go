@@ -31,13 +31,17 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertOpenAIRequestToCodex(modelName, inputRawJSON, stream)
-
+	return convertOpenAIRequestToResponses(modelName, inputRawJSON, stream, true)
 }
 
-// convertOpenAIRequestToCodex also reports a file or audio part Responses cannot
+// ConvertOpenAIRequestToResponses converts to standard Responses without Codex defaults.
+func ConvertOpenAIRequestToResponses(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIRequestToResponses(modelName, inputRawJSON, stream, false)
+}
+
+// convertOpenAIRequestToResponses also reports a file or audio part Responses cannot
 // receive when it leaves a user turn with nothing to send.
-func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func convertOpenAIRequestToResponses(modelName string, inputRawJSON []byte, stream, codex bool) ([]byte, error) {
 	rawJSON := inputRawJSON
 	var drops translatorcommon.UserTurnDrops
 	root := util.ParseGJSONBytesNoCopy(rawJSON)
@@ -59,17 +63,22 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Map reasoning effort
 	if v := root.Get("reasoning_effort"); v.Exists() {
 		_ = outDoc.Set("reasoning.effort", v.Value())
-	} else {
+	} else if codex {
 		_ = outDoc.Set("reasoning.effort", "medium")
 	}
-	if serviceTier := normalizeCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
-		_ = outDoc.Set("service_tier", serviceTier)
+	if codex {
+		if serviceTier := normalizeCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
+			_ = outDoc.Set("service_tier", serviceTier)
+		}
+		_ = outDoc.Set("parallel_tool_calls", root.Get("parallel_tool_calls").Type != ojson.False)
+		_ = outDoc.Set("include", []string{"reasoning.encrypted_content"})
+	} else {
+		for _, key := range []string{"temperature", "top_p", "service_tier", "parallel_tool_calls", "store"} {
+			if value := root.Get(key); value.Exists() {
+				_ = outDoc.SetRawBytes(key, []byte(value.Raw))
+			}
+		}
 	}
-	_ = outDoc.Set("parallel_tool_calls", root.Get("parallel_tool_calls").Type != ojson.False)
-	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
-	// reasoning.summary to the source request's canonical summary intent instead
-	// of coupling it to reasoning effort.
-	_ = outDoc.Set("include", []string{"reasoning.encrypted_content"})
 
 	// Model
 	_ = outDoc.Set("model", modelName)
@@ -85,7 +94,7 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				case "function":
 					functionToolNames[tool.Get("function.name").String()] = struct{}{}
 				case "custom":
-					customToolNames[tool.Get("name").String()] = struct{}{}
+					customToolNames[customToolDefinition(tool).Get("name").String()] = struct{}{}
 				}
 			}
 			// A normalized function envelope cannot disambiguate declarations that share a name.
@@ -253,11 +262,10 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								audioData := it.Get("input_audio.data").String()
 								audioFormat := it.Get("input_audio.format").String()
 								if audioData != "" {
-									partDoc := ojson.NewDocString(`{}`)
-									_ = partDoc.Set("type", "input_audio")
-									_ = partDoc.Set("data", audioData)
+									partDoc := ojson.NewDocString(`{"type":"input_audio","input_audio":{"data":""}}`)
+									_ = partDoc.Set("input_audio.data", audioData)
 									if audioFormat != "" {
-										_ = partDoc.Set("format", audioFormat)
+										_ = partDoc.Set("input_audio.format", audioFormat)
 									}
 									contentItems = append(contentItems, partDoc.Bytes())
 									turnSendable++
@@ -401,19 +409,13 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				}
 			}
 		}
-
-		// Map verbosity if provided
-		if text.Exists() {
-			if v := text.Get("verbosity"); v.Exists() {
-				_ = outDoc.Set("text.verbosity", v.Value())
-			}
-		}
-	} else if text.Exists() {
-		// If only text.verbosity present (no response_format), map verbosity
-		if v := text.Get("verbosity"); v.Exists() {
-			_ = outDoc.SetRawBytes("text", []byte(`{}`))
-			_ = outDoc.Set("text.verbosity", v.Value())
-		}
+	}
+	verbosity := text.Get("verbosity")
+	if !codex && !verbosity.Exists() {
+		verbosity = root.Get("verbosity")
+	}
+	if verbosity.Exists() {
+		_ = outDoc.SetRaw("text.verbosity", verbosity.Raw)
 	}
 
 	// Map tools (flatten function fields)
@@ -424,15 +426,21 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			t := arr[i]
 			toolType := t.Get("type").String()
 			if toolType == "custom" {
-				item := []byte(t.Raw)
-				name := t.Get("name").String()
+				definition := customToolDefinition(t)
+				itemDoc := ojson.NewDocString(definition.Raw)
+				_ = itemDoc.Set("type", "custom")
+				if grammar := definition.Get("format.grammar"); definition.Get("format.type").String() == "grammar" && grammar.IsObject() {
+					_ = itemDoc.SetRaw("format", grammar.Raw)
+					_ = itemDoc.Set("format.type", "grammar")
+				}
+				name := definition.Get("name").String()
 				if short, ok := originalToolNameMap[name]; ok {
 					name = short
 				} else {
 					name = shortenNameIfNeeded(name)
 				}
-				item, _ = ojson.SetBytes(item, "name", name)
-				toolItems = append(toolItems, item)
+				_ = itemDoc.Set("name", name)
+				toolItems = append(toolItems, itemDoc.Bytes())
 				continue
 			}
 
@@ -487,7 +495,7 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		case tc.IsObject():
 			tcType := tc.Get("type").String()
 			if tcType == "function" || tcType == "custom" {
-				name := tc.Get("name").String()
+				name := customToolDefinition(tc).Get("name").String()
 				if tcType == "function" {
 					name = tc.Get("function.name").String()
 					if _, custom := customToolNames[name]; custom {
@@ -514,7 +522,9 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		}
 	}
 
-	_ = outDoc.Set("store", false)
+	if codex {
+		_ = outDoc.Set("store", false)
+	}
 	return outDoc.Bytes(), drops.Err()
 }
 
@@ -682,6 +692,14 @@ func shortenNameIfNeeded(name string) string {
 	return sanitized[:limit]
 }
 
+// customToolDefinition accepts both Chat Completions and Responses declarations.
+func customToolDefinition(tool ojson.Result) ojson.Result {
+	if custom := tool.Get("custom"); custom.IsObject() {
+		return custom
+	}
+	return tool
+}
+
 // collectRequestToolNames extracts unique tool names across tools declarations,
 // tool_choice, and historical assistant tool_calls in a deterministic order.
 func collectRequestToolNames(rawJSON []byte) []string {
@@ -706,7 +724,7 @@ func collectRequestToolNames(rawJSON []byte) []string {
 			case "function":
 				addName(tool.Get("function.name").String())
 			case "custom":
-				addName(tool.Get("name").String())
+				addName(customToolDefinition(tool).Get("name").String())
 			}
 		}
 	}
@@ -722,7 +740,7 @@ func collectRequestToolNames(rawJSON []byte) []string {
 			}
 			addName(fnName)
 		case "custom":
-			addName(tc.Get("name").String())
+			addName(customToolDefinition(tc).Get("name").String())
 		}
 	}
 

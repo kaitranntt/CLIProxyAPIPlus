@@ -98,6 +98,38 @@ func TestApplyThinkingWithSourcePayloadPreservesOriginalOnlySummary(t *testing.T
 	}
 }
 
+func TestApplyThinkingWithSourcePayload_AntigravityClaudeThinkingDisplayUpdates(t *testing.T) {
+	source := []byte(`{"model":"gemini-3.8-flash-high","max_tokens":4096,"thinking":{"type":"adaptive","display":"updates"},"messages":[{"role":"user","content":"Hello, think first."}]}`)
+	translated := sdktranslator.TranslateRequest(
+		sdktranslator.FormatClaude,
+		sdktranslator.FormatAntigravity,
+		"gemini-3.8-flash-high",
+		source,
+		false,
+	)
+
+	out, err := helps.ApplyThinkingWithSourcePayload(
+		translated,
+		source,
+		source,
+		"gemini-3.8-flash-high",
+		sdktranslator.FormatClaude.String(),
+		sdktranslator.FormatAntigravity.String(),
+		"antigravity",
+	)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithSourcePayload() error = %v", err)
+	}
+	include := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+	if !include.Exists() || !include.Bool() {
+		t.Fatalf("includeThoughts not enabled: %s", out)
+	}
+	level := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String()
+	if level != "HIGH" {
+		t.Fatalf("thinkingLevel = %q, want HIGH: %s", level, out)
+	}
+}
+
 func TestApplyThinkingWithSourcePayload_AntigravityResponsesReasoningSummaryAuto(t *testing.T) {
 	source := []byte(`{"model":"gemini-3.8-flash-high","reasoning":{"effort":"low","summary":"auto"},"input":"hi"}`)
 	translated := sdktranslator.TranslateRequest(
@@ -125,14 +157,22 @@ func TestApplyThinkingWithSourcePayload_AntigravityResponsesReasoningSummaryAuto
 		t.Fatalf("includeThoughts not enabled: %s", out)
 	}
 	level := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String()
-	if level != "low" {
-		t.Fatalf("thinkingLevel = %q, want low: %s", level, out)
+	if level != "LOW" {
+		t.Fatalf("thinkingLevel = %q, want LOW: %s", level, out)
 	}
 }
 
 func TestApplyRequestThinking_AntigravityClaude55PreservesThinkingLevel(t *testing.T) {
 	for _, model := range []string{"claude-sonnet-5-5-high", "claude-opus-5-5-high"} {
-		for _, level := range []string{"low", "medium", "high"} {
+		for _, tc := range []struct {
+			level string
+			want  string
+		}{
+			{level: "low", want: "LOW"},
+			{level: "medium", want: "MEDIUM"},
+			{level: "high", want: "HIGH"},
+		} {
+			level := tc.level
 			t.Run(model+"/"+level, func(t *testing.T) {
 				source := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply OK"}]}],"generationConfig":{"maxOutputTokens":128000,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"` + level + `"}}}`)
 				translated := sdktranslator.TranslateRequest(
@@ -155,8 +195,8 @@ func TestApplyRequestThinking_AntigravityClaude55PreservesThinkingLevel(t *testi
 				if err != nil {
 					t.Fatalf("ApplyThinkingWithSourcePayload() error = %v", err)
 				}
-				if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
-					t.Fatalf("thinkingLevel = %q, want %q: %s", got, level, out)
+				if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.want {
+					t.Fatalf("thinkingLevel = %q, want %q: %s", got, tc.want, out)
 				}
 				if budget := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
 					t.Fatalf("thinkingBudget should be absent, got %s: %s", budget.Raw, out)

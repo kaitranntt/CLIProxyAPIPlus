@@ -32,6 +32,7 @@ func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, s
 	}
 	copyClaudeSystemToInteractionsDoc(outDoc, root)
 	copyClaudeGenerationConfigToInteractionsDoc(outDoc, root)
+	copyClaudeOutputFormatToInteractionsDoc(outDoc, root)
 	errDrops := appendClaudeMessagesToInteractionsDoc(outDoc, root.Get("messages"), preserveEmptyThinkingBlocks)
 	copyClaudeToolsToInteractionsDoc(outDoc, root)
 	return outDoc.Bytes(), errDrops
@@ -56,10 +57,14 @@ func copyClaudeSystemToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 }
 
 func copyClaudeGenerationConfigToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
-	copyClaudeJSONFieldDoc(outDoc, root, "max_tokens", "generation_config.max_output_tokens")
+	if rawMaxTokens, ok := translatorcommon.ClaudeMaxTokensRaw(root.Get("max_tokens")); ok {
+		_ = outDoc.SetRaw("generation_config.max_output_tokens", rawMaxTokens)
+	}
 	copyClaudeJSONFieldDoc(outDoc, root, "temperature", "generation_config.temperature")
 	copyClaudeJSONFieldDoc(outDoc, root, "top_p", "generation_config.top_p")
-	copyClaudeJSONFieldDoc(outDoc, root, "stop_sequences", "generation_config.stop_sequences")
+	if sequences := translatorcommon.ClaudeStopSequences(root.Get("stop_sequences")); len(sequences) > 0 {
+		_ = outDoc.Set("generation_config.stop_sequences", sequences)
+	}
 	copyClaudeThinkingToInteractionsDoc(outDoc, root)
 	copyClaudeToolChoiceToInteractionsDoc(outDoc, root.Get("tool_choice"))
 }
@@ -70,6 +75,16 @@ func copyClaudeJSONFieldDoc(outDoc *ojson.Doc, root ojson.Result, from, to strin
 		return
 	}
 	_ = outDoc.SetRaw(to, value.Raw)
+}
+
+func copyClaudeOutputFormatToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
+	schema, ok := translatorcommon.ClaudeOutputJSONSchema(root.Get("output_config.format"))
+	if !ok {
+		return
+	}
+	entryDoc := ojson.NewDocString(`{"type":"text","mime_type":"application/json"}`)
+	_ = entryDoc.SetRaw("schema", schema.Raw)
+	_ = outDoc.SetRawBytes("response_format", entryDoc.Bytes())
 }
 
 func copyClaudeThinkingToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
@@ -231,12 +246,47 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 				sendable++
 			}
 		case "image", "document", "container_upload":
-			if mediaPart, ok := claudeMediaPartToInteractions(part, partType); ok {
+			flushReminders := func() {
 				if pendingSystemReminders != nil && len(*pendingSystemReminders) > 0 {
 					flushContent()
 					*items = append(*items, *pendingSystemReminders...)
 					*pendingSystemReminders = nil
 				}
+			}
+			emitInteractionsText := func(text string) {
+				flushReminders()
+				partDoc := ojson.NewDocString(`{"type":"text","text":""}`)
+				_ = partDoc.Set("text", text)
+				stepContent = append(stepContent, partDoc.Bytes())
+				sendable++
+			}
+			if partType == "document" {
+				if docText, ok := translatorcommon.ClaudeDocumentTextBlock(part); ok {
+					emitInteractionsText(docText)
+					return true
+				}
+				var onImageDrop func()
+				if drops != nil && role == "user" {
+					onImageDrop = func() { drops.Drop("image") }
+				}
+				if translatorcommon.ExpandClaudeContentDocument(
+					part,
+					emitInteractionsText,
+					func(img ojson.Result) ([]byte, bool) {
+						return claudeMediaPartToInteractions(img, "image")
+					},
+					func(mediaPart []byte) {
+						flushReminders()
+						stepContent = append(stepContent, mediaPart)
+						sendable++
+					},
+					onImageDrop,
+				) {
+					return true
+				}
+			}
+			if mediaPart, ok := claudeMediaPartToInteractions(part, partType); ok {
+				flushReminders()
 				stepContent = append(stepContent, mediaPart)
 				sendable++
 			} else if drops != nil && role == "user" {
@@ -269,13 +319,32 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 
 func claudeMediaPartToInteractions(part ojson.Result, partType string) ([]byte, bool) {
 	source := part.Get("source")
+	sourceType := source.Get("type").String()
 	mimeType := source.Get("media_type").String()
+	if mimeType == "" {
+		mimeType = part.Get("mime_type").String()
+	}
+	if sourceType == "url" {
+		rawURL := strings.TrimSpace(source.Get("url").String())
+		if !translatorcommon.IsHTTPURL(rawURL) {
+			return nil, false
+		}
+		outDoc := ojson.NewDocString(`{"type":"","uri":""}`)
+		_ = outDoc.Set("type", partType)
+		_ = outDoc.Set("uri", rawURL)
+		if mimeType != "" {
+			_ = outDoc.Set("mime_type", mimeType)
+		} else if partType == "document" {
+			_ = outDoc.Set("mime_type", "application/pdf")
+		}
+		return outDoc.Bytes(), true
+	}
+	if sourceType != "" && sourceType != "base64" {
+		return nil, false
+	}
 	data := source.Get("data").String()
 	if data == "" {
 		data = part.Get("data").String()
-	}
-	if mimeType == "" {
-		mimeType = part.Get("mime_type").String()
 	}
 	if mimeType == "" || data == "" {
 		return nil, false

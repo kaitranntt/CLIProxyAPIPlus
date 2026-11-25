@@ -31,7 +31,6 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  MODELS_REPOSITORY_REF: 26f77650ca9f30630f244989ad47962c2ef02b33
 
 jobs:
   build:
@@ -46,8 +45,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Validate models catalog
+        run: go run ./cmd/validate_codex_models --file internal/registry/models/codex_client_models.json
       - name: Build
         run: go build ./cmd/server
       - name: Test

@@ -19,27 +19,29 @@ func TestRequestTerminatedErrorSkipsCreditsFallback(t *testing.T) {
 	}
 }
 
-type afterAuthTestExecutor struct{}
+type requestTerminationTestExecutor struct{}
 
-func (*afterAuthTestExecutor) Identifier() string { return "afterauth" }
+func (*requestTerminationTestExecutor) Identifier() string { return "afterauth" }
 
-func (*afterAuthTestExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (*requestTerminationTestExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (*afterAuthTestExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (*requestTerminationTestExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ch := make(chan cliproxyexecutor.StreamChunk)
 	close(ch)
 	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 }
 
-func (*afterAuthTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
+func (*requestTerminationTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
 
-func (*afterAuthTestExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (*requestTerminationTestExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (*afterAuthTestExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+func (*requestTerminationTestExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
 }
 
@@ -50,8 +52,8 @@ func TestRequestTerminatedErrorZeroValueIsUntrustedAndApplyAfterAuthSetsTrusted(
 		t.Fatal("zero-value RequestTerminatedError.Trusted must be false")
 	}
 
-	// A termination produced by applyRequestAfterAuthInterceptor must be trusted.
-	executor := &afterAuthTestExecutor{}
+	// A termination produced by prepareRequestAfterAuth must be trusted.
+	executor := &requestTerminationTestExecutor{}
 	appliedTerminate := false
 	interceptor := func(context.Context, cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
 		appliedTerminate = true
@@ -62,12 +64,12 @@ func TestRequestTerminatedErrorZeroValueIsUntrustedAndApplyAfterAuthSetsTrusted(
 			ResponseBody:    []byte(`{"ok":true}`),
 		}
 	}
-	_, _, errIntercept := applyRequestAfterAuthInterceptor(context.Background(), executor, "test", cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+	_, _, errIntercept := prepareRequestAfterAuth(context.Background(), executor, nil, "test", cliproxyexecutor.Request{}, cliproxyexecutor.Options{
 		RequestAfterAuthInterceptor: interceptor,
 	}, "model")
 	var terminated *cliproxyexecutor.RequestTerminatedError
 	if !errors.As(errIntercept, &terminated) || terminated == nil {
-		t.Fatalf("applyRequestAfterAuthInterceptor error = %v, want RequestTerminatedError", errIntercept)
+		t.Fatalf("prepareRequestAfterAuth error = %v, want RequestTerminatedError", errIntercept)
 	}
 	if !terminated.Trusted {
 		t.Fatal("after-auth interceptor termination must set Trusted=true")

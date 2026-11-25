@@ -22,7 +22,6 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type attemptInfo struct {
@@ -63,8 +62,10 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
 	pluginReleases          pluginReleaseCache
-	siwcOAuthFactory        func(*config.Config) siwcOAuthService
+	authCache               managementAuthCache
+	siwcOAuthFactory        func(*config.Config, string) siwcOAuthService
 	siwcCommitMu            sync.Mutex
+	v8AuthUploadMu          sync.Mutex
 	pluginLoginSaveMu       sync.Mutex
 }
 
@@ -141,14 +142,45 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 		log.Debug("management: ignoring config reload parsed from an older config file version")
 		return
 	}
+	prevSecretHash := ""
+	if h.cfg != nil {
+		prevSecretHash = h.cfg.RemoteManagement.SecretKey
+	}
 	h.cfg = cloned
+	nextSecretHash := ""
+	if cloned != nil {
+		nextSecretHash = cloned.RemoteManagement.SecretKey
+	}
+	if prevSecretHash != nextSecretHash {
+		h.authCache.invalidate()
+	}
 }
 
-// configSnapshot reads h.cfg under h.mu, for code that runs outside the request holding it.
+// configSnapshot returns an independent copy of h.cfg under h.mu, for code that runs outside the request holding it.
 func (h *Handler) configSnapshot() *config.Config {
+	if h == nil {
+		return nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.cfg
+	if h.cfg == nil {
+		return nil
+	}
+	if cloned := h.cfg.CloneForRuntime(); cloned != nil {
+		return cloned
+	}
+	copied := *h.cfg
+	return &copied
+}
+
+// pluginHostSnapshot reads h.pluginHost under h.mu.
+func (h *Handler) pluginHostSnapshot() *pluginhost.Host {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pluginHost
 }
 
 // oauthConfigWithProxy returns a configuration snapshot for an OAuth session.
@@ -165,13 +197,8 @@ func (h *Handler) oauthConfigWithProxy(proxyURL string) *config.Config {
 			SDKConfig: config.SDKConfig{ProxyURL: proxyURL},
 		}
 	}
-	cloned := cfg.CloneForRuntime()
-	if cloned == nil {
-		copied := *cfg
-		cloned = &copied
-	}
-	cloned.ProxyURL = proxyURL
-	return cloned
+	cfg.ProxyURL = proxyURL
+	return cfg
 }
 
 // isStaleConfigFileSnapshotLocked reports whether cfg was parsed from config file
@@ -181,7 +208,7 @@ func (h *Handler) isStaleConfigFileSnapshotLocked(cfg *config.Config) bool {
 	if cfg == nil || cfg.SourceHash == "" || h.configFilePath == "" {
 		return false
 	}
-	data, errRead := os.ReadFile(h.configFilePath)
+	data, errRead := config.ReadConfigFile(h.configFilePath)
 	if errRead != nil {
 		return false
 	}
@@ -351,39 +378,58 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			provided = c.GetHeader("X-Management-Key")
 		}
 
-		allowed, statusCode, errMsg := h.AuthenticateManagementKey(clientIP, localClient, provided)
+		snapshot := h.managementAuthSnapshot()
+		allowed, statusCode, errMsg := h.authenticateManagementKey(snapshot, clientIP, localClient, provided)
 		if !allowed {
 			c.AbortWithStatusJSON(statusCode, gin.H{"error": errMsg})
 			return
 		}
+		if c.Request.Method != http.MethodOptions {
+			setHeader := func(id string) { c.Header(ServerIDHeader, id) }
+			setHeader(snapshot.serverID)
+			c.Set(managementIdentityKey, managementIdentity{id: snapshot.serverID, setHeader: setHeader})
+		}
 		c.Next()
+	}
+}
+
+type managementAuthConfig struct {
+	allowRemote bool
+	secretHash  string
+	serverID    string
+}
+
+func (h *Handler) managementAuthSnapshot() managementAuthConfig {
+	if h == nil {
+		return managementAuthConfig{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return managementAuthConfig{}
+	}
+	return managementAuthConfig{
+		allowRemote: h.cfg.RemoteManagement.AllowRemote,
+		secretHash:  h.cfg.RemoteManagement.SecretKey,
+		serverID:    h.cfg.ServerID,
 	}
 }
 
 // AuthenticateManagementKey verifies the provided management key for the given client.
 // It mirrors the behaviour of Middleware() so non-HTTP callers can reuse the same logic.
 func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, provided string) (bool, int, string) {
+	return h.authenticateManagementKey(h.managementAuthSnapshot(), clientIP, localClient, provided)
+}
+
+func (h *Handler) authenticateManagementKey(cfg managementAuthConfig, clientIP string, localClient bool, provided string) (bool, int, string) {
 	const maxFailures = 5
 	const banDuration = 30 * time.Minute
 
 	if h == nil {
 		return false, http.StatusForbidden, "remote management disabled"
 	}
-
-	h.mu.Lock()
-	cfg := h.cfg
-	var (
-		allowRemote bool
-		secretHash  string
-	)
-	if cfg != nil {
-		allowRemote = cfg.RemoteManagement.AllowRemote
-		secretHash = cfg.RemoteManagement.SecretKey
-	}
-	h.mu.Unlock()
-	if h.allowRemoteOverride {
-		allowRemote = true
-	}
+	allowRemote := cfg.allowRemote || h.allowRemoteOverride
+	secretHash := cfg.secretHash
 	envSecret := h.envSecret
 
 	now := time.Now()
@@ -453,7 +499,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return true, 0, ""
 	}
 
-	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+	if secretHash == "" || !h.authCache.verify(secretHash, provided) {
 		fail()
 		return false, http.StatusUnauthorized, "invalid management key"
 	}

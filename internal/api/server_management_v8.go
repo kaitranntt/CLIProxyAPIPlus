@@ -27,6 +27,7 @@ func (s *Server) registerManagementV8Routes() {
 		v8.Handle(method, "/config/*path", s.mgmt.ConfigV8)
 	}
 
+	v8.GET("/server/server-id", s.mgmt.GetServerID)
 	v8.GET("/server/latest-version", s.mgmt.GetLatestVersion)
 	v8.POST("/requests/api-call", s.mgmt.APICall)
 	v8.POST("/routing/cooldown/reset", s.mgmt.ResetQuota)
@@ -41,6 +42,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/logs/requests/:id", s.mgmt.GetRequestLogByID)
 	v8.GET("/observability/usage/api-keys", s.mgmt.GetAPIKeyUsage)
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
+	v8.GET("/observability/requests/in-flight", s.mgmt.GetInFlightRequests)
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
 	v8.POST("/credentials", s.mgmt.UploadAuthFileV8)

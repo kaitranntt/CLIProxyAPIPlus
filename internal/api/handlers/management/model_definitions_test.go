@@ -2,15 +2,16 @@ package management
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -272,5 +273,160 @@ func TestRefreshModelDefinitions_UpdatesCatalogAndReportsChangedProviders(t *tes
 	h.RefreshModelDefinitions(ctxFail)
 	if recFail.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d; body = %s", recFail.Code, http.StatusBadGateway, recFail.Body.String())
+	}
+}
+
+type oauthCatalogPlugin struct {
+	provider string
+	models   []pluginapi.ModelInfo
+}
+
+func (p oauthCatalogPlugin) Identifier() string { return p.provider }
+
+func (p oauthCatalogPlugin) ParseAuth(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+	return pluginapi.AuthParseResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) StartLogin(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+	return pluginapi.AuthLoginStartResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) PollLogin(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+	return pluginapi.AuthLoginPollResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) RefreshAuth(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+	return pluginapi.AuthRefreshResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) StaticModels(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+	return pluginapi.ModelResponse{Provider: p.provider, Models: p.models}, nil
+}
+
+func (p oauthCatalogPlugin) ModelsForAuth(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+	return pluginapi.ModelResponse{Provider: p.provider, Models: p.models}, nil
+}
+
+func (p oauthCatalogPlugin) Execute(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+	return pluginapi.ExecutorResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) ExecuteStream(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+	return pluginapi.ExecutorStreamResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) CountTokens(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+	return pluginapi.ExecutorResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) HttpRequest(context.Context, pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
+	return pluginapi.ExecutorHTTPResponse{}, nil
+}
+
+func TestGetStaticModelDefinitions_OAuthPluginCatalogDecoupledFromRegistry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope pluginapi.ExecutorModelScope
+	}{
+		{name: "unset scope with auth provider", scope: ""},
+		{name: "explicit oauth scope", scope: pluginapi.ExecutorModelScopeOAuth},
+		{name: "explicit both scope with auth provider", scope: pluginapi.ExecutorModelScopeBoth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := "demo-oauth-7512-" + strings.ReplaceAll(tc.name, " ", "-")
+			reg := registry.GetGlobalRegistry()
+			pluginID := provider + "-plugin"
+			staticClientID := "plugin:" + pluginID + ":" + provider + ":executor"
+			t.Cleanup(func() {
+				reg.UnregisterClient(staticClientID)
+			})
+
+			plugin := oauthCatalogPlugin{
+				provider: provider,
+				models: []pluginapi.ModelInfo{
+					{ID: "demo-a", DisplayName: "Demo A"},
+					{ID: "demo-blocked", DisplayName: "Demo Blocked"},
+				},
+			}
+			host := pluginhost.New()
+			host.RegisterPluginForTest(pluginID, pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider:       plugin,
+					ModelProvider:      plugin,
+					Executor:           plugin,
+					ExecutorModelScope: tc.scope,
+				},
+			})
+			host.RegisterModels(t.Context(), reg)
+			host.RegisterExecutors(coreauth.NewManager(nil, nil, nil), reg)
+
+			if available := reg.GetAvailableModelsByProvider(provider); len(available) != 0 {
+				t.Fatalf("GetAvailableModelsByProvider(%q) = %#v, want empty without active credentials", provider, available)
+			}
+
+			h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+			h.SetPluginHost(host)
+
+			rec, body := invokeGetStaticModelDefinitions(t, h, provider)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if len(body.Models) != 2 || body.Models[0].ID != "demo-a" || body.Models[1].ID != "demo-blocked" {
+				t.Fatalf("models = %#v, want [demo-a demo-blocked]", body.Models)
+			}
+		})
+	}
+}
+
+func TestGetStaticModelDefinitions_V8NamespacesCopilotAndDevin(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+
+	invokeV8 := func(channel string, v8 bool) []registry.ModelInfo {
+		t.Helper()
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		if v8 {
+			ctx.Set(ConfigV8ContextKey, true)
+		}
+		ctx.Params = gin.Params{{Key: "channel", Value: channel}}
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/routing/model-definitions/"+channel, nil)
+		h.GetStaticModelDefinitions(ctx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("channel=%s v8=%t status=%d body=%s", channel, v8, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Models []registry.ModelInfo `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &body); errUnmarshal != nil {
+			t.Fatalf("unmarshal %s: %v", channel, errUnmarshal)
+		}
+		if len(body.Models) == 0 {
+			t.Fatalf("channel=%s v8=%t returned no models", channel, v8)
+		}
+		return body.Models
+	}
+
+	for _, channel := range []string{"copilot", "devin"} {
+		prefix := channel + "/"
+		v8Models := invokeV8(channel, true)
+		v0Models := invokeV8(channel, false)
+		if len(v8Models) != len(v0Models) {
+			t.Fatalf("%s lengths: v8=%d v0=%d", channel, len(v8Models), len(v0Models))
+		}
+		for i := range v8Models {
+			if strings.HasPrefix(v0Models[i].ID, prefix) {
+				t.Fatalf("%s v0 model unexpectedly prefixed: %q", channel, v0Models[i].ID)
+			}
+			if want := prefix + v0Models[i].ID; v8Models[i].ID != want {
+				t.Fatalf("%s v8 model[%d] = %q, want %q", channel, i, v8Models[i].ID, want)
+			}
+		}
+	}
+
+	claudeV8 := invokeV8("claude", true)
+	claudeV0 := invokeV8("claude", false)
+	if claudeV8[0].ID != claudeV0[0].ID || strings.HasPrefix(claudeV8[0].ID, "claude/") {
+		t.Fatalf("claude models should remain unprefixed: v8=%q v0=%q", claudeV8[0].ID, claudeV0[0].ID)
 	}
 }

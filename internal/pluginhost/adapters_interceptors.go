@@ -3,7 +3,6 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -219,6 +219,9 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			}
 			if resp.Terminate {
 				current.Terminate = true
+				if !beforeAuth {
+					current.TerminateScope = resp.TerminateScope
+				}
 				current.StatusCode = resp.StatusCode
 				current.ResponseHeaders = cloneHeader(resp.ResponseHeaders)
 				current.ResponseBody = bytes.Clone(resp.ResponseBody)
@@ -762,8 +765,9 @@ func cloneInterceptorMetadata(in map[string]any) map[string]any {
 }
 
 type metadataCloneVisit struct {
-	typ reflect.Type
-	ptr uintptr
+	typ    reflect.Type
+	ptr    uintptr
+	length int
 }
 
 func cloneInterceptorMetadataAny(value reflect.Value, visited map[metadataCloneVisit]reflect.Value) any {
@@ -831,7 +835,7 @@ func cloneInterceptorMetadataReflectValue(value reflect.Value, visited map[metad
 			reflect.Copy(out, value)
 			return out
 		}
-		visit := metadataCloneVisit{typ: value.Type(), ptr: value.Pointer()}
+		visit := metadataCloneVisit{typ: value.Type(), ptr: value.Pointer(), length: value.Len()}
 		if existing, okExisting := visited[visit]; okExisting {
 			return existing
 		}

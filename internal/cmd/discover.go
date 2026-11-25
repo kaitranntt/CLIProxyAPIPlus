@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +13,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/discovery"
 	"gopkg.in/yaml.v3"
 )
@@ -81,7 +82,7 @@ func LoadDiscoveryScanFilters(configPath string) (include, exclude []string) {
 	if configPath == "" {
 		configPath = defaultDiscoveryConfigPath()
 	}
-	raw, errRead := os.ReadFile(configPath)
+	raw, errRead := config.ReadConfigFile(configPath)
 	if errRead != nil {
 		return nil, nil
 	}

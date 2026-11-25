@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"runtime"
@@ -65,6 +66,42 @@ func translateCodexRequestPairWithUpdateIntentContext(ctx context.Context, from,
 	originalTranslated, _, _ := translate(originalPayload)
 	body, changed, err := translate(payload)
 	return originalTranslated, body, changed, err
+}
+
+// codexMinOutputTokens is the smallest integer max_output_tokens value the ChatGPT
+// Codex backend accepts; smaller integers are rejected with invalid_request_error.
+const codexMinOutputTokens = 16
+
+// shouldPreserveFullCodexOpenAIInclude reports whether the target Codex upstream
+// is a non-ChatGPT OpenAI Responses API endpoint (SIWC or custom codex-api-key)
+// that should preserve the full official OpenAI ResponseIncludable set in
+// addition to Codex's opt-in output.encrypted_content.
+func shouldPreserveFullCodexOpenAIInclude(ctx context.Context, auth *cliproxyauth.Auth, baseURL string, headers http.Header) bool {
+	if !codexUseSIWCForRequest(ctx, auth, headers) && !codexAuthUsesAPIKey(auth) {
+		return false
+	}
+	return !helps.IsChatGPTCodexBackendBaseURL(baseURL)
+}
+
+// normalizeCodexOutputBudgetDoc raises small positive integer output budgets to the
+// Codex minimum. It judges the translated payload (max_output_tokens) rather than the
+// client payload so every source format and budget field (max_tokens,
+// max_completion_tokens, generation_config, ...) is covered uniformly. Budgets that
+// are missing, non-numeric, non-integral, or <= 0 are left untouched for the upstream
+// to reject. This runs before user payload rules so overrides and filters stay final.
+func normalizeCodexOutputBudgetDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	translated := doc.Get("max_output_tokens")
+	if translated.Type != ojson.Number {
+		return
+	}
+	tokens, errFloat := strconv.ParseFloat(translated.Raw, 64)
+	if errFloat != nil || tokens < 1 || tokens >= codexMinOutputTokens || tokens != math.Trunc(tokens) {
+		return
+	}
+	_ = doc.Set("max_output_tokens", codexMinOutputTokens)
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
@@ -169,6 +206,9 @@ func (e *CodexExecutor) cacheHelperDoc(ctx context.Context, from sdktranslator.F
 	var rawJSON []byte
 	if doc != nil {
 		rawJSON = doc.Bytes()
+	}
+	if errMarker := helps.ValidateCodexSessionInstructionMarker(rawJSON, from); errMarker != nil {
+		return nil, nil, errMarker
 	}
 	wireBody := rawJSON
 	if e.cfg != nil && e.cfg.Codex.UpstreamRequestCompression && auth != nil &&
@@ -659,33 +699,11 @@ func normalizeCodexInstructionsDoc(doc *ojson.Doc, nativeRequest ...bool) bool {
 }
 
 func isCodexResponsesLiteRequestDoc(doc *ojson.Doc, headers http.Header) bool {
-	if strings.EqualFold(strings.TrimSpace(headers.Get(codexResponsesLiteHeader)), "true") {
-		return true
-	}
-	if doc == nil {
-		return false
-	}
-	value := doc.Get("client_metadata.ws_request_header_x_openai_internal_codex_responses_lite")
-	return value.Type == ojson.True || (value.Type == ojson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true"))
-}
-
-func normalizeCodexModelSlug(model string) string {
-	slug := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
-	if idx := strings.LastIndex(slug, "/"); idx >= 0 && idx < len(slug)-1 {
-		slug = strings.TrimSpace(slug[idx+1:])
-	}
-	return slug
+	return helps.CodexResponsesLiteRequestDoc(doc, headers)
 }
 
 func isCodexResponsesLiteModel(model string) bool {
-	slug := normalizeCodexModelSlug(model)
-	if slug == "" {
-		return false
-	}
-	if strings.HasPrefix(slug, "gpt-6") {
-		return true
-	}
-	return registry.CodexClientModelUsesResponsesLite(slug)
+	return helps.CodexModelUsesResponsesLite(model)
 }
 
 var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
@@ -804,27 +822,59 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 	return doc.Bytes()
 }
 
-func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
-	if doc == nil || isCodexResponsesLiteRequestDoc(doc, headers) || isCodexResponsesLiteModel(baseModel) {
-		return false
-	}
-	if strings.HasSuffix(baseModel, "spark") {
-		return false
-	}
-	if isCodexFreePlanAuth(auth) {
-		return false
-	}
+func codexRequestHasReasoningForHostedImageDoc(doc *ojson.Doc, model string) bool {
+	return helps.CodexRequestHasReasoningForHostedImageDoc(doc, model)
+}
 
+func isCodexResponsesLiteRequestForAuthDoc(doc *ojson.Doc, modelName string, auth *cliproxyauth.Auth, headers http.Header) bool {
+	return helps.CodexResponsesLiteRequestForAuthDoc(doc, modelName, auth, headers)
+}
+
+func codexToolsAlreadyContainImageGenDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tools := doc.Get("tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	for _, t := range tools.Array() {
+		if t.Get("type").String() == "image_generation" || isImageGenerationFunctionTool(t) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendImageGenerationToolDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
 	tools := doc.Get("tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return doc.SetRawBytes("tools", imageGenToolArrayJSON) == nil
 	}
-	for _, t := range tools.Array() {
-		if t.Get("type").String() == "image_generation" || isImageGenerationFunctionTool(t) {
-			return false
-		}
-	}
 	return doc.SetRawBytes("tools.-1", imageGenToolJSON) == nil
+}
+
+func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
+	if doc == nil || isCodexFreePlanAuth(auth) || codexToolsAlreadyContainImageGenDoc(doc) {
+		return false
+	}
+	modelName := strings.TrimSpace(thinking.ParseSuffix(baseModel).ModelName)
+	if modelName == "" {
+		modelName = strings.TrimSpace(thinking.ParseSuffix(doc.Get("model").String()).ModelName)
+	}
+	if isCodexResponsesLiteRequestForAuthDoc(doc, modelName, auth, headers) {
+		return false
+	}
+	if isCodexResponsesLiteModel(modelName) && codexRequestHasReasoningForHostedImageDoc(doc, baseModel) {
+		return false
+	}
+	if strings.HasSuffix(strings.ToLower(modelName), "spark") {
+		return false
+	}
+	return appendImageGenerationToolDoc(doc)
 }
 
 func resolveCodexGPTImage2BaseModel(cfg *config.Config) string {
@@ -839,21 +889,6 @@ func resolveCodexGPTImage2BaseModel(cfg *config.Config) string {
 		return codexOpenAIImagesMainModel
 	}
 	return model
-}
-
-var codexDefaultLegacyThinkingLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
-
-func codexFallbackModelInfoForThinking(model string) *registry.ModelInfo {
-	slug := normalizeCodexModelSlug(model)
-	levels := registry.CodexClientModelThinkingLevels(slug)
-	if len(levels) == 0 {
-		levels = append([]string(nil), codexDefaultLegacyThinkingLevels...)
-	}
-	return &registry.ModelInfo{
-		ID:       slug,
-		Type:     "openai",
-		Thinking: &registry.ThinkingSupport{Levels: levels},
-	}
 }
 
 // normalizeCodexImageGenerationToolsDoc strips parameters rejected by the
@@ -891,137 +926,6 @@ func normalizeCodexImageGenerationToolsDoc(doc *ojson.Doc) bool {
 		}
 	}
 	return changed
-}
-
-func codexCollectDeclaredToolsDoc(doc *ojson.Doc) []ojson.Result {
-	if doc == nil {
-		return nil
-	}
-	var out []ojson.Result
-	if tools := doc.Get("tools"); tools.IsArray() {
-		out = append(out, tools.Array()...)
-	}
-	if input := doc.Get("input"); input.IsArray() {
-		for _, item := range input.Array() {
-			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
-				continue
-			}
-			if extraTools := item.Get("tools"); extraTools.IsArray() {
-				out = append(out, extraTools.Array()...)
-			}
-		}
-	}
-	return out
-}
-
-func codexHasImageGenerationToolDoc(doc *ojson.Doc) bool {
-	for _, tool := range codexCollectDeclaredToolsDoc(doc) {
-		if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
-			return true
-		}
-	}
-	return false
-}
-
-func codexRequestForcesImageGenerationDoc(doc *ojson.Doc) bool {
-	declaredTools := codexCollectDeclaredToolsDoc(doc)
-	hasImageGen := false
-	allImageGen := len(declaredTools) > 0
-	for _, tool := range declaredTools {
-		if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
-			hasImageGen = true
-		} else {
-			allImageGen = false
-		}
-	}
-	if !hasImageGen {
-		return false
-	}
-	choice := doc.Get("tool_choice")
-	if !choice.Exists() {
-		return false
-	}
-	if choice.Type == ojson.String {
-		return strings.EqualFold(strings.TrimSpace(choice.String()), "required") && allImageGen
-	}
-	if !choice.IsObject() {
-		return false
-	}
-	switch strings.TrimSpace(choice.Get("type").String()) {
-	case "image_generation":
-		return true
-	case "allowed_tools":
-		if !strings.EqualFold(strings.TrimSpace(choice.Get("mode").String()), "required") {
-			return false
-		}
-		allowed := choice.Get("tools")
-		if !allowed.IsArray() || len(allowed.Array()) == 0 {
-			return false
-		}
-		for _, tool := range allowed.Array() {
-			if strings.TrimSpace(tool.Get("type").String()) != "image_generation" {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizeCodexHostedImageGenerationThinkingDoc(doc *ojson.Doc, imageBaseModel string, rawModel string) error {
-	if doc == nil || imageBaseModel == "" {
-		return nil
-	}
-	modelForThinking := imageBaseModel
-	effectiveEffort := strings.ToLower(strings.TrimSpace(thinking.ExtractTranslatedReasoningEffort(doc.Bytes(), "codex")))
-	if suffix := thinking.ParseSuffix(rawModel); suffix.HasSuffix {
-		rawSuffix := strings.TrimSpace(suffix.RawSuffix)
-		if rawSuffix != "" {
-			modelForThinking = imageBaseModel + "(" + rawSuffix + ")"
-			effectiveEffort = strings.ToLower(rawSuffix)
-		}
-	}
-	summaryCfg := thinking.ExtractSummaryConfigDoc(doc, "codex")
-	modelInfo := registry.LookupModelInfo(imageBaseModel, "codex")
-	if modelInfo == nil || modelInfo.Thinking == nil {
-		modelInfo = codexFallbackModelInfoForThinking(imageBaseModel)
-	}
-	errThinking := thinking.ApplyThinkingWithModelInfoAndSummaryDoc(doc, nil, modelForThinking, "openai-response", "codex", "codex", modelInfo, summaryCfg, true)
-	if errThinking == nil {
-		return nil
-	}
-	if effectiveEffort == "" {
-		return errThinking
-	}
-	if effectiveEffort == "ultra" {
-		effectiveEffort = string(thinking.LevelMax)
-	}
-	return thinking.ApplyThinkingWithFallbackModelInfoAndSummaryDoc(doc, nil, imageBaseModel+"("+effectiveEffort+")", codexOpenAIImageSourceFormat, "codex", "codex", modelInfo, summaryCfg)
-}
-
-// applyCodexHostedImageGenerationModelDoc rewrites forced hosted
-// image_generation turns on Responses-Lite / GPT-6 models to the configured
-// GPT-Image-2 base model (default "gpt-5.4-mini") because Codex /responses
-// binds hosted image_generation to gpt-image-2-codex, which rejects complexity
-// parameters emitted when those models drive the hosted tool.
-func applyCodexHostedImageGenerationModelDoc(cfg *config.Config, doc *ojson.Doc, baseModel string, rawModel ...string) (string, error) {
-	if doc == nil || !isCodexResponsesLiteModel(baseModel) || !codexRequestForcesImageGenerationDoc(doc) {
-		return baseModel, nil
-	}
-	if cfg != nil && cfg.DisableImageGeneration != config.DisableImageGenerationOff {
-		return baseModel, nil
-	}
-	sourceModel := baseModel
-	if len(rawModel) > 0 && strings.TrimSpace(rawModel[0]) != "" {
-		sourceModel = rawModel[0]
-	}
-	imageBaseModel := resolveCodexGPTImage2BaseModel(cfg)
-	helps.SetStringIfDifferentDoc(doc, "model", imageBaseModel)
-	if errThinking := normalizeCodexHostedImageGenerationThinkingDoc(doc, imageBaseModel, sourceModel); errThinking != nil {
-		return imageBaseModel, errThinking
-	}
-	return imageBaseModel, nil
 }
 
 func normalizeCodexParallelToolCalls(body []byte, headers http.Header) []byte {

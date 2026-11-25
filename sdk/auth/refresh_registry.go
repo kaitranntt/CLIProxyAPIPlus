@@ -20,6 +20,7 @@ func init() {
 	registerRefreshLead("codebuddy", func() Authenticator { return NewCodeBuddyAuthenticator() })
 	registerRefreshLead("cursor", func() Authenticator { return NewCursorAuthenticator() })
 	registerRefreshLead("qoder", func() Authenticator { return NewQoderAuthenticator() })
+	registerRefreshLead("copilot", func() Authenticator { return CopilotAuthenticator{} })
 	registerRefreshLead("devin", func() Authenticator { return NewDevinAuthenticator() })
 	registerRefreshLead("meta", func() Authenticator { return NewMetaAuthenticator() })
 }

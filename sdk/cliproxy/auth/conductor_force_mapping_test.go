@@ -510,7 +510,7 @@ func TestManagerExecuteStream_LiveDerivedForceMapping_AllProviders(t *testing.T)
 
 func TestManagerExecute_AntigravityCreditsFallbackForceMappingRewritesResponse(t *testing.T) {
 	const (
-		upstreamModel = "gemini-3-flash-preview"
+		upstreamModel = "claude-sonnet-4-6"
 		aliasModel    = "claude-haiku-4-5-20251001"
 	)
 
@@ -533,7 +533,7 @@ func TestManagerExecute_AntigravityCreditsFallbackForceMappingRewritesResponse(t
 
 func TestManagerExecuteStream_AntigravityCreditsFallbackForceMappingRewritesResponse(t *testing.T) {
 	const (
-		upstreamModel = "gemini-3-flash-preview"
+		upstreamModel = "claude-sonnet-4-6"
 		aliasModel    = "claude-haiku-4-5-20251001"
 	)
 
