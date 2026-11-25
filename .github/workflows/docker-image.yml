@@ -40,7 +40,6 @@ env:
   GHCR_REGISTRY: ghcr.io
   GHCR_IMAGE_NAME: ${{ github.repository_owner }}/cli-proxy-api-plus
   DOCKERHUB_IMAGE_NAME: kaitranntt/cli-proxy-api-plus
-  MODELS_REPOSITORY_REF: 26f77650ca9f30630f244989ad47962c2ef02b33
 
 permissions:
   contents: read
@@ -94,8 +93,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Validate models catalog
+        run: go run ./cmd/validate_codex_models --file internal/registry/models/codex_client_models.json
 
       - name: Verify requested image commit
         if: inputs.commit != ''
