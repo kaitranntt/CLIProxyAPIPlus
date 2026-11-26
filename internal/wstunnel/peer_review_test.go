@@ -309,7 +309,7 @@ func TestHubBudget_ExhaustedTenantDoesNotStarveAnotherTenant(t *testing.T) {
 	t.Cleanup(hub.Close)
 	serverB := dialRole(t, srv.URL, "b", RoleServer, "s", "Server")
 	clientB := dialRole(t, srv.URL, "b", RoleClient, "c", "Client")
-	_ = readTextJSONFrame(t, clientB)
+	waitServersVisible(t, clientB, "s")
 
 	// Paused writers make exact exhaustion independent of TCP buffer sizes.
 	tenantA := newRealm()
@@ -436,7 +436,7 @@ func TestHubLimits_BinaryPayloadAndTransportBoundaries(t *testing.T) {
 	t.Cleanup(hub.Close)
 	server := dialRole(t, srv.URL, "key", RoleServer, "s", "Server")
 	client := dialRole(t, srv.URL, "key", RoleClient, "c", "Client")
-	_ = readTextJSONFrame(t, client)
+	waitServersVisible(t, client, "s")
 	for _, size := range []int{MaxRawPayloadBytes, MaxRawPayloadBytes + 1, MaxInboundFrameBytes - 6, MaxInboundFrameBytes - 5} {
 		raw := append([]byte{ProtocolVersion1, PayloadTypeBinary, 1, 1, 'c', 's'}, make([]byte, size)...)
 		written := make(chan error, 1)
