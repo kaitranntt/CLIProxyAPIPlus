@@ -50,4 +50,5 @@ jobs:
       - name: Build
         run: go build ./cmd/server
       - name: Test
-        run: go test ./...
+        # Run packages sequentially (-p 1) to avoid cross-package CPU/socket contention flakes on 2-vCPU GitHub runners.
+        run: go test -p 1 ./...
