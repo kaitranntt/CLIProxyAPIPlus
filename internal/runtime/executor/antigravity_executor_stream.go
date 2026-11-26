@@ -393,6 +393,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 			return
 		}
+		if scanner.Err() == nil && ctx.Err() == nil && !sawUpstreamJSON {
+			failZeroOutput("")
+			return
+		}
 		if scanner.Err() == nil && ctx.Err() == nil && zeroOutputGuard.HasAbnormalFinish() {
 			_, action, finishReason := zeroOutputGuard.Finalize()
 			if action == helps.GeminiZeroOutputEmitErrorThenFail {
@@ -413,10 +417,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return
 		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
-			return
-		}
-		if scanner.Err() == nil && ctx.Err() == nil && !sawUpstreamJSON {
-			failZeroOutput("")
 			return
 		}
 		if helps.StopTranslatedClaudeStream(ctx, &translatedClaudeErr, reporter, &streamUsage, out) {
@@ -490,8 +490,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				return newGeminiTranslatedClaudeErrorStatusErr(msg)
 			})
 			// Commit upstream output before EOF-generated completion reaches interceptors.
-			// Commit itself rejects partial streams without an upstream terminal.
-			if translatedClaudeErr == nil {
+			// Clean EOF without finishReason is a valid Antigravity completion once
+			// error and zero-output guards pass; Commit still rejects incomplete tool calls.
+			if translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil {
+				if replayAccumulator != nil && !sseJSON.HasPending() {
+					replayAccumulator.MarkCleanEOF()
+				}
 				commitReplay()
 			}
 			for i := range tail {

@@ -87,7 +87,7 @@ func (a *Applier) applyCompatibleDoc(doc *ojson.Doc, config thinking.ThinkingCon
 
 func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
-	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	stripAntigravityNonCanonicalThinkingDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingBudget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
@@ -126,7 +126,7 @@ func formatAntigravityThinkingLevel(level thinking.ThinkingLevel) string {
 
 func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
-	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	stripAntigravityNonCanonicalThinkingDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingLevel")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
@@ -148,12 +148,34 @@ func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingC
 	return nil
 }
 
+func stripAntigravityNonCanonicalThinkingDoc(doc *ojson.Doc) {
+	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	deletedSnakeGenConfig := false
+	for _, path := range []string{
+		"request.generation_config.thinkingConfig",
+		"request.generation_config.thinking_config",
+	} {
+		if doc.Get(path).Exists() && util.DeleteJSONDocIfExists(doc, path) == nil {
+			deletedSnakeGenConfig = true
+		}
+	}
+	if deletedSnakeGenConfig {
+		if gc := doc.Get("request.generation_config"); gc.Exists() && gc.IsObject() && len(gc.Map()) == 0 {
+			_ = util.DeleteJSONDocIfExists(doc, "request.generation_config")
+		}
+	}
+}
+
 func extractAntigravityIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
 	for _, path := range []string{
 		"request.generationConfig.thinkingConfig.includeThoughts",
 		"request.generationConfig.thinkingConfig.include_thoughts",
 		"request.generationConfig.thinking_config.includeThoughts",
 		"request.generationConfig.thinking_config.include_thoughts",
+		"request.generation_config.thinkingConfig.includeThoughts",
+		"request.generation_config.thinkingConfig.include_thoughts",
+		"request.generation_config.thinking_config.includeThoughts",
+		"request.generation_config.thinking_config.include_thoughts",
 	} {
 		switch value := doc.Get(path); value.Type {
 		case ojson.True:
@@ -181,7 +203,7 @@ func (a *Applier) normalizeClaudeBudgetDoc(budget int, doc *ojson.Doc, modelInfo
 	}
 	if minBudget > 0 && budget >= 0 && budget < minBudget {
 		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig")
-		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+		stripAntigravityNonCanonicalThinkingDoc(doc)
 		return -2
 	}
 
@@ -193,8 +215,26 @@ func (a *Applier) normalizeClaudeBudgetDoc(budget int, doc *ojson.Doc, modelInfo
 }
 
 func (a *Applier) effectiveMaxTokensDoc(doc *ojson.Doc, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
-	if maxTok := doc.Get("request.generationConfig.maxOutputTokens"); maxTok.Exists() && maxTok.Int() > 0 {
-		return int(maxTok.Int()), false
+	callerMax := 0
+	for _, path := range []string{
+		"request.generationConfig.maxOutputTokens",
+		"request.generationConfig.max_output_tokens",
+		"request.generation_config.maxOutputTokens",
+		"request.generation_config.max_output_tokens",
+	} {
+		maxTok := doc.Get(path)
+		if maxTok.Exists() && maxTok.Type == ojson.Number && maxTok.Int() > 0 {
+			val := int(maxTok.Int())
+			if callerMax == 0 || val < callerMax {
+				callerMax = val
+			}
+		}
+	}
+	if callerMax > 0 {
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 && callerMax > modelInfo.MaxCompletionTokens {
+			return modelInfo.MaxCompletionTokens, false
+		}
+		return callerMax, false
 	}
 	if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 		return modelInfo.MaxCompletionTokens, true

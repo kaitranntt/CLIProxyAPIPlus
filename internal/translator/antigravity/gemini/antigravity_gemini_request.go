@@ -132,6 +132,11 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							_ = ensureDeclDoc().SetRaw("parametersJsonSchema", normalizedParams)
 							declarationsChanged = true
 						}
+					} else if parametersJSONSchema := declaration.Get("parameters_json_schema"); parametersJSONSchema.Exists() {
+						if normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parametersJSONSchema.Raw); normalizedParams != parametersJSONSchema.Raw {
+							_ = ensureDeclDoc().SetRaw("parameters_json_schema", normalizedParams)
+							declarationsChanged = true
+						}
 					}
 					if declarationDoc != nil {
 						declarationItems = append(declarationItems, declarationDoc.Bytes())
@@ -204,8 +209,10 @@ func normalizeAntigravityPartsDocAt(doc *ojson.Doc, parts ojson.Result, partsPat
 		if antigravityMediaFieldNeedsNormalization(part, "file_data", "fileData") {
 			normalizeAntigravityMediaFieldDoc(doc, partPath, "file_data", "fileData")
 		}
-		if functionParts := part.Get("functionResponse.parts"); functionParts.IsArray() {
-			normalizeAntigravityPartsDocAt(doc, functionParts, partPath+".functionResponse.parts")
+		for _, field := range []string{"functionResponse", "function_response"} {
+			if functionParts := part.Get(field + ".parts"); functionParts.IsArray() {
+				normalizeAntigravityPartsDocAt(doc, functionParts, partPath+"."+field+".parts")
+			}
 		}
 	}
 }
@@ -276,7 +283,7 @@ func normalizeGeminiGenerationConfigResponseSchemaDocAt(doc *ojson.Doc, prefix s
 			oldPath := container + "." + schemaKey
 			if schema := doc.Get(oldPath); schema.Exists() {
 				targetPath := container + ".responseSchema"
-				if !doc.Get(targetPath).Exists() {
+				if !doc.Get(targetPath).Exists() && !doc.Get(container+".response_schema").Exists() {
 					_ = doc.SetRaw(targetPath, schema.Raw)
 				}
 				_ = doc.Delete(oldPath)
@@ -572,7 +579,8 @@ func SanitizeAntigravityClaudeGeminiRequestSignaturesDocAt(modelName string, doc
 			}
 
 			rawSignature, hasStringSignature := antigravityClaudeGeminiPartThoughtSignature(part)
-			hasSignatureKey := hasStringSignature || antigravityClaudeGeminiPartHasThoughtSignatureKey(part) || antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(partResult.Raw)
+			rawSigScan := scanAntigravityClaudeGeminiPartThoughtSignatureKeysInRaw(partResult.Raw)
+			hasSignatureKey := hasStringSignature || antigravityClaudeGeminiPartHasThoughtSignatureKey(part) || rawSigScan.hasAny()
 
 			if hasFunctionResponsePart(part) {
 				if hasSignatureKey {
@@ -617,15 +625,22 @@ func SanitizeAntigravityClaudeGeminiRequestSignaturesDocAt(modelName string, doc
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_thinking_block", "empty_thinking_text", contentIndex, partIndex, rawSignature)
 					continue
 				}
-				if normalized != rawSignature {
+				canonicalVal, hasCanonicalString := stringAtPath(part, "thoughtSignature")
+				hadNonCanonical := rawSigScan.hasNonCanonical ||
+					rawSigScan.canonicalCount != 1 ||
+					!hasCanonicalString ||
+					canonicalVal != normalized
+				if normalized != rawSignature || hadNonCanonical {
 					changed = true
 					contentChanged = true
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "normalize_signature", "compatible_claude_signature", contentIndex, partIndex, rawSignature)
+					deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
+					part["thoughtSignature"] = normalized
+					partBytes, _ := json.Marshal(part)
+					rewrittenParts = append(rewrittenParts, partBytes)
+				} else {
+					rewrittenParts = append(rewrittenParts, []byte(partResult.Raw))
 				}
-				deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
-				part["thoughtSignature"] = normalized
-				partBytes, _ := json.Marshal(part)
-				rewrittenParts = append(rewrittenParts, partBytes)
 				continue
 			}
 
@@ -660,15 +675,68 @@ func SanitizeAntigravityClaudeGeminiRequestSignaturesDocAt(modelName string, doc
 	return doc.SetRawBytes(contentsPath, translatorcommon.JoinRawArray(rewrittenContents)) == nil
 }
 
-func antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(raw string) bool {
+var antigravityClaudeGeminiThoughtSignaturePaths = [][]string{
+	{"thoughtSignature"},
+	{"thought_signature"},
+	{"functionCall", "thoughtSignature"},
+	{"functionCall", "thought_signature"},
+	{"function_call", "thoughtSignature"},
+	{"function_call", "thought_signature"},
+	{"functionResponse", "thoughtSignature"},
+	{"functionResponse", "thought_signature"},
+	{"function_response", "thoughtSignature"},
+	{"function_response", "thought_signature"},
+	{"extra_content", "google", "thought_signature"},
+}
+
+type antigravityClaudeGeminiRawSignatureScan struct {
+	canonicalCount  int
+	hasNonCanonical bool
+}
+
+func (s antigravityClaudeGeminiRawSignatureScan) hasAny() bool {
+	return s.canonicalCount > 0 || s.hasNonCanonical
+}
+
+type antigravityRawJSONFrame struct {
+	isObject  bool
+	expectKey bool
+	key       string
+}
+
+func matchAntigravityClaudeGeminiSignatureStack(stack []antigravityRawJSONFrame) (bool, bool) {
+	for _, frame := range stack {
+		if !frame.isObject {
+			return false, false
+		}
+	}
+	for pathIdx, path := range antigravityClaudeGeminiThoughtSignaturePaths {
+		if len(path) != len(stack) {
+			continue
+		}
+		matched := true
+		for i, key := range path {
+			if stack[i].key != key {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return pathIdx == 0, pathIdx > 0
+		}
+	}
+	return false, false
+}
+
+func scanAntigravityClaudeGeminiPartThoughtSignatureKeysInRaw(raw string) antigravityClaudeGeminiRawSignatureScan {
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.UseNumber()
-	var stack []bool
-	expectKey := false
+	var stack []antigravityRawJSONFrame
+	var scan antigravityClaudeGeminiRawSignatureScan
 
 	for {
-		t, err := dec.Token()
-		if err != nil {
+		t, errTok := dec.Token()
+		if errTok != nil {
 			break
 		}
 
@@ -676,60 +744,45 @@ func antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(raw string) bool {
 		case json.Delim:
 			switch v {
 			case '{':
-				stack = append(stack, true)
-				expectKey = true
-			case '}':
-				if len(stack) > 0 {
-					stack = stack[:len(stack)-1]
-				}
-				if len(stack) > 0 && stack[len(stack)-1] {
-					expectKey = true
-				} else {
-					expectKey = false
-				}
+				stack = append(stack, antigravityRawJSONFrame{isObject: true, expectKey: true})
 			case '[':
-				stack = append(stack, false)
-				expectKey = false
-			case ']':
+				stack = append(stack, antigravityRawJSONFrame{isObject: false})
+			case '}', ']':
 				if len(stack) > 0 {
 					stack = stack[:len(stack)-1]
 				}
-				if len(stack) > 0 && stack[len(stack)-1] {
-					expectKey = true
-				} else {
-					expectKey = false
+				if len(stack) > 0 && stack[len(stack)-1].isObject {
+					stack[len(stack)-1].expectKey = true
+					stack[len(stack)-1].key = ""
 				}
 			}
 		case string:
-			if expectKey && len(stack) > 0 && stack[len(stack)-1] {
-				if v == "thoughtSignature" || v == "thought_signature" {
-					return true
-				}
-				expectKey = false
-			} else {
-				if len(stack) > 0 && stack[len(stack)-1] {
-					expectKey = true
+			if len(stack) > 0 && stack[len(stack)-1].isObject {
+				if stack[len(stack)-1].expectKey {
+					stack[len(stack)-1].key = v
+					stack[len(stack)-1].expectKey = false
+					if isCanonical, isNonCanonical := matchAntigravityClaudeGeminiSignatureStack(stack); isCanonical {
+						scan.canonicalCount++
+					} else if isNonCanonical {
+						scan.hasNonCanonical = true
+					}
+				} else {
+					stack[len(stack)-1].expectKey = true
+					stack[len(stack)-1].key = ""
 				}
 			}
 		default:
-			if len(stack) > 0 && stack[len(stack)-1] {
-				expectKey = true
+			if len(stack) > 0 && stack[len(stack)-1].isObject {
+				stack[len(stack)-1].expectKey = true
+				stack[len(stack)-1].key = ""
 			}
 		}
 	}
-	return false
+	return scan
 }
 
 func antigravityClaudeGeminiPartHasThoughtSignatureKey(part map[string]any) bool {
-	for _, path := range [][]string{
-		{"thoughtSignature"},
-		{"thought_signature"},
-		{"functionCall", "thoughtSignature"},
-		{"functionCall", "thought_signature"},
-		{"functionResponse", "thoughtSignature"},
-		{"functionResponse", "thought_signature"},
-		{"extra_content", "google", "thought_signature"},
-	} {
+	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		if hasKeyAtPath(part, path...) {
 			return true
 		}
@@ -753,15 +806,7 @@ func hasKeyAtPath(value map[string]any, path ...string) bool {
 }
 
 func antigravityClaudeGeminiPartThoughtSignature(part map[string]any) (string, bool) {
-	for _, path := range [][]string{
-		{"thoughtSignature"},
-		{"thought_signature"},
-		{"functionCall", "thoughtSignature"},
-		{"functionCall", "thought_signature"},
-		{"functionResponse", "thoughtSignature"},
-		{"functionResponse", "thought_signature"},
-		{"extra_content", "google", "thought_signature"},
-	} {
+	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		if value, ok := stringAtPath(part, path...); ok {
 			return value, true
 		}
@@ -770,16 +815,22 @@ func antigravityClaudeGeminiPartThoughtSignature(part map[string]any) (string, b
 }
 
 func deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part map[string]any) {
-	for _, path := range [][]string{
-		{"thoughtSignature"},
-		{"thought_signature"},
-		{"functionCall", "thoughtSignature"},
-		{"functionCall", "thought_signature"},
-		{"functionResponse", "thoughtSignature"},
-		{"functionResponse", "thought_signature"},
-		{"extra_content", "google", "thought_signature"},
-	} {
+	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		deleteAtPath(part, path...)
+	}
+	pruneEmptyExtraContentGoogle(part)
+}
+
+func pruneEmptyExtraContentGoogle(part map[string]any) {
+	extraContent, ok := part["extra_content"].(map[string]any)
+	if !ok {
+		return
+	}
+	if google, okGoogle := extraContent["google"].(map[string]any); okGoogle && len(google) == 0 {
+		delete(extraContent, "google")
+	}
+	if len(extraContent) == 0 {
+		delete(part, "extra_content")
 	}
 }
 
@@ -868,7 +919,7 @@ func selectGroupResponses(collected []ojson.Result, group *FunctionCallGroup) ([
 	byName := make(map[string][]int, len(collected))
 	var emptyNameIdxs []int
 	for idx, resp := range collected {
-		funcResp := resp.Get("functionResponse")
+		funcResp := translatorcommon.GeminiPartFunctionResponse(resp)
 		if id := funcResp.Get("id").String(); id != "" {
 			byID[id] = append(byID[id], idx)
 		}
@@ -982,13 +1033,27 @@ func normalizeAntigravityInlineDataPart(part ojson.Result) ([]byte, bool) {
 	return outDoc.Bytes(), true
 }
 
+func functionResponseFieldKey(part ojson.Result) string {
+	if part.Get("functionResponse").Exists() {
+		return "functionResponse"
+	}
+	if part.Get("function_response").Exists() {
+		return "function_response"
+	}
+	return ""
+}
+
 func attachInlineDataToFunctionResponse(response ojson.Result, images [][]byte) ojson.Result {
 	if len(images) == 0 {
 		return response
 	}
+	key := functionResponseFieldKey(response)
+	if key == "" {
+		key = "functionResponse"
+	}
 	targetDoc := ojson.NewDocString(response.Raw)
 	for _, img := range images {
-		_ = targetDoc.SetRawBytes("functionResponse.parts.-1", img)
+		_ = targetDoc.SetRawBytes(key+".parts.-1", img)
 	}
 	return util.ParseGJSONBytesNoCopy(targetDoc.Bytes())
 }
@@ -1003,7 +1068,7 @@ func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) ([]ojson.
 	leadingImages := make([][]byte, 0)
 	current := -1
 	parts.ForEach(func(_, part ojson.Result) bool {
-		if part.Get("functionResponse").Exists() {
+		if translatorcommon.GeminiPartFunctionResponse(part).Exists() {
 			responses = append(responses, part)
 			current = len(responses) - 1
 			if len(leadingImages) > 0 {
@@ -1033,16 +1098,21 @@ func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) ([]ojson.
 func parseFunctionResponseRaw(response ojson.Result, fallbackName string) string {
 	if response.IsObject() && ojson.Valid(response.Raw) {
 		raw := response.Raw
-		name := response.Get("functionResponse.name").String()
+		key := functionResponseFieldKey(response)
+		if key == "" {
+			key = "functionResponse"
+		}
+		name := response.Get(key + ".name").String()
 		if strings.TrimSpace(name) == "" && fallbackName != "" {
-			updated, _ := ojson.SetBytes([]byte(raw), "functionResponse.name", fallbackName)
-			raw = string(updated)
+			frDoc := ojson.NewDocString(raw)
+			_ = frDoc.Set(key+".name", fallbackName)
+			raw = frDoc.String()
 		}
 		return raw
 	}
 
 	log.Debugf("parse function response failed, using fallback")
-	funcResp := response.Get("functionResponse")
+	funcResp := translatorcommon.GeminiPartFunctionResponse(response)
 	if funcResp.Exists() {
 		frDoc := ojson.NewDoc([]byte(`{"functionResponse":{"name":"","response":{"result":""}}}`))
 		name := funcResp.Get("name").String()
@@ -1111,13 +1181,9 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 			allContentsAreObjects = false
 			return true
 		}
-		content.Get("parts").ForEach(func(_, part ojson.Result) bool {
-			if part.Get("functionResponse").Exists() {
-				needsGrouping = true
-				return false
-			}
-			return true
-		})
+		if translatorcommon.GeminiPartsHaveFunctionResponse(content.Get("parts")) {
+			needsGrouping = true
+		}
 		return !needsGrouping
 	})
 	if contents.IsArray() && allContentsAreObjects && !needsGrouping {
@@ -1133,10 +1199,31 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 		contentItems = append(contentItems, deferredOtherContents...)
 		deferredOtherContents = nil
 	}
-	appendFunctionResponses := func(responses []ojson.Result, callNames []string) {
+	appendFunctionResponses := func(responses []ojson.Result, group *FunctionCallGroup) {
+		var callNameByID map[string]string
+		for idx, id := range group.CallIDs {
+			if id == "" || idx >= len(group.CallNames) {
+				continue
+			}
+			if callNameByID == nil {
+				callNameByID = make(map[string]string, len(group.CallIDs))
+			}
+			if _, exists := callNameByID[id]; !exists {
+				callNameByID[id] = group.CallNames[idx]
+			}
+		}
 		partItems := make([][]byte, 0, len(responses))
 		for responseIndex, response := range responses {
-			partRaw := parseFunctionResponseRaw(response, callNames[responseIndex])
+			fallbackName := ""
+			if callNameByID != nil {
+				if id := translatorcommon.GeminiPartFunctionResponse(response).Get("id").String(); id != "" {
+					fallbackName = callNameByID[id]
+				}
+			}
+			if fallbackName == "" && responseIndex < len(group.CallNames) {
+				fallbackName = group.CallNames[responseIndex]
+			}
+			partRaw := parseFunctionResponseRaw(response, fallbackName)
 			if partRaw != "" {
 				partItems = append(partItems, []byte(partRaw))
 			}
@@ -1173,7 +1260,7 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 				var groupResponses []ojson.Result
 				groupResponses, collectedResponses = selectGroupResponses(collectedResponses, group)
 
-				appendFunctionResponses(groupResponses, group.CallNames)
+				appendFunctionResponses(groupResponses, group)
 			}
 			if len(pendingGroups) == 0 {
 				// Any remaining responses in this turn have no preceding functionCall group
@@ -1196,14 +1283,14 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 			return true // Skip adding the original content; responses are merged and other parts preserved.
 		}
 
-		// If this is a model with function calls, create a new group
-		if role == "model" {
+		// If this is a model turn (or an untagged/non-user turn carrying function calls), create a new group
+		if role == "model" || (role != "user" && translatorcommon.GeminiPartsHaveFunctionCall(parts)) {
 			var callIDs []string
 			var callNames []string
 			parts.ForEach(func(_, part ojson.Result) bool {
-				if part.Get("functionCall").Exists() {
-					callIDs = append(callIDs, part.Get("functionCall.id").String())
-					callNames = append(callNames, part.Get("functionCall.name").String())
+				if fc := translatorcommon.GeminiPartFunctionCall(part); fc.Exists() {
+					callIDs = append(callIDs, fc.Get("id").String())
+					callNames = append(callNames, fc.Get("name").String())
 				}
 				return true
 			})
@@ -1250,10 +1337,10 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 	// Handle any remaining pending groups with remaining responses
 	for _, group := range pendingGroups {
 		if len(collectedResponses) >= group.ResponsesNeeded {
-			groupResponses := collectedResponses[:group.ResponsesNeeded]
-			collectedResponses = collectedResponses[group.ResponsesNeeded:]
+			groupResponses, remaining := selectGroupResponses(collectedResponses, group)
+			collectedResponses = remaining
 
-			appendFunctionResponses(groupResponses, group.CallNames)
+			appendFunctionResponses(groupResponses, group)
 		}
 	}
 	flushDeferredOtherContents()

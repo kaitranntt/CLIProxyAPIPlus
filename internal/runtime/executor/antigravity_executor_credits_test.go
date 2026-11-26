@@ -870,7 +870,6 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 			registry.GetGlobalRegistry().RegisterClient(authID, "antigravity", []*registry.ModelInfo{{ID: model}})
 			t.Cleanup(func() {
 				registry.GetGlobalRegistry().UnregisterClient(authID)
-				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
 			})
 
 			registered, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
@@ -888,6 +887,10 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 			if errRegister != nil {
 				t.Fatalf("register auth: %v", errRegister)
 			}
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{}, registered.RegistrationEpoch)
+			})
+			refreshKey := antigravityCreditsRefreshKey(registered)
 
 			req := cliproxyexecutor.Request{
 				Model:   model,
@@ -915,7 +918,7 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 					t.Fatal("initial Execute() succeeded, want 429 after quota and credits exhaustion")
 				}
 			}
-			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
+			if value, ok := antigravityCreditsHintRefreshByID.Load(refreshKey); ok {
 				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
 					waitForAntigravityCreditsRefresh(t, state)
 				}
@@ -931,7 +934,7 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 			// Step 2: Top up credits and expire the cached hint/throttle window while model remains in 1h quota cooldown.
 			toppedUp.Store(true)
 			callsBeforeTopUp := loadCodeAssistCalls.Load()
-			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
+			if value, ok := antigravityCreditsHintRefreshByID.Load(refreshKey); ok {
 				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
 					state.mu.Lock()
 					state.lastAttempt = time.Now().Add(-antigravityCreditsHintRefreshInterval - time.Second)
@@ -972,11 +975,15 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 				}
 			}
 
-			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
-				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
-					waitForAntigravityCreditsRefresh(t, state)
-				}
+			refreshValue, okRefresh := antigravityCreditsHintRefreshByID.Load(refreshKey)
+			if !okRefresh {
+				t.Fatalf("expected credits refresh state under key %q after top-up recovery", refreshKey)
 			}
+			refreshState, okState := refreshValue.(*antigravityCreditsHintRefreshState)
+			if !okState || refreshState == nil {
+				t.Fatalf("unexpected credits refresh state type %T under key %q", refreshValue, refreshKey)
+			}
+			waitForAntigravityCreditsRefresh(t, refreshState)
 			if loadCodeAssistCalls.Load() <= callsBeforeTopUp {
 				t.Fatalf("loadCodeAssist calls after top-up = %d, want > %d", loadCodeAssistCalls.Load(), callsBeforeTopUp)
 			}
@@ -1977,6 +1984,690 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 
 		if antigravityInTOSPause(cfg, auth) {
 			t.Fatal("antigravityInTOSPause() = true when direct call context was canceled, want false")
+		}
+	})
+}
+
+func TestClearAntigravityCreditsFailureState_DoesNotClobberConcurrentAvailableHint(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	auth := &cliproxyauth.Auth{
+		ID:                fmt.Sprintf("ag-clear-race-%d", time.Now().UnixNano()),
+		Provider:          "antigravity",
+		RegistrationEpoch: 1,
+	}
+	t.Cleanup(func() {
+		cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{})
+	})
+
+	for i := 0; i < 1000; i++ {
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			clearAntigravityCreditsFailureState(auth)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{
+				Known:           true,
+				Available:       true,
+				CreditAmount:    2516,
+				MinCreditAmount: 50,
+				PaidTierID:      "tier-1",
+				UpdatedAt:       time.Now(),
+			})
+		}()
+		close(start)
+		wg.Wait()
+
+		hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth)
+		if !ok || !hint.Known || !hint.Available || hint.CreditAmount != 2516 {
+			t.Fatalf("iteration %d: hint = %#v (ok=%v), want Known=true Available=true CreditAmount=2516", i, hint, ok)
+		}
+	}
+}
+
+func TestQueueAntigravityCreditsRefresh_HomeModeScopeOrdering(t *testing.T) {
+	collectRefreshKeys := func(authID string) []string {
+		var keys []string
+		antigravityCreditsHintRefreshByID.Range(func(key, _ any) bool {
+			if ks, ok := key.(string); ok && (ks == authID || strings.HasPrefix(ks, authID+"|")) {
+				keys = append(keys, ks)
+			}
+			return true
+		})
+		return keys
+	}
+
+	waitSignal := func(t *testing.T, ch <-chan struct{}, label string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s", label)
+		}
+	}
+
+	waitTaskDone := func(t *testing.T, task *antigravityCreditsRefreshTask) {
+		t.Helper()
+		if task == nil {
+			return
+		}
+		select {
+		case <-task.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for credits refresh task to finish")
+		}
+	}
+
+	t.Run("supersedes and cancels prior Home scope when newer credential replaces it", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		kvClient := newFakeAntigravityKVClient()
+		useFakeAntigravityKVClient(t, kvClient, true, nil)
+
+		authID := "ag-home-credits-supersede"
+		startedA := make(chan struct{}, 1)
+		canceledA := make(chan struct{}, 1)
+		startedB := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		ctxA := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedA <- struct{}{}
+			select {
+			case <-req.Context().Done():
+				canceledA <- struct{}{}
+				return nil, req.Context().Err()
+			case <-release:
+				return nil, context.Canceled
+			}
+		}))
+		ctxB := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedB <- struct{}{}
+			<-release
+			return nil, context.Canceled
+		}))
+
+		createdAt := time.Now().Add(-time.Hour)
+		authA := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			Metadata:  map[string]any{"refresh_token": "rt-A", "email": "a@example.com", "access_token": "at-A"},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt.Add(time.Minute),
+			UpdatedAt: createdAt.Add(time.Minute),
+			Metadata:  map[string]any{"refresh_token": "rt-B", "email": "b@example.com", "access_token": "at-B"},
+		}
+
+		e := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+
+		e.queueAntigravityCreditsRefresh(ctxA, authA, "at-A", 5*time.Second)
+		waitSignal(t, startedA, "authA loadCodeAssist request to start")
+		keyA := antigravityCreditsRefreshKey(authA)
+		rawStateA, okA := antigravityCreditsHintRefreshByID.Load(keyA)
+		if !okA {
+			t.Fatalf("expected refresh state for key %q", keyA)
+		}
+		stateA := rawStateA.(*antigravityCreditsHintRefreshState)
+		stateA.mu.Lock()
+		taskA := stateA.task
+		stateA.mu.Unlock()
+
+		e.queueAntigravityCreditsRefresh(ctxB, authB, "at-B", 5*time.Second)
+		waitSignal(t, startedB, "authB loadCodeAssist request to start")
+		keyB := antigravityCreditsRefreshKey(authB)
+		rawStateB, okB := antigravityCreditsHintRefreshByID.Load(keyB)
+		if !okB {
+			t.Fatalf("expected refresh state for key %q", keyB)
+		}
+		stateB := rawStateB.(*antigravityCreditsHintRefreshState)
+		stateB.mu.Lock()
+		taskB := stateB.task
+		stateB.mu.Unlock()
+
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			waitTaskDone(t, taskA)
+			waitTaskDone(t, taskB)
+		})
+
+		keys := collectRefreshKeys(authID)
+		if len(keys) != 1 || keys[0] != keyB {
+			t.Fatalf("antigravityCreditsHintRefreshByID keys = %v, want [%s]", keys, keyB)
+		}
+
+		select {
+		case <-canceledA:
+		case <-time.After(2 * time.Second):
+			t.Fatal("superseded Home credential loadCodeAssist task was not canceled")
+		}
+	})
+
+	t.Run("ignores out-of-order older Home credential snapshot without canceling or evicting newer scope", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		kvClient := newFakeAntigravityKVClient()
+		useFakeAntigravityKVClient(t, kvClient, true, nil)
+
+		authID := "ag-home-credits-stale-order"
+		startedNew := make(chan struct{}, 1)
+		startedStale := make(chan struct{}, 2)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		ctxNew := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedNew <- struct{}{}
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-release:
+				return nil, context.Canceled
+			}
+		}))
+		ctxStale := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedStale <- struct{}{}
+			return nil, context.Canceled
+		}))
+
+		createdAt := time.Now().Add(-time.Hour)
+		newerAuth := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt.Add(time.Minute),
+			UpdatedAt: createdAt.Add(2 * time.Minute),
+			Metadata:  map[string]any{"refresh_token": "rt-new", "email": "new@example.com", "access_token": "at-new"},
+		}
+		olderCreatedAuth := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt.Add(3 * time.Minute),
+			Metadata:  map[string]any{"refresh_token": "rt-old-created", "email": "old1@example.com", "access_token": "at-old1"},
+		}
+		olderUpdatedAuth := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt.Add(time.Minute),
+			UpdatedAt: createdAt.Add(90 * time.Second),
+			Metadata:  map[string]any{"refresh_token": "rt-old-updated", "email": "old2@example.com", "access_token": "at-old2"},
+		}
+
+		e := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+
+		e.queueAntigravityCreditsRefresh(ctxNew, newerAuth, "at-new", 5*time.Second)
+		waitSignal(t, startedNew, "newerAuth loadCodeAssist request to start")
+		keyNew := antigravityCreditsRefreshKey(newerAuth)
+		rawNew, okNew := antigravityCreditsHintRefreshByID.Load(keyNew)
+		if !okNew {
+			t.Fatalf("expected refresh state for key %q", keyNew)
+		}
+		stateNew := rawNew.(*antigravityCreditsHintRefreshState)
+		stateNew.mu.Lock()
+		taskNew := stateNew.task
+		stateNew.mu.Unlock()
+
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			waitTaskDone(t, taskNew)
+		})
+
+		e.queueAntigravityCreditsRefresh(ctxStale, olderCreatedAuth, "at-old1", 5*time.Second)
+		e.queueAntigravityCreditsRefresh(ctxStale, olderUpdatedAuth, "at-old2", 5*time.Second)
+
+		keys := collectRefreshKeys(authID)
+		if len(keys) != 1 || keys[0] != keyNew {
+			t.Fatalf("antigravityCreditsHintRefreshByID keys = %v, want [%s]", keys, keyNew)
+		}
+		if taskNew.ctx.Err() != nil {
+			t.Fatalf("newer Home refresh task was unexpectedly canceled: %v", taskNew.ctx.Err())
+		}
+		select {
+		case <-startedStale:
+			t.Fatal("stale Home credential unexpectedly started a loadCodeAssist request")
+		default:
+		}
+	})
+
+	t.Run("supersedes prior Home scope when timestamps are equal and scope changed", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		kvClient := newFakeAntigravityKVClient()
+		useFakeAntigravityKVClient(t, kvClient, true, nil)
+
+		authID := "ag-home-credits-equal-ts"
+		startedA := make(chan struct{}, 1)
+		canceledA := make(chan struct{}, 1)
+		startedB := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		ctxA := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedA <- struct{}{}
+			select {
+			case <-req.Context().Done():
+				canceledA <- struct{}{}
+				return nil, req.Context().Err()
+			case <-release:
+				return nil, context.Canceled
+			}
+		}))
+		ctxB := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedB <- struct{}{}
+			<-release
+			return nil, context.Canceled
+		}))
+
+		ts := time.Now().Add(-time.Hour)
+		authA := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: ts,
+			UpdatedAt: ts,
+			Metadata:  map[string]any{"refresh_token": "rt-eq-A", "email": "eq-a@example.com", "access_token": "at-eq-A"},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: ts,
+			UpdatedAt: ts,
+			Metadata:  map[string]any{"refresh_token": "rt-eq-B", "email": "eq-b@example.com", "access_token": "at-eq-B"},
+		}
+
+		e := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+
+		e.queueAntigravityCreditsRefresh(ctxA, authA, "at-eq-A", 5*time.Second)
+		waitSignal(t, startedA, "authA loadCodeAssist request to start")
+		keyA := antigravityCreditsRefreshKey(authA)
+		rawStateA, _ := antigravityCreditsHintRefreshByID.Load(keyA)
+		stateA := rawStateA.(*antigravityCreditsHintRefreshState)
+		stateA.mu.Lock()
+		taskA := stateA.task
+		stateA.mu.Unlock()
+
+		e.queueAntigravityCreditsRefresh(ctxB, authB, "at-eq-B", 5*time.Second)
+		waitSignal(t, startedB, "authB loadCodeAssist request to start")
+		keyB := antigravityCreditsRefreshKey(authB)
+		rawStateB, okB := antigravityCreditsHintRefreshByID.Load(keyB)
+		if !okB {
+			t.Fatalf("expected refresh state for key %q", keyB)
+		}
+		stateB := rawStateB.(*antigravityCreditsHintRefreshState)
+		stateB.mu.Lock()
+		taskB := stateB.task
+		stateB.mu.Unlock()
+
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			waitTaskDone(t, taskA)
+			waitTaskDone(t, taskB)
+		})
+
+		keys := collectRefreshKeys(authID)
+		if len(keys) != 1 || keys[0] != keyB {
+			t.Fatalf("antigravityCreditsHintRefreshByID keys = %v, want [%s]", keys, keyB)
+		}
+		select {
+		case <-canceledA:
+		case <-time.After(2 * time.Second):
+			t.Fatal("superseded equal-timestamp Home credential task was not canceled")
+		}
+	})
+
+	t.Run("superseded Home refresh task cannot arm tos-pause-window on late 403 TOS_VIOLATION", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		kvClient := newFakeAntigravityKVClient()
+		useFakeAntigravityKVClient(t, kvClient, true, nil)
+
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		e := NewAntigravityExecutor(cfg)
+
+		authID := "ag-home-credits-superseded-tos"
+		oldStarted := make(chan struct{})
+		releaseOld := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseOld) }) })
+
+		createdAt := time.Now().Add(-time.Hour)
+		oldAuth := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			Metadata:  map[string]any{"refresh_token": "rt-tos-old", "email": "tos-old@example.com", "access_token": "at-tos-old"},
+		}
+		newAuth := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt.Add(time.Minute),
+			UpdatedAt: createdAt.Add(time.Minute),
+			Metadata:  map[string]any{"refresh_token": "rt-tos-new", "email": "tos-new@example.com", "access_token": "at-tos-new"},
+		}
+
+		oldCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			close(oldStarted)
+			<-releaseOld
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(antigravityTOSBody)),
+			}, nil
+		}))
+		newCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"pro","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1500","minimumCreditAmountForUsage":"50"}]}}`)),
+			}, nil
+		}))
+
+		e.queueAntigravityCreditsRefresh(oldCtx, oldAuth, "at-tos-old", 5*time.Second)
+		waitSignal(t, oldStarted, "oldAuth loadCodeAssist request to start")
+		rawOld, _ := antigravityCreditsHintRefreshByID.Load(antigravityCreditsRefreshKey(oldAuth))
+		oldState := rawOld.(*antigravityCreditsHintRefreshState)
+		oldState.mu.Lock()
+		oldTask := oldState.task
+		oldState.mu.Unlock()
+
+		e.queueAntigravityCreditsRefresh(newCtx, newAuth, "at-tos-new", 5*time.Second)
+		rawNew, okNew := antigravityCreditsHintRefreshByID.Load(antigravityCreditsRefreshKey(newAuth))
+		if !okNew {
+			t.Fatal("expected replacement Home refresh state to exist")
+		}
+		newState := rawNew.(*antigravityCreditsHintRefreshState)
+		newState.mu.Lock()
+		newTask := newState.task
+		newState.mu.Unlock()
+		waitTaskDone(t, newTask)
+
+		releaseOnce.Do(func() { close(releaseOld) })
+		waitTaskDone(t, oldTask)
+
+		if antigravityInTOSPause(cfg, newAuth) {
+			t.Fatal("antigravityInTOSPause() = true after late 403 TOS_VIOLATION from superseded Home task, want false")
+		}
+	})
+
+	t.Run("maybeRefreshAntigravityCreditsHint supersedes prior Home task when newer credential already has fresh hint", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		kvClient := newFakeAntigravityKVClient()
+		useFakeAntigravityKVClient(t, kvClient, true, nil)
+
+		authID := "ag-home-credits-fresh-hint-evict"
+		startedA := make(chan struct{}, 1)
+		canceledA := make(chan struct{}, 1)
+		startedB := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		ctxA := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedA <- struct{}{}
+			select {
+			case <-req.Context().Done():
+				canceledA <- struct{}{}
+				return nil, req.Context().Err()
+			case <-release:
+				return nil, context.Canceled
+			}
+		}))
+		ctxB := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedB <- struct{}{}
+			return nil, context.Canceled
+		}))
+
+		createdAt := time.Now().Add(-time.Hour)
+		authA := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			Metadata:  map[string]any{"refresh_token": "rt-fresh-A", "email": "fresh-a@example.com", "access_token": "at-fresh-A"},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt.Add(time.Minute),
+			UpdatedAt: createdAt.Add(time.Minute),
+			Metadata:  map[string]any{"refresh_token": "rt-fresh-B", "email": "fresh-b@example.com", "access_token": "at-fresh-B"},
+		}
+
+		e := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+
+		e.queueAntigravityCreditsRefresh(ctxA, authA, "at-fresh-A", 5*time.Second)
+		waitSignal(t, startedA, "authA loadCodeAssist request to start")
+		rawStateA, okA := antigravityCreditsHintRefreshByID.Load(antigravityCreditsRefreshKey(authA))
+		if !okA {
+			t.Fatal("expected refresh state for authA")
+		}
+		stateA := rawStateA.(*antigravityCreditsHintRefreshState)
+		stateA.mu.Lock()
+		taskA := stateA.task
+		stateA.mu.Unlock()
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			waitTaskDone(t, taskA)
+		})
+
+		// Simulate another Home node publishing a fresh credits hint for replacement authB.
+		cliproxyauth.SetAntigravityCreditsHintForAuth(authB, cliproxyauth.AntigravityCreditsHint{
+			Known:     true,
+			Available: true,
+			UpdatedAt: time.Now(),
+		})
+
+		e.maybeRefreshAntigravityCreditsHint(ctxB, authB, "at-fresh-B")
+
+		waitSignal(t, canceledA, "superseded authA task cancellation on fresh hint")
+		if keys := collectRefreshKeys(authID); len(keys) != 0 {
+			t.Fatalf("antigravityCreditsHintRefreshByID keys = %v, want empty after fresh-hint eviction", keys)
+		}
+		select {
+		case <-startedB:
+			t.Fatal("authB unexpectedly started loadCodeAssist despite fresh hint")
+		default:
+		}
+	})
+
+	t.Run("maybeRefreshAntigravityCreditsHint supersedes prior Home task when another node holds refresh lock", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		kvClient := newFakeAntigravityKVClient()
+		useFakeAntigravityKVClient(t, kvClient, true, nil)
+
+		authID := "ag-home-credits-lock-held-evict"
+		startedA := make(chan struct{}, 1)
+		canceledA := make(chan struct{}, 1)
+		startedB := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		ctxA := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedA <- struct{}{}
+			select {
+			case <-req.Context().Done():
+				canceledA <- struct{}{}
+				return nil, req.Context().Err()
+			case <-release:
+				return nil, context.Canceled
+			}
+		}))
+		ctxB := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedB <- struct{}{}
+			return nil, context.Canceled
+		}))
+
+		createdAt := time.Now().Add(-time.Hour)
+		authA := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			Metadata:  map[string]any{"refresh_token": "rt-lock-A", "email": "lock-a@example.com", "access_token": "at-lock-A"},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:        authID,
+			Provider:  "antigravity",
+			CreatedAt: createdAt.Add(time.Minute),
+			UpdatedAt: createdAt.Add(time.Minute),
+			Metadata:  map[string]any{"refresh_token": "rt-lock-B", "email": "lock-b@example.com", "access_token": "at-lock-B"},
+		}
+
+		e := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+
+		e.queueAntigravityCreditsRefresh(ctxA, authA, "at-lock-A", 5*time.Second)
+		waitSignal(t, startedA, "authA loadCodeAssist request to start")
+		rawStateA, okA := antigravityCreditsHintRefreshByID.Load(antigravityCreditsRefreshKey(authA))
+		if !okA {
+			t.Fatal("expected refresh state for authA")
+		}
+		stateA := rawStateA.(*antigravityCreditsHintRefreshState)
+		stateA.mu.Lock()
+		taskA := stateA.task
+		stateA.mu.Unlock()
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			waitTaskDone(t, taskA)
+		})
+
+		// Simulate another Home node holding the KVSetNX refresh lock for authB.
+		kvClient.setNXResult = false
+
+		e.maybeRefreshAntigravityCreditsHint(ctxB, authB, "at-lock-B")
+
+		waitSignal(t, canceledA, "superseded authA task cancellation when refresh lock is held")
+		if keys := collectRefreshKeys(authID); len(keys) != 0 {
+			t.Fatalf("antigravityCreditsHintRefreshByID keys = %v, want empty after lock-held eviction", keys)
+		}
+		select {
+		case <-startedB:
+			t.Fatal("authB unexpectedly started loadCodeAssist despite held Home refresh lock")
+		default:
+		}
+	})
+
+	t.Run("does not cancel or evict distinct auth IDs sharing a pipe-delimited prefix", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		kvClient := newFakeAntigravityKVClient()
+		useFakeAntigravityKVClient(t, kvClient, true, nil)
+
+		startedPipe := make(chan struct{}, 1)
+		startedPrefix := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		ctxPipe := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedPipe <- struct{}{}
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-release:
+				return nil, context.Canceled
+			}
+		}))
+		ctxPrefix := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startedPrefix <- struct{}{}
+			<-release
+			return nil, context.Canceled
+		}))
+
+		ts := time.Now().Add(-time.Hour)
+		authPipe := &cliproxyauth.Auth{
+			ID:        "team|backup",
+			Provider:  "antigravity",
+			CreatedAt: ts,
+			UpdatedAt: ts,
+			Metadata:  map[string]any{"refresh_token": "rt-pipe", "email": "pipe@example.com", "access_token": "at-pipe"},
+		}
+		authPrefix := &cliproxyauth.Auth{
+			ID:        "team",
+			Provider:  "antigravity",
+			CreatedAt: ts,
+			UpdatedAt: ts,
+			Metadata:  map[string]any{"refresh_token": "rt-prefix", "email": "prefix@example.com", "access_token": "at-prefix"},
+		}
+
+		e := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+
+		e.queueAntigravityCreditsRefresh(ctxPipe, authPipe, "at-pipe", 5*time.Second)
+		waitSignal(t, startedPipe, "team|backup loadCodeAssist request to start")
+		keyPipe := antigravityCreditsRefreshKey(authPipe)
+		rawPipe, okPipe := antigravityCreditsHintRefreshByID.Load(keyPipe)
+		if !okPipe {
+			t.Fatalf("expected refresh state for key %q", keyPipe)
+		}
+		statePipe := rawPipe.(*antigravityCreditsHintRefreshState)
+		statePipe.mu.Lock()
+		taskPipe := statePipe.task
+		statePipe.mu.Unlock()
+
+		e.queueAntigravityCreditsRefresh(ctxPrefix, authPrefix, "at-prefix", 5*time.Second)
+		waitSignal(t, startedPrefix, "team loadCodeAssist request to start")
+		keyPrefix := antigravityCreditsRefreshKey(authPrefix)
+		rawPrefix, okPrefix := antigravityCreditsHintRefreshByID.Load(keyPrefix)
+		if !okPrefix {
+			t.Fatalf("expected refresh state for key %q", keyPrefix)
+		}
+		statePrefix := rawPrefix.(*antigravityCreditsHintRefreshState)
+		statePrefix.mu.Lock()
+		taskPrefix := statePrefix.task
+		statePrefix.mu.Unlock()
+
+		t.Cleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			waitTaskDone(t, taskPipe)
+			waitTaskDone(t, taskPrefix)
+		})
+
+		if taskPipe.ctx.Err() != nil {
+			t.Fatalf("distinct auth team|backup task was unexpectedly canceled: %v", taskPipe.ctx.Err())
+		}
+		if _, ok := antigravityCreditsHintRefreshByID.Load(keyPipe); !ok {
+			t.Fatalf("distinct auth team|backup refresh key %q was unexpectedly evicted", keyPipe)
+		}
+		if _, ok := antigravityCreditsHintRefreshByID.Load(keyPrefix); !ok {
+			t.Fatalf("auth team refresh key %q missing", keyPrefix)
 		}
 	})
 }

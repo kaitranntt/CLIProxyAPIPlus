@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -233,133 +234,163 @@ func TestAntigravityThinkingGroupsReviewLocalSearchCredentialReplacement(t *test
 func TestAntigravityThinkingGroupsReviewGenericFeedback(t *testing.T) {
 	for _, mode := range []string{"generate", "claude", "stream", "stream-in-band", "no-groups"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg := &config.Config{}
-			manager := cliproxyauth.NewManager(nil, nil, nil)
-			manager.SetConfig(cfg)
-			manager.SetRetryConfig(0, 0, 1)
-			manager.RegisterExecutor(NewAntigravityExecutor(cfg))
-			auth, errRegister := manager.Register(t.Context(), newIssue7865TestAuth(t.Name()))
-			if errRegister != nil {
-				t.Fatal(errRegister)
-			}
-			high, low := reviewHigh, reviewLow
-			if mode == "claude" {
-				high, low = "claude-review-high", "claude-review-low"
-			}
-			groups := map[string]map[string]int{strings.TrimSuffix(high, "-high"): {"low": 50000, "high": 60000}}
-			wantModel := low
-			if mode == "no-groups" {
-				groups, wantModel = nil, high
-			}
-			if !manager.StoreAntigravityModelCatalog(t.Context(), auth, map[string]string{high: "HIGH_ENUM", low: "LOW_ENUM"}, groups, nil) {
-				t.Fatal("failed to publish local catalog")
-			}
-			reg := registry.GetGlobalRegistry()
-			reg.RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: high}, {ID: low}})
-			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
-			calls := 0
-			var readyForSuccess bool
-			var highCooldown time.Time
-			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-				calls++
-				body, errRead := io.ReadAll(r.Body)
-				if errRead != nil {
-					return nil, errRead
-				}
-				if got := ojson.GetBytes(body, "model").Str; got != wantModel {
-					t.Errorf("upstream model = %q, want %q", got, wantModel)
-				}
-				if readyForSuccess {
-					// Simulate an independent high attempt failing while low is in flight.
-					manager.MarkResult(t.Context(), cliproxyauth.Result{AuthID: auth.ID, Provider: "antigravity", Model: high, CredentialVersion: auth.CredentialVersion, Error: &cliproxyauth.Error{HTTPStatus: http.StatusServiceUnavailable}})
-					current, _ := manager.GetByID(auth.ID)
-					highCooldown = current.ModelStates[high].NextRetryAfter
-					const success = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
-					out := success
-					if r.URL.Path == antigravityStreamPath {
-						out = "data: " + success + "\n\n"
-					}
-					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(out))}, nil
-				}
-				if mode == "stream-in-band" {
-					const failure = `{"error":{"code":503,"message":"temporarily unavailable"},"response":{"modelVersion":"untrusted-model"}}`
-					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("data: " + failure + "\n\n"))}, nil
-				}
-				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"temporarily unavailable"},"modelVersion":"untrusted-model"}`))}, nil
-			}))
-			req := cliproxyexecutor.Request{Model: high, Payload: []byte(`{"reasoning_effort":"low","messages":[{"role":"user","content":"hi"}]}`)}
-			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Metadata: map[string]any{cliproxyexecutor.RequestedModelMetadataKey: "public-alias"}}
-			if mode == "claude" {
-				req.Payload = []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`)
-				opts.SourceFormat = sdktranslator.FormatClaude
-			}
-			call := func() error {
-				if strings.HasPrefix(mode, "stream") {
-					result, errStream := manager.ExecuteStream(ctx, []string{"antigravity"}, req, opts)
-					if errStream == nil && result != nil {
-						for chunk := range result.Chunks {
-							if chunk.Err != nil {
-								errStream = chunk.Err
-							}
-						}
-					}
-					return errStream
-				}
-				_, errExecute := manager.Execute(ctx, []string{"antigravity"}, req, opts)
-				return errExecute
-			}
-			capture := &antigravityUsageCapture{authID: auth.ID, records: make(chan usage.Record, 8)}
-			usage.RegisterNamedPlugin(t.Name(), capture)
-			t.Cleanup(func() { usage.RegisterNamedPlugin(t.Name(), antigravityUsageNoop{}) })
-			if errCall := call(); errCall == nil || calls != 1 {
-				t.Fatalf("upstream failure: calls=%d err=%v", calls, errCall)
-			}
-			records := drainThinkingGroupUsage(t, capture)
-			if len(records) != 1 || !records[0].Failed || records[0].Model != wantModel || records[0].Alias != "public-alias" || records[0].Fail.StatusCode != http.StatusServiceUnavailable {
-				t.Errorf("503 usage = %+v, want one %s failure preserving the alias", records, wantModel)
-			}
-			current, _ := manager.GetByID(auth.ID)
-			state := current.ModelStates[wantModel]
-			if len(current.ModelStates) != 1 || state == nil || state.LastError == nil || state.LastError.HTTPStatus != http.StatusServiceUnavailable || !state.NextRetryAfter.After(time.Now()) {
-				t.Errorf("503 model states = %+v, want only %s cooling", current.ModelStates, wantModel)
-			}
-			errBlocked := call()
-			if errBlocked == nil || calls != 1 {
-				t.Errorf("pre-existing target cooldown did not prevent a second upstream attempt: calls=%d err=%v", calls, errBlocked)
-			}
-			if mode != "no-groups" {
-				var hint interface{ RetryAfter() *time.Duration }
-				if !errors.As(errBlocked, &hint) || hint.RetryAfter() == nil || *hint.RetryAfter() <= 0 {
-					t.Errorf("blocked target did not supply a retry delay: %v", errBlocked)
-				}
-			}
-			if got := drainThinkingGroupUsage(t, capture); len(got) != 0 {
-				t.Errorf("preflight rejection published usage: %+v", got)
-			}
-			current, _ = manager.GetByID(auth.ID)
-			if state != nil && (len(current.ModelStates) != 1 || current.ModelStates[wantModel] == nil || !current.ModelStates[wantModel].NextRetryAfter.Equal(state.NextRetryAfter)) {
-				t.Errorf("preflight changed model cooldown: %+v", current.ModelStates)
-			}
-			if mode == "no-groups" {
-				return
-			}
-			manager.MarkResult(t.Context(), cliproxyauth.Result{AuthID: auth.ID, Provider: "antigravity", Model: low, CredentialVersion: auth.CredentialVersion, Success: true})
-			current, _ = manager.GetByID(auth.ID)
-			if lowState := current.ModelStates[low]; lowState == nil || lowState.Unavailable {
-				t.Fatalf("test failed to clear low before success: %+v", lowState)
-			}
-			readyForSuccess = true
-			if errCall := call(); errCall != nil || calls != 2 {
-				t.Fatalf("successful retry: calls=%d err=%v", calls, errCall)
-			}
-			current, _ = manager.GetByID(auth.ID)
-			if state := current.ModelStates[high]; highCooldown.IsZero() || state == nil || !state.NextRetryAfter.Equal(highCooldown) {
-				t.Errorf("successful low attempt cleared or changed high cooldown: %+v", state)
-			}
-			if got := drainThinkingGroupUsage(t, capture); len(got) != 1 || got[0].Failed || got[0].Model != low || got[0].Alias != "public-alias" {
-				t.Errorf("success usage = %+v, want one %s success preserving the alias", got, low)
-			}
+			runAntigravityThinkingGroupsReviewGenericFeedback(t, mode, false)
 		})
+	}
+}
+
+func TestAntigravityThinkingGroupsReviewGenericFeedbackDelayedStreamUsage(t *testing.T) {
+	for _, mode := range []string{"stream", "stream-in-band"} {
+		t.Run(mode, func(t *testing.T) {
+			runAntigravityThinkingGroupsReviewGenericFeedback(t, mode, true)
+		})
+	}
+}
+
+func runAntigravityThinkingGroupsReviewGenericFeedback(t *testing.T, mode string, delayStreamUsage bool) {
+	t.Helper()
+	cfg := &config.Config{}
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.SetRetryConfig(0, 0, 1)
+	manager.RegisterExecutor(NewAntigravityExecutor(cfg))
+	auth, errRegister := manager.Register(t.Context(), newIssue7865TestAuth(t.Name()))
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	high, low := reviewHigh, reviewLow
+	if mode == "claude" {
+		high, low = "claude-review-high", "claude-review-low"
+	}
+	groups := map[string]map[string]int{strings.TrimSuffix(high, "-high"): {"low": 50000, "high": 60000}}
+	wantModel := low
+	if mode == "no-groups" {
+		groups, wantModel = nil, high
+	}
+	if !manager.StoreAntigravityModelCatalog(t.Context(), auth, map[string]string{high: "HIGH_ENUM", low: "LOW_ENUM"}, groups, nil) {
+		t.Fatal("failed to publish local catalog")
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: high}, {ID: low}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	calls := 0
+	var readyForSuccess bool
+	var highCooldown time.Time
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		if got := ojson.GetBytes(body, "model").Str; got != wantModel {
+			t.Errorf("upstream model = %q, want %q", got, wantModel)
+		}
+		if readyForSuccess {
+			// Simulate an independent high attempt failing while low is in flight.
+			manager.MarkResult(t.Context(), cliproxyauth.Result{AuthID: auth.ID, Provider: "antigravity", Model: high, CredentialVersion: auth.CredentialVersion, Error: &cliproxyauth.Error{HTTPStatus: http.StatusServiceUnavailable}})
+			current, _ := manager.GetByID(auth.ID)
+			highCooldown = current.ModelStates[high].NextRetryAfter
+			const success = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
+			out := success
+			if r.URL.Path == antigravityStreamPath {
+				out = "data: " + success + "\n\n"
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(out))}, nil
+		}
+		if mode == "stream-in-band" {
+			const failure = `{"error":{"code":503,"message":"temporarily unavailable"},"response":{"modelVersion":"untrusted-model"}}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("data: " + failure + "\n\n"))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"temporarily unavailable"},"modelVersion":"untrusted-model"}`))}, nil
+	}))
+	req := cliproxyexecutor.Request{Model: high, Payload: []byte(`{"reasoning_effort":"low","messages":[{"role":"user","content":"hi"}]}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Metadata: map[string]any{cliproxyexecutor.RequestedModelMetadataKey: "public-alias"}}
+	if mode == "claude" {
+		req.Payload = []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`)
+		opts.SourceFormat = sdktranslator.FormatClaude
+	}
+	call := func() error {
+		if strings.HasPrefix(mode, "stream") {
+			callCtx := ctx
+			var finishDelivery func(error)
+			if delayStreamUsage {
+				callCtx, finishDelivery = usage.WithStreamDelivery(ctx)
+			}
+			beforeCalls := calls
+			result, errStream := manager.ExecuteStream(callCtx, []string{"antigravity"}, req, opts)
+			if errStream == nil && result != nil {
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						errStream = chunk.Err
+					}
+				}
+			}
+			if finishDelivery != nil {
+				if calls > beforeCalls {
+					timer := time.AfterFunc(25*time.Millisecond, func() { finishDelivery(nil) })
+					t.Cleanup(func() {
+						timer.Stop()
+						finishDelivery(nil)
+					})
+				} else {
+					finishDelivery(nil)
+				}
+			}
+			return errStream
+		}
+		_, errExecute := manager.Execute(ctx, []string{"antigravity"}, req, opts)
+		return errExecute
+	}
+	capture := &antigravityUsageCapture{authID: auth.ID, records: make(chan usage.Record, 8)}
+	usage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() { usage.RegisterNamedPlugin(t.Name(), antigravityUsageNoop{}) })
+	if errCall := call(); errCall == nil || calls != 1 {
+		t.Fatalf("upstream failure: calls=%d err=%v", calls, errCall)
+	}
+	records := waitThinkingGroupUsage(t, capture, 1)
+	if len(records) != 1 || !records[0].Failed || records[0].Model != wantModel || records[0].Alias != "public-alias" || records[0].Fail.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("503 usage = %+v, want one %s failure preserving the alias", records, wantModel)
+	}
+	current, _ := manager.GetByID(auth.ID)
+	state := current.ModelStates[wantModel]
+	if len(current.ModelStates) != 1 || state == nil || state.LastError == nil || state.LastError.HTTPStatus != http.StatusServiceUnavailable || !state.NextRetryAfter.After(time.Now()) {
+		t.Errorf("503 model states = %+v, want only %s cooling", current.ModelStates, wantModel)
+	}
+	errBlocked := call()
+	if errBlocked == nil || calls != 1 {
+		t.Errorf("pre-existing target cooldown did not prevent a second upstream attempt: calls=%d err=%v", calls, errBlocked)
+	}
+	if mode != "no-groups" {
+		var hint interface{ RetryAfter() *time.Duration }
+		if !errors.As(errBlocked, &hint) || hint.RetryAfter() == nil || *hint.RetryAfter() <= 0 {
+			t.Errorf("blocked target did not supply a retry delay: %v", errBlocked)
+		}
+	}
+	if got := drainThinkingGroupUsage(t, capture); len(got) != 0 {
+		t.Errorf("preflight rejection published usage: %+v", got)
+	}
+	current, _ = manager.GetByID(auth.ID)
+	if state != nil && (len(current.ModelStates) != 1 || current.ModelStates[wantModel] == nil || !current.ModelStates[wantModel].NextRetryAfter.Equal(state.NextRetryAfter)) {
+		t.Errorf("preflight changed model cooldown: %+v", current.ModelStates)
+	}
+	if mode == "no-groups" {
+		return
+	}
+	manager.MarkResult(t.Context(), cliproxyauth.Result{AuthID: auth.ID, Provider: "antigravity", Model: low, CredentialVersion: auth.CredentialVersion, Success: true})
+	current, _ = manager.GetByID(auth.ID)
+	if lowState := current.ModelStates[low]; lowState == nil || lowState.Unavailable {
+		t.Fatalf("test failed to clear low before success: %+v", lowState)
+	}
+	readyForSuccess = true
+	if errCall := call(); errCall != nil || calls != 2 {
+		t.Fatalf("successful retry: calls=%d err=%v", calls, errCall)
+	}
+	current, _ = manager.GetByID(auth.ID)
+	if state := current.ModelStates[high]; highCooldown.IsZero() || state == nil || !state.NextRetryAfter.Equal(highCooldown) {
+		t.Errorf("successful low attempt cleared or changed high cooldown: %+v", state)
+	}
+	if got := waitThinkingGroupUsage(t, capture, 1); len(got) != 1 || got[0].Failed || got[0].Model != low || got[0].Alias != "public-alias" {
+		t.Errorf("success usage = %+v, want one %s success preserving the alias", got, low)
 	}
 }
 
@@ -586,9 +617,25 @@ func TestAntigravityThinkingGroupsReviewHomeCooldownAndUsage(t *testing.T) {
 	if got := drainThinkingGroupUsage(t, blockedCapture); len(got) != 0 {
 		t.Errorf("blocked Home credential emitted usage: %+v", got)
 	}
-	if got := drainThinkingGroupUsage(t, nextCapture); len(got) != 1 || !got[0].Failed || got[0].Model != reviewLow || got[0].Alias != "public-alias" || got[0].Fail.StatusCode != http.StatusServiceUnavailable {
+	if got := waitThinkingGroupUsage(t, nextCapture, 1); len(got) != 1 || !got[0].Failed || got[0].Model != reviewLow || got[0].Alias != "public-alias" || got[0].Fail.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("Home usage = %+v, want one real low failure preserving caller alias", got)
 	}
+}
+
+func waitThinkingGroupUsage(t *testing.T, capture *antigravityUsageCapture, minRecords int) []usage.Record {
+	t.Helper()
+	var out []usage.Record
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for len(out) < minRecords {
+		select {
+		case record := <-capture.records:
+			out = append(out, record)
+		case <-timeout.C:
+			t.Fatalf("usage queue produced %d/%d expected records before timeout", len(out), minRecords)
+		}
+	}
+	return append(out, drainThinkingGroupUsage(t, capture)...)
 }
 
 func drainThinkingGroupUsage(t *testing.T, capture *antigravityUsageCapture) []usage.Record {
@@ -668,5 +715,163 @@ func TestAntigravityThinkingGroupsReviewRefusalPrecedesTokenRefresh(t *testing.T
 	var part *translatorcommon.UnsupportedPartError
 	if !errors.As(errExecute, &part) {
 		t.Fatalf("expected translation refusal without refresh, got %v", errExecute)
+	}
+}
+
+func TestAntigravityThinkingGroupsReviewClaudeCreditsFallbackCachedFinal5m(t *testing.T) {
+	const group = "claude-credits-final5m"
+	const high, low = group + "-high", group + "-low"
+	const quotaError = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exhausted","details":[{"reason":"QUOTA_EXHAUSTED"}]}}`
+	const rateLimitError = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}`
+	const capacityError = `{"error":{"code":503,"status":"UNAVAILABLE","details":[{"reason":"MODEL_CAPACITY_EXHAUSTED"}]}}`
+	const success = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"recovered"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
+
+	for _, tc := range []struct {
+		name       string
+		stream     bool
+		state      func(deadline time.Time) *cliproxyauth.ModelState
+		wantCredit bool
+	}{
+		{
+			name:       "switched-quota-final-3m-execute",
+			wantCredit: true,
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					Quota:          cliproxyauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+					LastError: &cliproxyauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    quotaError,
+						Metadata:   map[string]string{"antigravity_credits_retry_hint_ns": strconv.FormatInt(int64(5*time.Hour), 10)},
+					},
+				}
+			},
+		},
+		{
+			name:       "switched-quota-final-3m-stream",
+			stream:     true,
+			wantCredit: true,
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					Quota:          cliproxyauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+					LastError: &cliproxyauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    quotaError,
+						Metadata:   map[string]string{"antigravity_credits_retry_hint_ns": strconv.FormatInt(int64(5*time.Hour), 10)},
+					},
+				}
+			},
+		},
+		{
+			name: "switched-short-rate-limit-cached",
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					Quota:          cliproxyauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+					LastError: &cliproxyauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    rateLimitError,
+						Metadata:   map[string]string{"antigravity_credits_retry_hint_ns": strconv.FormatInt(int64(45*time.Second), 10)},
+					},
+				}
+			},
+		},
+		{
+			name: "switched-non-quota-cooldown-cached",
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					LastError:      &cliproxyauth.Error{HTTPStatus: http.StatusServiceUnavailable, Message: capacityError},
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := newIssue7865TestAuth(t.Name())
+			attempts := make(chan string, 4)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1internal:loadCodeAssist" {
+					_, _ = io.WriteString(w, `{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"100","minimumCreditAmountForUsage":"50"}]}}`)
+					return
+				}
+				body, errRead := io.ReadAll(r.Body)
+				if errRead != nil || r.URL.Path != antigravityStreamPath || ojson.GetBytes(body, "model").Str != low {
+					t.Errorf("unexpected Claude request: path=%s body=%s err=%v", r.URL.Path, body, errRead)
+				}
+				attempts <- ojson.GetBytes(body, "enabledCreditTypes.0").Str
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: "+success+"\n\n")
+			}))
+			t.Cleanup(server.Close)
+			auth.Attributes = map[string]string{"base_url": server.URL}
+			auth.ModelStates = map[string]*cliproxyauth.ModelState{low: tc.state(time.Now().Add(3 * time.Minute))}
+
+			cfg := &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}
+			e := NewAntigravityExecutor(cfg)
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(0, 0, 1)
+			manager.RegisterExecutor(e)
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: high}, {ID: low}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			registered, errRegister := manager.Register(t.Context(), auth)
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			if !manager.StoreAntigravityModelCatalog(t.Context(), registered, map[string]string{high: "HIGH", low: "LOW"}, map[string]map[string]int{group: {"low": 50000, "high": 60000}}, nil) {
+				t.Fatal("failed to publish catalog")
+			}
+			cliproxyauth.SetAntigravityCreditsHintForAuth(registered, cliproxyauth.AntigravityCreditsHint{Known: true, Available: true, UpdatedAt: time.Now()})
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHintForAuth(registered, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			req := cliproxyexecutor.Request{Model: high, Payload: []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+			var payload []byte
+			var errExecute error
+			if tc.stream {
+				var result *cliproxyexecutor.StreamResult
+				result, errExecute = manager.ExecuteStream(t.Context(), []string{"antigravity"}, req, opts)
+				if errExecute == nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							errExecute = chunk.Err
+						}
+						payload = append(payload, chunk.Payload...)
+					}
+				}
+			} else {
+				var resp cliproxyexecutor.Response
+				resp, errExecute = manager.Execute(t.Context(), []string{"antigravity"}, req, opts)
+				payload = resp.Payload
+			}
+
+			if tc.wantCredit {
+				if errExecute != nil || !strings.Contains(string(payload), "recovered") || len(attempts) != 1 {
+					t.Fatalf("expected credits recovery during final 3m cooldown, got err=%v calls=%d", errExecute, len(attempts))
+				}
+				if gotCredit := <-attempts; gotCredit != "GOOGLE_ONE_AI" {
+					t.Fatalf("enabledCreditTypes.0 = %q, want GOOGLE_ONE_AI", gotCredit)
+				}
+				return
+			}
+
+			var status interface{ StatusCode() int }
+			if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusTooManyRequests || len(attempts) != 0 {
+				t.Fatalf("expected cooldown rejection without credits attempt, got err=%v calls=%d", errExecute, len(attempts))
+			}
+		})
 	}
 }
