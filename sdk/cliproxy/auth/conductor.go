@@ -45,6 +45,13 @@ type RequestAuthPreparer interface {
 	PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error)
 }
 
+// HomePluginRequestAuthPreparer lets a credential provider also prepare auth
+// that a Home-selected plugin will consume without running the provider executor.
+type HomePluginRequestAuthPreparer interface {
+	RequestAuthPreparer
+	ShouldPrepareHomePluginRequestAuth(auth *Auth) bool
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -218,7 +225,8 @@ type Manager struct {
 	authChangeWatchers map[string]map[chan struct{}]struct{}
 	scheduler          *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
-	pluginScheduler PluginScheduler
+	pluginScheduler     PluginScheduler
+	homePluginExecutors HomePluginExecutorResolver
 	// continuityClock overrides time.Now and timer waiting in unit tests.
 	continuityClock continuityClock
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
@@ -246,8 +254,8 @@ type Manager struct {
 	// apiKeyModelRouting atomically publishes per-auth aliases and configured capabilities.
 	apiKeyModelRouting atomic.Value
 
-	// modelPoolOffsets tracks per-auth alias pool rotation state.
-	modelPoolOffsets map[string]int
+	// modelPoolOffsets tracks per-auth alias pool rotation state keyed by auth ID and pool key.
+	modelPoolOffsets map[string]map[string]int
 
 	// runtimeConfig stores the latest application config for request-time decisions.
 	// It is initialized in NewManager; never Load() before first Store().
@@ -304,7 +312,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
 		homePrepareFlights:    make(map[string]*homeAuthPrepareFlight),
 		providerOffsets:       make(map[string]int),
-		modelPoolOffsets:      make(map[string]int),
+		modelPoolOffsets:      make(map[string]map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
