@@ -1562,6 +1562,11 @@ plugins:
 # truncating responses. Default: false.
 #kiro-extract-thinking-tag-enable: true
 
+# Optional global Kiro IDE request fingerprint override.
+# Useful if upstream raises the minimum accepted KiroIDE version before a proxy release.
+#kiro-fingerprint:
+#  kiro-version: "1.5.49"
+
 # Kilocode (OAuth-based code assistant)
 # Note: Kilocode uses OAuth device flow authentication.
 # Use the CLI command: ./server --kilo-login

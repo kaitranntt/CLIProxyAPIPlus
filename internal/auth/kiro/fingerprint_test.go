@@ -3,6 +3,7 @@ package kiro
 import (
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -450,15 +451,48 @@ func TestSDKVersionsAreValid(t *testing.T) {
 }
 
 func TestKiroVersionsAreValid(t *testing.T) {
-	// Verify all Kiro versions match expected format (0.x.xxx)
+	if len(kiroVersions) == 0 {
+		t.Fatal("expected non-empty kiroVersions")
+	}
+
+	// Verify all Kiro versions are valid semver >= 1.4.121 (rejecting legacy 0.x versions).
 	for _, v := range kiroVersions {
-		if !strings.HasPrefix(v, "0.") {
-			t.Errorf("Kiro version should start with 0.: %s", v)
-		}
 		parts := strings.Split(v, ".")
 		if len(parts) != 3 {
-			t.Errorf("Kiro version should have 3 parts: %s", v)
+			t.Fatalf("Kiro version should have 3 parts: %s", v)
 		}
+		major, errMajor := strconv.Atoi(parts[0])
+		minor, errMinor := strconv.Atoi(parts[1])
+		patch, errPatch := strconv.Atoi(parts[2])
+		if errMajor != nil || errMinor != nil || errPatch != nil {
+			t.Fatalf("Kiro version should have numeric semver parts: %s", v)
+		}
+		if major < 1 || (major == 1 && (minor < 4 || (minor == 4 && patch < 121))) {
+			t.Errorf("Kiro version %s is below minimum supported 1.4.121", v)
+		}
+	}
+}
+
+func TestFingerprint_DefaultKiroVersionHeader(t *testing.T) {
+	fm := NewFingerprintManager()
+	fp := fm.GetFingerprint("account-1")
+	if !strings.HasPrefix(fp.KiroVersion, "1.") {
+		t.Fatalf("expected default KiroVersion to be 1.x, got %q", fp.KiroVersion)
+	}
+	if !strings.Contains(fp.BuildUserAgent(), "KiroIDE-"+fp.KiroVersion+"-") {
+		t.Errorf("BuildUserAgent() = %q missing KiroIDE-%s-", fp.BuildUserAgent(), fp.KiroVersion)
+	}
+	if !strings.Contains(fp.BuildAmzUserAgent(), "KiroIDE-"+fp.KiroVersion+"-") {
+		t.Errorf("BuildAmzUserAgent() = %q missing KiroIDE-%s-", fp.BuildAmzUserAgent(), fp.KiroVersion)
+	}
+
+	fm.SetConfig(&FingerprintConfig{KiroVersion: "1.9.99"})
+	overridden := fm.GetFingerprint("account-1")
+	if overridden.KiroVersion != "1.9.99" {
+		t.Fatalf("expected overridden KiroVersion 1.9.99, got %q", overridden.KiroVersion)
+	}
+	if !strings.Contains(overridden.BuildUserAgent(), "KiroIDE-1.9.99-") {
+		t.Errorf("BuildUserAgent() = %q missing overridden KiroIDE-1.9.99-", overridden.BuildUserAgent())
 	}
 }
 

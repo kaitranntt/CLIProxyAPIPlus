@@ -512,6 +512,16 @@ func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 		keyPrefix+"...", fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 }
 
+func isKiroUnsupportedClientVersionError(body string) bool {
+	if !strings.Contains(body, "FEATURE_NOT_SUPPORTED") {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "version of kiro") ||
+		strings.Contains(lower, "no longer supported") ||
+		strings.Contains(lower, "update to the latest version")
+}
+
 // PrepareRequest prepares the HTTP request before execution.
 func (e *KiroExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
@@ -918,6 +928,12 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)
 					log.Errorf("kiro: account is suspended, token %s set to cooldown for %v", tokenKey, kiroauth.LongCooldown)
 					return resp, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
+				}
+
+				if isKiroUnsupportedClientVersionError(respBodyStr) {
+					fp := kiroauth.GlobalFingerprintManager().GetFingerprint(getAccountKey(auth))
+					log.Errorf("kiro: upstream rejected KiroIDE client version %q (403 FEATURE_NOT_SUPPORTED); update CLIProxyAPIPlus or set kiro-fingerprint.kiro-version in config.yaml", fp.KiroVersion)
+					return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 				}
 
 				// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)
@@ -1360,6 +1376,12 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)
 					log.Errorf("kiro: stream account is suspended, token %s set to cooldown for %v", tokenKey, kiroauth.LongCooldown)
 					return nil, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
+				}
+
+				if isKiroUnsupportedClientVersionError(respBodyStr) {
+					fp := kiroauth.GlobalFingerprintManager().GetFingerprint(getAccountKey(auth))
+					log.Errorf("kiro: stream upstream rejected KiroIDE client version %q (403 FEATURE_NOT_SUPPORTED); update CLIProxyAPIPlus or set kiro-fingerprint.kiro-version in config.yaml", fp.KiroVersion)
+					return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 				}
 
 				// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)

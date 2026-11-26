@@ -70,11 +70,10 @@ var (
 		"22.21.1", "22.21.0", "22.20.0", "22.19.0", "22.18.0",
 		"20.18.0", "20.17.0", "20.16.0",
 	}
-	// Kiro IDE versions
+	// Kiro IDE versions (1.x stable releases)
 	kiroVersions = []string{
-		"0.10.32", "0.10.16", "0.10.10",
-		"0.9.47", "0.9.40", "0.9.2",
-		"0.8.206", "0.8.140", "0.8.135", "0.8.86",
+		"1.5.49", "1.5.44", "1.5.37", "1.5.11",
+		"1.4.121",
 	}
 	// Global singleton
 	globalFingerprintManager     *FingerprintManager
