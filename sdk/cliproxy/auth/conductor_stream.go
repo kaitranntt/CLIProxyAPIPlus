@@ -432,6 +432,62 @@ func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth
 	m.recordExecutionResult(context.WithoutCancel(ctx), result, auth, ephemeral)
 }
 
+func shouldRecordCanceledStreamError(err error) bool {
+	return isRequestScopedError(err) || strings.EqualFold(errorCodeFromError(err), ErrorCodeTransientTransport)
+}
+
+func (m *Manager) recordStreamChunkFailure(ctx, recordCtx context.Context, auth *Auth, provider, resultModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, ephemeralResult bool, executionSeq uint64, streamStart time.Time, err error) (string, bool) {
+	entry := logEntryWithRequestID(ctx)
+	warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), err)
+	rerr := resultErrorFromError(err)
+	action, okAction := matchRequestScopedErrorAction(auth, err, m.requestScopedErrorConfig(ctx))
+	result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+	result.RetryAfter = retryAfterFromError(err)
+	result.CredentialScope = isCredentialScopedError(err)
+	applyRequestScopedActionToResult(action, okAction, &result)
+	m.recordExecutionResult(recordCtx, result, auth, ephemeralResult)
+	return action, okAction
+}
+
+// drainCanceledStreamChunks drains remaining after ctx cancellation when the
+// stream has not already failed, recording the first terminal RetryAfter,
+// request-scoped, or explicit transient_transport error emitted during
+// executor unwind without blocking the producer or recording duplicate results.
+func (m *Manager) drainCanceledStreamChunks(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, ephemeralResult bool, executionSeq uint64, streamStart time.Time, alreadyFailed bool, remaining <-chan cliproxyexecutor.StreamChunk) {
+	if remaining == nil {
+		return
+	}
+	if alreadyFailed {
+		discardStreamChunks(remaining)
+		return
+	}
+	go func() {
+		recorded := false
+		for chunk := range remaining {
+			if recorded || chunk.Err == nil {
+				continue
+			}
+			recorded = true
+			if m == nil || auth == nil {
+				continue
+			}
+			if retryAfterFromError(chunk.Err) != nil {
+				m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, opts, chunk.Err, ephemeralResult, executionSeq)
+				continue
+			}
+			if shouldRecordCanceledStreamError(chunk.Err) {
+				recordCtx := ctx
+				if recordCtx != nil {
+					recordCtx = context.WithoutCancel(recordCtx)
+				} else {
+					recordCtx = context.Background()
+				}
+				m.recordStreamChunkFailure(ctx, recordCtx, auth, provider, resultModel, routeModel, opts, accessToken, ephemeralResult, executionSeq, streamStart, chunk.Err)
+			}
+		}
+	}()
+}
+
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options, executionSeq uint64, cleanups ...func()) *cliproxyexecutor.StreamResult {
 	return m.wrapStreamResultWithCancel(ctx, auth, provider, resultModel, routeModel, headers, buffered, remaining, aliasResult, ephemeralResult, opts, executionSeq, nil, cleanups...)
 }
@@ -461,27 +517,23 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 		}
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					if retryAfterFromError(chunk.Err) != nil {
-						m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, opts, chunk.Err, ephemeralResult, executionSeq)
-						failed = true
-						return false
-					}
-					if !isRequestScopedError(chunk.Err) {
-						failed = true
-						return false
+				recordCtx := ctx
+				if ctx != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						if retryAfterFromError(chunk.Err) != nil {
+							m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, opts, chunk.Err, ephemeralResult, executionSeq)
+							failed = true
+							return false
+						}
+						if !shouldRecordCanceledStreamError(chunk.Err) {
+							failed = true
+							return false
+						}
+						recordCtx = context.WithoutCancel(ctx)
 					}
 				}
 				failed = true
-				entry := logEntryWithRequestID(ctx)
-				warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), chunk.Err)
-				rerr := resultErrorFromError(chunk.Err)
-				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.requestScopedErrorConfig(ctx))
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
-				result.RetryAfter = retryAfterFromError(chunk.Err)
-				result.CredentialScope = isCredentialScopedError(chunk.Err)
-				applyRequestScopedActionToResult(action, okAction, &result)
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				action, okAction := m.recordStreamChunkFailure(ctx, recordCtx, auth, provider, resultModel, routeModel, opts, accessToken, ephemeralResult, executionSeq, streamStart, chunk.Err)
 				if okAction && !isRequestTerminatedError(chunk.Err) && !isRequestStopError(chunk.Err) && !isTOSViolationError(chunk.Err) {
 					if isRequestScopedStop(action, okAction) {
 						chunk.Err = wrapRequestStopError(chunk.Err)
@@ -555,7 +607,7 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 				if cancelAttempt != nil {
 					cancelAttempt()
 				}
-				discardStreamChunks(remaining)
+				m.drainCanceledStreamChunks(ctx, auth, provider, resultModel, routeModel, opts, accessToken, ephemeralResult, executionSeq, streamStart, failed, remaining)
 				return
 			}
 		}
@@ -575,7 +627,7 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 						if cancelAttempt != nil {
 							cancelAttempt()
 						}
-						discardStreamChunks(remaining)
+						m.drainCanceledStreamChunks(ctx, auth, provider, resultModel, routeModel, opts, accessToken, ephemeralResult, executionSeq, streamStart, failed, remaining)
 						return
 					case chunk, open = <-remaining:
 					}
@@ -593,7 +645,7 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 				if cancelAttempt != nil {
 					cancelAttempt()
 				}
-				discardStreamChunks(remaining)
+				m.drainCanceledStreamChunks(ctx, auth, provider, resultModel, routeModel, opts, accessToken, ephemeralResult, executionSeq, streamStart, failed, remaining)
 				return
 			}
 		}
