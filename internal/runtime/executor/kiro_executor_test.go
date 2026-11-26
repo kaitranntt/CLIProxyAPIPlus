@@ -690,3 +690,45 @@ func TestKiroContextUsageFallbackAppliesWhenPreciseTokenUsageMissing(t *testing.
 		t.Fatalf("TotalTokens = %d, want 100003", detail.TotalTokens)
 	}
 }
+
+func TestIsKiroUnsupportedClientVersionError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "matches upstream Kiro version rejection",
+			body: `{"message":"This version of Kiro is no longer supported. Please update to the latest version of Kiro to continue.","reason":"FEATURE_NOT_SUPPORTED"}`,
+			want: true,
+		},
+		{
+			name: "ignores unrelated FEATURE_NOT_SUPPORTED",
+			body: `{"message":"Requested capability is disabled for this tier.","reason":"FEATURE_NOT_SUPPORTED"}`,
+			want: false,
+		},
+		{
+			name: "ignores suspended account error",
+			body: `{"message":"Account SUSPENDED","reason":"ACCESS_DENIED"}`,
+			want: false,
+		},
+		{
+			name: "ignores token expired error",
+			body: `{"message":"The bearer token has expired","reason":"UNAUTHORIZED"}`,
+			want: false,
+		},
+		{
+			name: "ignores empty body",
+			body: "",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isKiroUnsupportedClientVersionError(tt.body); got != tt.want {
+				t.Fatalf("isKiroUnsupportedClientVersionError(%q) = %v, want %v", tt.body, got, tt.want)
+			}
+		})
+	}
+}
